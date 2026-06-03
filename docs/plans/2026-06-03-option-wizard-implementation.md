@@ -46,7 +46,7 @@
 │       ├── data-sources.md
 │       ├── strategies.md
 │       ├── gamma-framework.md
-│       ├── tape-framework.md
+│       ├── price-action-framework.md
 │       ├── fcn-framework.md
 │       ├── execution.md
 │       ├── pitfalls/
@@ -291,7 +291,7 @@ See `references/` for the full domain knowledge:
 - `references/data-sources.md` — UW / TV / IB call playbook
 - `references/strategies.md` — regime × structure matrix
 - `references/gamma-framework.md` — GEX, gamma flip, put/call wall reading
-- `references/tape-framework.md` — TradingView chart and tape signals
+- `references/price-action-framework.md` — TradingView chart, indicators, tape signals
 - `references/fcn-framework.md` — FCN payoff, fair coupon, 8-item PB checklist
 - `references/execution.md` — IB pre-flight, bracket orders, 21 DTE rule
 - `references/pitfalls/` — accumulated trading mistakes (start empty)
@@ -1758,10 +1758,12 @@ git commit -m "docs(refs): GEX reading guide and level definitions"
 
 ---
 
-### Task 3.4: `references/tape-framework.md`
+### Task 3.4: `references/price-action-framework.md`
+
+This filename mirrors the trade-skills layout convention (price-action, not tape) for 1:1 structural parity.
 
 **Files:**
-- Create: `plugins/option-wizard/skills/option-wizard/references/tape-framework.md`
+- Create: `plugins/option-wizard/skills/option-wizard/references/price-action-framework.md`
 
 - [ ] **Step 1: Write the file**
 
@@ -1776,8 +1778,8 @@ Content covers:
 - [ ] **Step 2: Commit**
 
 ```bash
-git add plugins/option-wizard/skills/option-wizard/references/tape-framework.md
-git commit -m "docs(refs): TradingView tape-reading playbook"
+git add plugins/option-wizard/skills/option-wizard/references/price-action-framework.md
+git commit -m "docs(refs): TradingView price-action and tape playbook"
 ```
 
 ---
@@ -2351,9 +2353,14 @@ git commit -m "feat(ib): order construction with rejection clauses and pre-fligh
 
 ---
 
-### Task 4.3: Paper-account verification of `create_order_instruction`
+### Task 4.3: Paper-account verification of `create_order_instruction` AND `ib_insync.placeOrder`
 
-**Goal:** Resolve spec §13 open items #1 and #2 — confirm whether IB MCP's `create_order_instruction` is pending-approval or live submission, and whether OCA groups are supported.
+**Goal:** Resolve spec §13 open items #1 and #2 — confirm two separate behaviors:
+
+1. **MCP path** (`mcp__claude_ai_Interactive_Brokers_IBKR__create_order_instruction`) — verify whether it creates a pending-approval instruction or submits live.
+2. **Python path** (`scripts._clients.ib.IBClient.place_order` which wraps `ib_insync.IB.placeOrder`) — this is known to submit live (no approval step). The pre-flight `YES/NO` in `build_preflight` is therefore the only safety gate for the Python path.
+
+Both paths exist in the design: the LLM in-session may use the MCP, while the daily hook uses the Python path. Each must be verified on paper before any live order.
 
 **Files:**
 - Create: `tests/integration/test_ib_paper_smoke.py`
@@ -2374,7 +2381,7 @@ Before option-wizard places live orders, verify two assumptions on a paper accou
 - Open TWS or IB Gateway in paper account mode (port 7497 for TWS paper).
 - Run `mcp__claude_ai_Interactive_Brokers_IBKR__get_account_summary` and confirm the account number begins with `D` (paper) or matches a known paper account.
 
-## Test A: Single-leg pending-approval check
+## Test A (MCP path): Single-leg pending-approval check
 
 Use the MCP to submit a small defined-risk trade. Example:
 
@@ -2384,18 +2391,26 @@ Use the MCP to submit a small defined-risk trade. Example:
 
 Then check whether the order appears in TWS as `Pre-Submit` / `Pending` (good) or `Filled` (bad). Document the observation.
 
-## Test B: OCA bracket support
+## Test B (MCP path): OCA bracket support
 
 After submitting the opening order, attempt to submit two child orders with the same `ocaGroup` field. If IB MCP accepts the field and TWS shows both as part of one OCA group, OCA is supported.
 
 If not supported, the fallback is in `scripts/manage_positions.py`: detect the fill of one bracket leg via daily polling and submit a cancel for the other.
 
+## Test C (Python path): ib_insync behavior
+
+The Python `IBClient.place_order` wrapping `ib_insync.IB.placeOrder` is known to submit live with no approval step. Verify on paper that:
+
+- An order placed via `IBClient.place_order` shows up immediately in TWS as `PreSubmitted` → `Submitted` (filled if liquid) without any user approval prompt.
+- The safety implication: `scripts/ib_order.py` must enforce the `YES/NO` pre-flight gate before ever calling `IBClient.place_order`. There is no second chance.
+
 ## Outcome
 
 Record findings inline below and reference from `scripts/ib_order.py` and `references/execution.md`.
 
-- [ ] `create_order_instruction` is pending-approval: YES / NO / partial
-- [ ] OCA groups supported: YES / NO
+- [ ] (MCP) `create_order_instruction` is pending-approval: YES / NO / partial
+- [ ] (MCP) OCA groups supported: YES / NO
+- [ ] (Python) `ib_insync.placeOrder` submits live with no approval: YES / NO
 - [ ] Fallback documented in `manage_positions.py`: YES / NO
 ```
 
@@ -2857,7 +2872,9 @@ from scripts.evaluate_position import evaluate_short_premium, SHORT_PREMIUM_STRU
 
 def _position_key(pos: Any) -> str:
     c = pos.contract
-    return f"{c.symbol} {int(c.strike)} {c.right} {c.lastTradeDateOrContractMonth}"
+    # Preserve fractional strikes (weekly $252.50 etc.) — int() would silently truncate.
+    strike_str = f"{c.strike:g}"
+    return f"{c.symbol} {strike_str} {c.right} {c.lastTradeDateOrContractMonth}"
 
 
 def _infer_structure(pos: Any) -> str:
@@ -2909,6 +2926,41 @@ def scan_positions(positions: list, market: dict[str, dict], today: str) -> list
     return rows
 
 
+def _fetch_market_data(ib: Any, positions: list) -> dict[str, dict]:
+    """Pull mid price, delta, DTE for every option position via ib_insync.
+
+    Uses reqMktData with snapshot=False to get a streaming subscription, then
+    waits up to 3 seconds for greek+price fields to populate. Returns a dict
+    keyed by `_position_key(pos)`.
+    """
+    from datetime import datetime as _dt
+    market = {}
+    pending = []
+    for pos in positions:
+        ticker = ib._ib.reqMktData(pos.contract, genericTickList="", snapshot=False)
+        pending.append((pos, ticker))
+    ib._ib.sleep(3)  # let market data populate
+    for pos, t in pending:
+        c = pos.contract
+        try:
+            expiry = _dt.strptime(c.lastTradeDateOrContractMonth, "%Y%m%d").date()
+            dte = (expiry - _dt.utcnow().date()).days
+        except Exception:
+            dte = 0
+        mid = None
+        if t.bid is not None and t.ask is not None and t.bid > 0 and t.ask > 0:
+            mid = (t.bid + t.ask) / 2
+        elif t.last is not None:
+            mid = t.last
+        delta = getattr(t.modelGreeks, "delta", 0.0) if t.modelGreeks else 0.0
+        market[_position_key(pos)] = {
+            "current_price": mid or 0.0,
+            "delta": delta,
+            "dte": dte,
+        }
+    return market
+
+
 def format_scan_report(rows: list[dict]) -> str:
     if not rows:
         return "Daily position scan: no positions found (0 positions). No action needed."
@@ -2936,9 +2988,7 @@ def main(argv: list[str] | None = None) -> int:
     from scripts._clients.ib import IBClient
     with IBClient(port=args.port) as ib:
         positions = ib.get_positions()
-        # market data for each position: in v1 the LLM in-session can supply
-        # this; for the autonomous run we fetch live snapshots.
-        market = {}  # TODO: fetch live option quotes via ib_insync reqMktData
+        market = _fetch_market_data(ib, positions)
         rows = scan_positions(positions, market, today=str(datetime.utcnow().date()))
         report = format_scan_report(rows)
     print(report)
@@ -3003,7 +3053,8 @@ def test_butterfly_for_mild_correction_target():
         snapshot=SPX_SNAPSHOT,
     )
     assert result["structure"] == "put_butterfly"
-    assert len(result["legs"]) == 4
+    # standard put butterfly = 3 legs (long upper / 2 short body / long lower)
+    assert len(result["legs"]) == 3
     # body strike should be at SPX × 0.95
     body_strike = [l["strike"] for l in result["legs"] if l["qty"] == 2][0]
     assert body_strike == pytest.approx(SPX_SNAPSHOT["spot"] * 0.95, abs=1)
@@ -3101,6 +3152,12 @@ def _bs_put(spot: float, strike: float, t_years: float, r: float, sigma: float) 
 
 
 def _butterfly(spot: float, t_years: float, iv: float, qty: int) -> list[dict]:
+    """Standard 3-leg put butterfly centered at body strike.
+
+    Long 1× upper put, short 2× body put, long 1× lower put. Max payout
+    when underlying lands at the body strike at expiry. Defined risk:
+    net premium paid is the maximum loss.
+    """
     body = spot * 0.95
     wing_up = spot * 0.98
     wing_dn = spot * 0.92
@@ -3111,8 +3168,6 @@ def _butterfly(spot: float, t_years: float, iv: float, qty: int) -> list[dict]:
          "limit_price": _bs_put(spot, body, t_years, 0.04, iv)},
         {"right": "put", "action": "buy",  "strike": wing_dn, "qty": qty,
          "limit_price": _bs_put(spot, wing_dn, t_years, 0.04, iv)},
-        {"right": "put", "action": "sell", "strike": wing_dn * 0.98, "qty": 0,  # placeholder for 4-leg fly
-         "limit_price": 0.0},
     ]
 
 

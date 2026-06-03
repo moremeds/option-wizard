@@ -109,7 +109,7 @@ The IB MCP is the only source allowed to write state. It also fills gaps on the 
 │       ├── data-sources.md                    UW MCP / TV / IB MCP playbook
 │       ├── strategies.md                      Regime ↔ structure matrix
 │       ├── gamma-framework.md                 GEX reading guide
-│       ├── tape-framework.md                  TV-based tape reading
+│       ├── price-action-framework.md          TV-based tape reading
 │       ├── fcn-framework.md                   FCN payoff, fair coupon math, PB checklist
 │       ├── execution.md                       IB order flow, brackets, 21 DTE rule
 │       ├── pitfalls/
@@ -364,6 +364,7 @@ These were left intentionally for the implementation plan to resolve:
 6. Default short-leg delta target for Sell Put / Bull Put Spread (suggested: −0.25 unless overridden).
 7. Whether to publish to a GitHub repo for multi-machine sync via `npx skills add`.
 8. Confirm the Gmail sender address and generate the App Password before the email hook is enabled. Sender address and password are not part of the repo.
+9. Macro hedge Black-Scholes pricer omits dividend yield `q`. Negligible for SPX cash-settled index (~0% effective yield), but for SPY (~1.3% trailing yield) put values are slightly overpriced. Add `q` parameter if SPY becomes the default underlying.
 
 ## 14. Acceptance Criteria for v1
 
