@@ -82,6 +82,55 @@ def test_analyze_fcn_with_quoted_coupon_returns_verdict():
     assert rung["verdict"] in {"fair", "rich", "cheap"}
 
 
+def test_analyze_fcn_surfaces_top_level_verdict_at_anchor_strike():
+    # SKILL.md hard rule #5: "FCN output is ... a fair vs quoted verdict".
+    # Top-level verdict mirrors the rung closest to the 75% anchor strike
+    # (FCN industry default); anchor_strike_pct is reported so the caller
+    # knows which rung drove the verdict.
+    snapshot = {
+        "spot": 244.58,
+        "iv": 0.804,
+        "rv": 0.610,
+        "iv_rank": 91,
+        "skew_25d": -0.20,
+        "max_drawdown_5y": -0.582,
+        "gex_levels": {"gamma_flip": 192.5, "put_wall": 240.0, "call_wall": 250.0},
+    }
+    result = analyze_fcn(
+        ticker="ORCL",
+        strike_pcts=[0.70, 0.75, 0.80, 0.85],
+        tenor_months=6,
+        observation_months=3,
+        pb_quoted_coupon=0.18,
+        snapshot=snapshot,
+    )
+    assert result["anchor_strike_pct"] == 0.75
+    anchor_rung = next(r for r in result["ladder"] if r["strike_pct"] == 0.75)
+    assert result["verdict"] == anchor_rung["verdict"]
+    assert result["verdict"] in {"fair", "rich", "cheap"}
+
+
+def test_analyze_fcn_top_level_verdict_none_when_no_quoted_coupon():
+    snapshot = {
+        "spot": 244.58,
+        "iv": 0.804,
+        "rv": 0.610,
+        "iv_rank": 91,
+        "skew_25d": -0.20,
+        "max_drawdown_5y": -0.582,
+        "gex_levels": {"gamma_flip": 192.5, "put_wall": 240.0, "call_wall": 250.0},
+    }
+    result = analyze_fcn(
+        ticker="ORCL",
+        strike_pcts=[0.70, 0.75, 0.80, 0.85],
+        tenor_months=6,
+        observation_months=3,
+        snapshot=snapshot,
+    )
+    assert result["verdict"] is None
+    assert result["anchor_strike_pct"] == 0.75
+
+
 def test_analyze_fcn_checklist_flags_below_flip_strike():
     snapshot = {
         "spot": 244.58,
@@ -188,42 +237,70 @@ def test_counter_offer_email_contains_chinese_and_english_sections():
 
 # --- Task 2.4: basket FCN ---
 import numpy as np
-from scripts.fair_coupon import joint_ki_prob_mc, analyze_fcn_basket
+from scripts.fair_coupon import analyze_fcn_basket, joint_ki_prob_mc
 
 
 def test_joint_ki_prob_at_full_correlation_equals_single_name():
     p_either, _, _ = joint_ki_prob_mc(
-        vol_a=0.80, vol_b=0.80, rho=0.999,
-        barrier=0.50, days=252, n_sims=5000, seed=42,
+        vol_a=0.80,
+        vol_b=0.80,
+        rho=0.999,
+        barrier=0.50,
+        days=252,
+        n_sims=5000,
+        seed=42,
     )
     from scripts.fair_coupon import single_name_ki_prob
+
     single = single_name_ki_prob(0.80, 0.50, 252)
     assert abs(p_either - single) < 0.05
 
 
 def test_joint_ki_prob_low_correlation_higher_than_single():
     p_either, _, _ = joint_ki_prob_mc(
-        vol_a=0.40, vol_b=0.40, rho=0.0,
-        barrier=0.70, days=126, n_sims=5000, seed=42,
+        vol_a=0.40,
+        vol_b=0.40,
+        rho=0.0,
+        barrier=0.70,
+        days=126,
+        n_sims=5000,
+        seed=42,
     )
     from scripts.fair_coupon import single_name_ki_prob
+
     single = single_name_ki_prob(0.40, 0.70, 126)
     assert p_either > single
 
 
 def test_basket_analyze_returns_per_name_and_basket():
     snapshots = {
-        "INTC": {"spot": 109.33, "iv": 0.82, "rv": 1.01, "iv_rank": 76,
-                 "skew_25d": -0.15, "max_drawdown_5y": -0.643,
-                 "gex_levels": {"gamma_flip": 95.0, "put_wall": 100.0, "call_wall": 115.0}},
-        "AMD":  {"spot": 510.13, "iv": 0.70, "rv": 0.85, "iv_rank": 94,
-                 "skew_25d": -0.18, "max_drawdown_5y": -0.630,
-                 "gex_levels": {"gamma_flip": 460.0, "put_wall": 495.0, "call_wall": 520.0}},
+        "INTC": {
+            "spot": 109.33,
+            "iv": 0.82,
+            "rv": 1.01,
+            "iv_rank": 76,
+            "skew_25d": -0.15,
+            "max_drawdown_5y": -0.643,
+            "gex_levels": {"gamma_flip": 95.0, "put_wall": 100.0, "call_wall": 115.0},
+        },
+        "AMD": {
+            "spot": 510.13,
+            "iv": 0.70,
+            "rv": 0.85,
+            "iv_rank": 94,
+            "skew_25d": -0.18,
+            "max_drawdown_5y": -0.630,
+            "gex_levels": {"gamma_flip": 460.0, "put_wall": 495.0, "call_wall": 520.0},
+        },
     }
     corr = np.array([[1.0, 0.7], [0.7, 1.0]])
     result = analyze_fcn_basket(
-        tickers=["INTC", "AMD"], snapshots=snapshots, corr_matrix=corr,
-        strike_pct=0.55, tenor_months=6, observation_months=3,
+        tickers=["INTC", "AMD"],
+        snapshots=snapshots,
+        corr_matrix=corr,
+        strike_pct=0.55,
+        tenor_months=6,
+        observation_months=3,
     )
     assert "per_name" in result
     assert "basket" in result

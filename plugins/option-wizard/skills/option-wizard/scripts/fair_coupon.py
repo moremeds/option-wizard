@@ -326,6 +326,9 @@ def analyze_fcn(
             )
         ladder.append(rung)
 
+    anchor_rung = (
+        min(ladder, key=lambda r: abs(r["strike_pct"] - 0.75)) if ladder else None
+    )
     return {
         "ticker": ticker,
         "tenor_months": tenor_months,
@@ -335,6 +338,8 @@ def analyze_fcn(
         "iv": vol,
         "iv_rank": snapshot.get("iv_rank"),
         "ladder": ladder,
+        "anchor_strike_pct": anchor_rung["strike_pct"] if anchor_rung else None,
+        "verdict": anchor_rung.get("verdict") if anchor_rung else None,
     }
 
 
