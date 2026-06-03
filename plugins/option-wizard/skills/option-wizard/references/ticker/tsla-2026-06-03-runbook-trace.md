@@ -135,10 +135,6 @@ With TV online, the **4-signal bullish veto check** populated properly:
 **Count: 2 firm + 1 partial of 4. Threshold for veto is ≥3. No veto.**
 
 Plus:
-- **Watchlist signal**: TSLA is in **none** of the trader's organized lists
-  (`防御` defensive cluster, `青铜圣斗士` growth cluster). Neutral prior — no
-  manual conviction either way, consistent with treating TSLA as an income
-  trade (sell-premium) rather than a directional bet.
 - **Chart-state**: `Ul01ifAY` layout open but symbol/interval both empty —
   TV is up but TSLA isn't the current focus. No active conviction signal
   from the terminal layout.

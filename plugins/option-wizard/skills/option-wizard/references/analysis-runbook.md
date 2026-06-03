@@ -125,9 +125,11 @@ which one is current.
 - `opencli tradingview news --symbol NASDAQ:<TICKER> --limit 8` — recent
   headlines for catalyst-clock validation AND for the 4-signal bullish veto
   check in Layer 6 (signals #1, #2, #3 all read from news)
-- `opencli tradingview watchlists --color <flag>` — does the trader have a
-  manual prior on this ticker? Treat as tiebreaker, not a decision driver
-  (see `price-action-framework.md`).
+
+**Do not pull `tradingview watchlists`.** The trader organizes watchlists
+for their own reasons (sector grouping, idea tracking) — membership and
+color flags encode no directional signal. Earlier versions of this runbook
+suggested using them as a "tiebreaker"; that guidance is rescinded.
 
 **TV setup gotchas (encountered live, codified here):**
 
