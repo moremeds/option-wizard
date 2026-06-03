@@ -1792,7 +1792,18 @@ git commit -m "feat(fcn): bilingual counter-offer email builder"
 
 ## Phase 3 — Reference Documentation
 
-Reference docs are markdown, no tests apply. Each task: write the file, commit. Content is original; the trader will expand each over time. Acceptance per file: covers the topics enumerated in the spec, no placeholders.
+Reference docs are markdown, no automated tests apply. Each task: write the file, commit. Content is original; the trader will expand each over time.
+
+**Quality bar — every reference doc must meet these acceptance criteria, otherwise the task is not done:**
+
+1. Covers every bulleted topic enumerated in the task body — no topic merely named without explanation.
+2. Contains at least one concrete numerical example using realistic values (e.g., "at IV rank 91 with skew −0.20...").
+3. References the specific `scripts/` file that implements any computation it describes (e.g., "see `scripts/gex_levels.py:compute_levels`"), so a reader can trace prose to code.
+4. No "TODO", "TBD", "fill in later", placeholders, or empty section headings.
+5. Length: target 600-1200 words per file. Shorter is fine if every concept is fully explained; longer is fine if the topic warrants it. Padding for word count is not done.
+6. Cites real product mechanics, not invented ones. Where a behavior is conjectural ("typical PB markup is 25-40% of model fair coupon"), label it as a heuristic.
+
+If you find the topic list inadequate while writing, add to it rather than ship a thin doc.
 
 ### Task 3.1: `references/data-sources.md`
 
@@ -3869,10 +3880,13 @@ git commit -m "test(email): live SMTP smoke test to chenxi.li08@outlook.com"
 
 ## Phase 8 — Daily Hook Integration
 
-### Task 8.1: Configure the Claude Code SessionStart hook
+### Task 8.1: Configure the daily run (cron primary, SessionStart hook optional)
+
+**Decision:** `cron` is the canonical scheduler because it runs even when Claude Code is not open and has a stable, well-defined invocation contract. The `SessionStart` hook is an optional convenience for trading-day mornings when the trader opens a Claude Code session — it triggers a fresh run only if the cron run for that day did not happen (e.g., laptop closed). Both paths are protected by the lockfile from Task 5.2.
 
 **Files:**
-- Modify: `~/.claude/settings.json` (user-side)
+- Modify: `~/.claude/settings.json` (user-side, SessionStart hook — optional)
+- Create new: cron entry (user-side)
 - Create: `docs/setup/daily-hook-install.md`
 
 - [ ] **Step 1: Write the setup doc**
@@ -3901,17 +3915,20 @@ Add to `~/.claude/settings.json`:
 
 If your `settings.json` already has a `hooks` block, merge the `SessionStart` array.
 
-## Alternative: cron job (independent of Claude session)
+## Canonical path: cron job (independent of Claude session)
 
-For a fully autonomous run independent of opening Claude Code:
+The cron entry is the authoritative daily run. SessionStart hook above is supplementary.
 
 ```bash
 crontab -e
-# Add:
-30 9 * * 1-5  cd /Users/chenxi/projects/option-wizard && .venv/bin/python -m scripts.manage_positions  >> ~/.config/option-wizard/daily.log 2>&1
+# 9:30 AM US/Eastern, Monday-Friday. macOS cron honors TZ:
+TZ=America/New_York
+30 9 * * 1-5  cd /Users/chenxi/projects/option-wizard && CRON_TZ=America/New_York .venv/bin/python -m scripts.manage_positions  >> ~/.config/option-wizard/daily.log 2>&1
 ```
 
-Note: 9:30 ET in your local timezone needs adjustment.
+DST handling: `TZ=America/New_York` automatically follows daylight-saving transitions so the run stays at 9:30 ET year-round. Verify with `crontab -l` and check `~/.config/option-wizard/daily.log` the next trading morning.
+
+The lockfile at `~/.config/option-wizard/manage_positions.lock` prevents the cron run and any SessionStart hook from racing. Whichever fires first wins; the other exits quietly.
 
 ## Disabling
 
