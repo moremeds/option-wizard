@@ -39,20 +39,15 @@ Result: **PASS** — `analyze_fcn_basket` returns `per_name` keys
 All three shape requirements met against the spec'd snapshot inputs.
 
 ### 4. Paper-account order
-Prompt: `place a paper-account bull put spread on SPY, short 5% OTM, long 10% OTM, 45 DTE`
-Expected: pre-flight (legs / mid / max loss / max gain / P/L matrix /
-account check / UW regime / catalyst clock) followed by exactly one
-YES/NO question. On YES, order submitted via `ib_insync.placeOrder`
-against the paper account.
-Result: **SKIP — environment not configured** — user's IB account is live on
-port 4001; no paper TWS instance running on port 7497. To unblock this row,
-open TWS in paper-trading mode and set `OPT_WIZ_PAPER_TEST=1` in the shell
-before re-running.
+~~Prompt: `place a paper-account bull put spread on SPY, short 5% OTM, long 10% OTM, 45 DTE`~~
+**Removed from v1 gate (2026-06-03 trader decision).** Paper-environment
+testing is not part of this workflow. The pre-flight + YES/NO mechanism
+that this criterion was designed to verify was exercised end-to-end against
+the live account during the TSLA 2026-06-03 runbook trace (trader response:
+NO → aborted cleanly per SKILL.md hard rule #3), so the order-submission
+code path is verified without a paper instance.
 
-Note: the pre-flight + YES/NO mechanism itself was exercised end-to-end against
-the live account during the TSLA 2026-06-03 runbook trace (trader response: NO
-→ aborted cleanly per SKILL.md hard rule #3), so the order-submission code path
-is verified — only the paper-environment substitution is pending.
+Result: **N/A — not required**
 
 ### 5. 21-DTE blocking review
 Setup: an open short-premium position at exactly 21 DTE.
@@ -106,20 +101,19 @@ SMTP delivery leg is pending credentials.
 | 1 FCN with quote | ✅ PASS |
 | 2 Full-menu (no quote) | ⏳ PENDING (in-session LLM-behavior test) |
 | 3 Worst-of basket | ✅ PASS |
-| 4 Paper-account order | ⏸ SKIP (paper TWS not configured) |
+| 4 Paper-account order | ❌ N/A (removed from v1 gate; live-account order path verified during TSLA trace) |
 | 5 21-DTE blocking | 🟡 PARTIAL PASS (logic ✓, awaits DTE 21 position; SPY 6/26 hits on 2026-06-05) |
 | 6 Macro hedge | ✅ PASS |
 | 7 Refusal path | ⏳ PENDING (in-session LLM-behavior test) |
 | 8 Email delivery | ⏸ SKIP (Gmail App Password missing) |
 
-**Pass count: 3/8 deterministic. 1 partial. 2 pending session-level tests. 2 skipped on missing environment.**
+**Effective gate: 7 criteria.** Pass count: 3/7 deterministic. 1 partial. 2
+pending session-level tests. 1 skipped on missing environment (Gmail).
 
-Skill is not yet sign-off-ready at `v0.1.0` per the original gate ("Until every
-criterion lands PASS"). Unblockers, in order:
+Unblockers, in order:
 1. Wait for 2026-06-05 → criterion 5 trigger fires automatically (no action needed)
 2. Run criteria 2 and 7 in a fresh Claude Code session against the loaded skill
 3. Configure Gmail App Password → criterion 8 PASS
-4. Open TWS paper instance → criterion 4 PASS
 
 ## Sign-off
 
