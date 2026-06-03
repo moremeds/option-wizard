@@ -103,7 +103,8 @@ The IB MCP is the only source allowed to write state. It also fills gaps on the 
 │   │   ├── ib_order.py                        Order construction with bracket orders
 │   │   ├── manage_positions.py                Open positions scan + 21 DTE enforcement
 │   │   ├── evaluate_position.py               Single-position roll/close decision tree
-│   │   └── macro_hedge.py                     SPX put fly / put spread / long put
+│   │   ├── macro_hedge.py                     SPX put fly / put spread / long put
+│   │   └── email_sender.py                    Gmail SMTP delivery of daily scan
 │   └── references/
 │       ├── data-sources.md                    UW MCP / TV / IB MCP playbook
 │       ├── strategies.md                      Regime ↔ structure matrix
@@ -305,6 +306,25 @@ A Claude Code hook (configured in `~/.claude/settings.json`) runs `manage_positi
 
 The hook is enabled by default. The trader can disable it via a single config flag in `CLAUDE.md`.
 
+### 10.2 Daily Email Delivery
+
+Results from the daily run are also delivered by email to `chenxi.li08@outlook.com`. Delivery uses Gmail SMTP from a `scripts/email_sender.py` helper, authenticated with a Gmail App Password stored outside the repo (either an OS-level env var `GMAIL_APP_PASSWORD` or a file at `~/.config/option-wizard/gmail-app-password` with `0600` permissions). The App Password and sender Gmail address are not committed.
+
+The Gmail MCP available in this environment exposes `create_draft` but not `send_message`, so the email path cannot run through MCP alone. SMTP is the simplest fully-automated alternative; the implementation phase will add `scripts/email_sender.py` and the hook glue.
+
+Email payload structure:
+
+- Subject: `[option-wizard] YYYY-MM-DD Daily position scan — N positions, M require review`
+- Body (plain text + HTML alternative): same content as the in-session SessionStart block, plus a one-line summary header so it reads as a useful preview on mobile.
+- Positions flagged at 21 DTE are prepended with `⚠` in the subject count and surfaced at the top of the body.
+- If the daily run finds nothing actionable, the email still sends a "no action needed" one-liner so the trader knows the job ran.
+
+Failure modes:
+
+- SMTP credential missing or rejected → log to `~/.config/option-wizard/email-errors.log`, do not block the hook, surface the failure in the next SessionStart block.
+- Email send timeout → retry once after 30 seconds, then log and continue.
+- Manual override: a `--no-email` flag on `manage_positions.py` skips the send step for one-off runs.
+
 ## 11. SKILL.md Frontmatter
 
 The `name` is `option-wizard`. The `description` enumerates triggers:
@@ -343,6 +363,7 @@ These were left intentionally for the implementation plan to resolve:
 5. Pick per-order position-sizing cap (suggested: ≤ 2% of account net liquidation value per single-name short-premium trade, ≤ 1.5% annualized total for macro hedge).
 6. Default short-leg delta target for Sell Put / Bull Put Spread (suggested: −0.25 unless overridden).
 7. Whether to publish to a GitHub repo for multi-machine sync via `npx skills add`.
+8. Confirm the Gmail sender address and generate the App Password before the email hook is enabled. Sender address and password are not part of the repo.
 
 ## 14. Acceptance Criteria for v1
 
@@ -353,6 +374,7 @@ The skill ships when all of the following hold:
 - Given two or three tickers, output includes a worst-of basket FCN analysis alongside per-name single-strategy picks.
 - A paper-account run successfully creates a `create_order_instruction` for a defined-risk spread and the OCA bracket pair (or documents the fallback if OCA is not supported).
 - `manage_positions` correctly emits a 21-DTE blocking prompt on at least one paper-account position.
+- The daily run sends a test email successfully to `chenxi.li08@outlook.com` via Gmail SMTP with the expected subject format.
 - A macro hedge call returns three candidate SPX structures with cost ≤ the configured cap.
 - Refusal path is exercised: asking for a naked short call must produce an explicit decline with reasoning.
 
@@ -361,5 +383,5 @@ The skill ships when all of the following hold:
 - ELN, accumulator, autocallable, and exotic basket structured products beyond FCN.
 - Multi-account aggregation (the trader has only one IB account in scope).
 - Tax-lot tracking and wash-sale handling.
-- Notification delivery (Discord / Slack / email) — daily output stays in Claude Code session context only.
+- Notification delivery to Discord / Slack — only Gmail SMTP email to `chenxi.li08@outlook.com` is wired in v1.
 - Cross-broker support (Futu, Longbridge, etc.).
