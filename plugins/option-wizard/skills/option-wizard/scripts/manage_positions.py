@@ -74,8 +74,9 @@ def scan_positions(positions: list, market: dict[str, dict], today: str) -> list
                 structure=structure,
             )
             rationale = evaluation["rationale"]
-            if m.get("source") == "tv" and m.get("current_price") is not None:
-                rationale = f"{rationale} [TV fallback]"
+            source = m.get("source")
+            if source and m.get("current_price") is not None:
+                rationale = f"{rationale} [{source}]"
             rows.append(
                 {
                     "symbol": pos.contract.symbol,
