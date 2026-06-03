@@ -1,0 +1,6 @@
+pyproject.toml
+plugins/option-wizard/skills/option-wizard/option_wizard.egg-info/PKG-INFO
+plugins/option-wizard/skills/option-wizard/option_wizard.egg-info/SOURCES.txt
+plugins/option-wizard/skills/option-wizard/option_wizard.egg-info/dependency_links.txt
+plugins/option-wizard/skills/option-wizard/option_wizard.egg-info/requires.txt
+plugins/option-wizard/skills/option-wizard/option_wizard.egg-info/top_level.txt
