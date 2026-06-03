@@ -2,6 +2,21 @@
 
 Auth: Bearer token in env var UW_API_KEY. Client ID header per UW docs.
 Wraps only the endpoints option-wizard actually uses; expand as needed.
+
+Observed JSON top-level shapes (2026-06-03 against ORCL):
+- iv_rank                    -> {"data": ...}
+- realized_volatility        -> {"data": ...}
+- historical_risk_reversal_skew -> {"data": ...}
+- iv_term_structure          -> {"data": ...}
+- max_pain                   -> {"data": ..., "date": "YYYY-MM-DD"}
+- spot_gex_by_strike         -> {"data": ...}
+- interpolated_iv            -> {"data": ...}
+- greeks_by_strike           -> {"data": ...}
+- dark_pool                  -> {"data": ...}
+- technical_indicator/<fn>   -> {"data": ...}
+
+Every consumer should unwrap `resp["data"]` before parsing. Re-run
+tests/integration/test_uw_smoke.py to refresh this list.
 """
 
 from __future__ import annotations
