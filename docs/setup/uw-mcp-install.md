@@ -1,16 +1,13 @@
 # Installing the Unusual Whales MCP server
 
 The option-wizard skill expects the UW remote HTTP MCP to be available in
-Claude Code. This project wires it at the **project level** via `.mcp.json`
-(checked into git, key via env interpolation) rather than at the user level
-in `~/.claude.json` — anyone who clones the repo gets the MCP automatically
-once their `.env` is populated.
+Claude Code. Two ways to wire it.
 
 ## Prerequisites
 
 - Active UW subscription with API access at https://unusualwhales.com/pricing?product=api
 - API token from your UW account
-- Token stored in the project's `.env` (gitignored), never committed:
+- Token stored locally, never committed:
 
 ```bash
 # .env (gitignored)
@@ -19,44 +16,77 @@ UW_API_KEY=<your token>
 
 `.env.example` ships as the template.
 
-## How it works
+## Endpoint
 
-`/.mcp.json` (committed) registers the server:
+The authenticated MCP endpoint per UW's OpenAPI spec is:
 
-```json
-{
-  "mcpServers": {
-    "unusual-whales": {
-      "type": "http",
-      "url": "https://unusualwhales.com/public-api/mcp",
-      "headers": {
-        "Authorization": "Bearer ${UW_API_KEY}"
-      }
-    }
-  }
-}
+```
+https://api.unusualwhales.com/api/mcp
 ```
 
-`${UW_API_KEY}` is interpolated by Claude Code from the shell environment when
-the session starts. Make sure your shell exports it (most shell-aware tools
-read `.env` automatically; if not, source it manually):
+Auth is `Authorization: Bearer <API_TOKEN>`. Verified locally: `initialize`
+returns `serverInfo: unusual-whales-public-api v1.0.0` and `tools/list` returns
+real tool definitions.
+
+## Option A — user-scope (recommended)
+
+Registers the server globally for your Claude Code user account. Works in
+every project, no env-var dance, no per-project config to maintain.
 
 ```bash
+set -a; source .env; set +a
+claude mcp add --transport http --scope user unusual-whales \
+  https://api.unusualwhales.com/api/mcp \
+  --header "Authorization: Bearer $UW_API_KEY"
+```
+
+Verify:
+
+```bash
+claude mcp list | grep unusual-whales
+# unusual-whales: https://api.unusualwhales.com/api/mcp (HTTP) - ✓ Connected
+```
+
+The token is written into `~/.claude.json` (local, not synced). Restart Claude
+Code to pick up the new server in the active session.
+
+## Option B — project-scope (for repo cloners)
+
+`/.mcp.json.example` ships as the template. Copy it locally and source your
+`.env` before launching `claude` so `${UW_API_KEY}` resolves:
+
+```bash
+cp .mcp.json.example .mcp.json     # local copy is gitignored
 set -a; source .env; set +a
 claude
 ```
 
-Restart Claude Code after the first time you add the env var. UW tools
-appear with the `mcp__unusual-whales__*` prefix.
+`.mcp.json` is gitignored so the live config (which may end up holding the
+literal token) never leaks. If you'd rather skip the env-var dance, replace
+`${UW_API_KEY}` in your local `.mcp.json` with the literal token — same risk
+profile as `.env`, both stay local.
 
-## Verify
+## Verify in-session
 
 In a Claude Code session, ask: *"list available MCP tools for unusual whales"*.
-The list should include `iv-rank`, `gex`, `skew`, etc.
+The list should include the `mcp__unusual-whales__*` tools.
 
-If the tools do not appear:
-- Check `.mcp.json` is valid JSON: `python -m json.tool .mcp.json`
-- Check the env var is exported in the shell Claude Code was launched from: `echo $UW_API_KEY`
-- Check the API key is active in the UW dashboard
-- Run the live REST smoke as a parallel check:
-  `set -a; source .env; set +a; .venv/bin/pytest tests/integration/test_uw_smoke.py -v`
+If they don't appear:
+- `claude mcp list | grep unusual-whales` should show `✓ Connected`. If it
+  shows `Pending approval`, run `claude` in the project dir and approve.
+- Confirm the token by curl:
+  ```bash
+  curl -sS -X POST \
+    -H "Authorization: Bearer $UW_API_KEY" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"p","version":"0"}}}' \
+    https://api.unusualwhales.com/api/mcp
+  ```
+  A working token returns a JSON-RPC result with `serverInfo`. A 401 means the
+  token is bad or expired.
+- Confirm the REST path still works as a separate sanity check:
+  ```bash
+  set -a; source .env; set +a
+  .venv/bin/pytest tests/integration/test_uw_smoke.py -v
+  ```
