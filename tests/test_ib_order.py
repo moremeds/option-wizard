@@ -161,3 +161,34 @@ def test_preflight_includes_required_blocks():
     assert "uw_regime" in preflight
     assert "account_check" in preflight
     assert preflight["account_check"]["sufficient_buying_power"] is True
+
+
+from scripts.ib_order import build_brackets
+
+
+def test_brackets_default_50pct_take_profit_and_full_stop_for_spread():
+    opening = {
+        "structure": "bull_put_spread",
+        "net_credit_dollar": 1050.0,
+        "max_loss": -3950.0,
+        "spread_width_dollar": 5000.0,
+        "ticker": "ORCL",
+    }
+    brackets = build_brackets(opening)
+    tp = next(b for b in brackets if b["bracket_type"] == "take_profit")
+    sl = next(b for b in brackets if b["bracket_type"] == "stop_loss")
+    assert tp["close_at_debit_or_credit"] == pytest.approx(525.0, abs=1)
+    assert sl["close_at_debit_or_credit"] == pytest.approx(5000.0, abs=1)
+    assert tp["oca_group"] == sl["oca_group"]
+
+
+def test_brackets_for_csp_use_2x_credit_rule():
+    opening = {
+        "structure": "cash_secured_put",
+        "net_credit_dollar": 500.0,
+        "max_loss": -50000.0,
+        "ticker": "AMD",
+    }
+    brackets = build_brackets(opening)
+    sl = next(b for b in brackets if b["bracket_type"] == "stop_loss")
+    assert sl["close_at_debit_or_credit"] == pytest.approx(1000.0, abs=1)

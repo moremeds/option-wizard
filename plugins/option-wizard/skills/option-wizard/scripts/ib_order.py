@@ -284,3 +284,62 @@ def build_preflight(
         "account_check": _account_check(structure, legs, account, max_loss=max_loss),
         **extras,
     }
+
+
+import uuid
+
+SHORT_PREMIUM_STRUCTURES = SPREAD_STRUCTURES | {
+    "covered_call",
+    "cash_secured_put",
+    "jade_lizard",
+}
+
+
+def build_brackets(
+    opening: dict,
+    take_profit_pct: float = 0.50,
+    stop_loss_multiplier: float = 2.0,
+) -> list[dict]:
+    """Bracket helper.
+
+    For credit spreads, realized P/L = opening_credit - closing_debit. To
+    stop at exactly the max loss you must close the spread at a debit
+    equal to the spread width (not abs(max_loss), which equals
+    width - credit). Caller must pass `spread_width_dollar` in opening
+    for spread structures.
+
+    For CSP / CC / Jade Lizard the per-leg short option is the unit;
+    stop is set at `stop_loss_multiplier * opening_credit` as a debit
+    cap (close cost when buying back).
+    """
+    structure = opening["structure"]
+    if structure not in SHORT_PREMIUM_STRUCTURES:
+        return []
+    credit = float(opening.get("net_credit_dollar", 0))
+    oca = f"opt_wiz_{opening['ticker']}_{uuid.uuid4().hex[:8]}"
+    take_profit_debit = credit * take_profit_pct
+
+    if structure in SPREAD_STRUCTURES:
+        width = float(opening.get("spread_width_dollar", 0))
+        if width <= 0:
+            raise ValueError("spread_width_dollar required for spread structures")
+        stop_loss_debit = width
+        stop_rationale = "close at spread width (locks in full max loss)"
+    else:
+        stop_loss_debit = credit * stop_loss_multiplier
+        stop_rationale = f"close at {stop_loss_multiplier:.0f}x credit"
+
+    return [
+        {
+            "bracket_type": "take_profit",
+            "oca_group": oca,
+            "close_at_debit_or_credit": round(take_profit_debit, 2),
+            "rationale": f"close at {int(take_profit_pct * 100)}% of max profit",
+        },
+        {
+            "bracket_type": "stop_loss",
+            "oca_group": oca,
+            "close_at_debit_or_credit": round(stop_loss_debit, 2),
+            "rationale": stop_rationale,
+        },
+    ]
