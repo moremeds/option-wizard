@@ -1,12 +1,26 @@
-"""Derive gamma flip, put wall, and call wall from UW spot-exposures/strike output.
+"""Derive gamma flip, put wall, and call wall from UW GEX-by-strike output.
 
 UW does not pre-compute these named levels; this module reads the raw
 strike-level GEX list and identifies them by definition:
 
-  - gamma flip: zero crossing of cumulative GEX from low strike to high
-  - put wall:  strike below spot with the largest positive GEX
-  - call wall: strike above spot with the largest negative GEX (in absolute
-              terms; dealers short here will sell into rallies)
+  - gamma flip: zero crossing of cumulative GEX, closest to spot
+  - put wall:  strike below spot with the largest positive net GEX
+  - call wall: two definitions supported:
+      'net_neg_gex' (default) — strike above spot with most negative net GEX;
+                                dealers short here will sell into rallies.
+                                Useful when net GEX flips above spot.
+      'oi_cluster'           — strike above spot with the largest call_gex
+                                concentration (positive). Useful for tactical
+                                near-expiry reads where calls dominate the
+                                hedging mechanics above spot and net GEX
+                                stays positive everywhere. Requires rows to
+                                include a 'call_gex' field (raw UW shape).
+
+Input row format — either form accepted:
+  {strike, gex}                — pre-aggregated net GEX (test inputs use this)
+  {strike, call_gex, put_gex}  — raw UW shape from
+                                 get_greek_exposure_by_strike or
+                                 get_greek_exposure_by_strike_expiry
 """
 
 from __future__ import annotations
@@ -14,20 +28,38 @@ from __future__ import annotations
 from typing import Iterable, Optional
 
 
+def _net_gex(row: dict) -> float:
+    """Net GEX for a row. Accepts {gex} or {call_gex, put_gex}."""
+    if "gex" in row:
+        return float(row["gex"])
+    return float(row.get("call_gex", 0)) + float(row.get("put_gex", 0))
+
+
+def _call_gex_only(row: dict) -> Optional[float]:
+    """Call-leg GEX. Returns None if the row only has a pre-aggregated net."""
+    if "call_gex" in row:
+        return float(row["call_gex"])
+    return None
+
+
 def _sorted_by_strike(rows: Iterable[dict]) -> list[dict]:
-    """Sort rows by strike, dropping rows with non-finite strike or gex."""
+    """Sort rows by strike, dropping rows with non-finite strike or net gex.
+
+    Preserves the original row dict (so call_gex / put_gex are still
+    accessible downstream for the 'oi_cluster' definition).
+    """
     import math
 
     cleaned = []
     for r in rows:
         try:
             s = float(r["strike"])
-            g = float(r["gex"])
+            g = _net_gex(r)
             if math.isfinite(s) and math.isfinite(g):
-                cleaned.append({"strike": s, "gex": g})
+                cleaned.append(r)
         except (KeyError, TypeError, ValueError):
             continue
-    return sorted(cleaned, key=lambda r: r["strike"])
+    return sorted(cleaned, key=lambda r: float(r["strike"]))
 
 
 def _gamma_flip(rows: list[dict], spot: float) -> Optional[float]:
@@ -46,7 +78,7 @@ def _gamma_flip(rows: list[dict], spot: float) -> Optional[float]:
     prev_strike, prev_cum = None, 0.0
     for r in rows:
         strike = float(r["strike"])
-        cum += float(r["gex"])
+        cum += _net_gex(r)
         if prev_strike is not None and prev_cum * cum < 0:
             span = strike - prev_strike
             frac = -prev_cum / (cum - prev_cum) if cum != prev_cum else 0.5
@@ -58,28 +90,89 @@ def _gamma_flip(rows: list[dict], spot: float) -> Optional[float]:
 
 
 def _put_wall(rows: list[dict], spot: float) -> Optional[float]:
-    below = [r for r in rows if float(r["strike"]) < spot and float(r["gex"]) > 0]
+    below = [r for r in rows if float(r["strike"]) < spot and _net_gex(r) > 0]
     if not below:
         return None
-    return float(max(below, key=lambda r: float(r["gex"]))["strike"])
+    return float(max(below, key=_net_gex)["strike"])
 
 
-def _call_wall(rows: list[dict], spot: float) -> Optional[float]:
-    above = [r for r in rows if float(r["strike"]) > spot and float(r["gex"]) < 0]
-    if not above:
-        return None
-    return float(min(above, key=lambda r: float(r["gex"]))["strike"])
+def _call_wall(
+    rows: list[dict], spot: float, definition: str = "net_neg_gex"
+) -> Optional[float]:
+    if definition == "net_neg_gex":
+        above = [r for r in rows if float(r["strike"]) > spot and _net_gex(r) < 0]
+        if not above:
+            return None
+        return float(min(above, key=_net_gex)["strike"])
+    if definition == "oi_cluster":
+        candidates: list[tuple[float, float]] = []
+        for r in rows:
+            if float(r["strike"]) <= spot:
+                continue
+            cg = _call_gex_only(r)
+            if cg is None or cg <= 0:
+                continue
+            candidates.append((float(r["strike"]), cg))
+        if not candidates:
+            return None
+        return max(candidates, key=lambda x: x[1])[0]
+    raise ValueError(
+        f"unknown call_wall_definition: {definition!r} "
+        f"(use 'net_neg_gex' or 'oi_cluster')"
+    )
 
 
-def compute_levels(gex_by_strike: Iterable[dict], spot: float) -> dict:
+def compute_levels(
+    gex_by_strike: Iterable[dict],
+    spot: float,
+    call_wall_definition: str = "net_neg_gex",
+) -> dict:
     """Return dict with keys gamma_flip, put_wall, call_wall.
 
-    Each input row must have keys 'strike' and 'gex'. Spot is the current
-    underlying price. Returns None for any level that cannot be identified.
+    Each input row must have 'strike' plus either 'gex' (pre-aggregated net)
+    or 'call_gex' + 'put_gex' (raw UW). Spot is the current underlying price.
+    Returns None for any level that cannot be identified.
+
+    call_wall_definition controls which method picks the call wall:
+      'net_neg_gex' (default) — strike above spot with most negative net GEX
+      'oi_cluster'           — strike above spot with largest positive call_gex
+                                (requires call_gex in input rows)
     """
     rows = _sorted_by_strike(list(gex_by_strike))
     return {
         "gamma_flip": _gamma_flip(rows, spot),
         "put_wall": _put_wall(rows, spot),
-        "call_wall": _call_wall(rows, spot),
+        "call_wall": _call_wall(rows, spot, definition=call_wall_definition),
+    }
+
+
+def compute_levels_per_expiry(
+    uw_rows: Iterable[dict],
+    spot: float,
+    call_wall_definition: str = "net_neg_gex",
+) -> dict[str, dict]:
+    """Per-expiry gamma flip + walls from a flat UW per-strike-per-expiry list.
+
+    Trading reads of 'the' call wall are usually per-expiry — concentrated
+    call OI on this Friday is mechanically distinct from concentrated call
+    OI three months out. This function groups the rows by expiry and runs
+    compute_levels for each, so the caller can read the wall at the trade
+    horizon they actually care about instead of an aggregate across all
+    listed expiries.
+
+    Input: list of dicts from get_greek_exposure_by_strike_expiry. Each row
+    must include 'expiry' plus the fields compute_levels expects.
+    Returns: {expiry: {gamma_flip, put_wall, call_wall}}
+    """
+    by_expiry: dict[str, list[dict]] = {}
+    for r in uw_rows:
+        try:
+            exp = str(r["expiry"])
+        except (KeyError, TypeError):
+            continue
+        by_expiry.setdefault(exp, []).append(r)
+
+    return {
+        exp: compute_levels(rows, spot, call_wall_definition=call_wall_definition)
+        for exp, rows in by_expiry.items()
     }

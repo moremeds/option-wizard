@@ -1,4 +1,4 @@
-from scripts.gex_levels import compute_levels
+from scripts.gex_levels import compute_levels, compute_levels_per_expiry
 
 
 def test_gamma_flip_is_zero_crossing_of_cumulative_gex():
@@ -40,6 +40,72 @@ def test_handles_empty_input():
     assert result["gamma_flip"] is None
     assert result["put_wall"] is None
     assert result["call_wall"] is None
+
+
+def test_call_wall_oi_cluster_picks_largest_call_gex_above_spot():
+    # 'oi_cluster' definition: trader convention — largest CALL gamma
+    # concentration above spot, ignoring put_gex. For a name where net GEX
+    # is positive everywhere above spot, this is the only definition that
+    # surfaces a tradeable resistance level.
+    rows = [
+        {"strike": 420.0, "call_gex": 11602.0, "put_gex": -10565.0},  # below spot
+        {"strike": 425.0, "call_gex": 9253.0, "put_gex": -6852.0},
+        {"strike": 430.0, "call_gex": 16492.0, "put_gex": -5483.0},  # peak above spot
+        {"strike": 440.0, "call_gex": 13780.0, "put_gex": -4186.0},
+        {"strike": 450.0, "call_gex": 9011.0, "put_gex": -960.0},
+    ]
+    result = compute_levels(rows, spot=423.74, call_wall_definition="oi_cluster")
+    assert result["call_wall"] == 430.0
+
+
+def test_call_wall_net_neg_gex_default_unchanged():
+    # Same rows: net_neg_gex returns None because every strike above spot has
+    # positive net (call_gex >> |put_gex|). Demonstrates why oi_cluster is
+    # often the better tactical definition for near-expiry reads.
+    rows = [
+        {"strike": 420.0, "call_gex": 11602.0, "put_gex": -10565.0},
+        {"strike": 425.0, "call_gex": 9253.0, "put_gex": -6852.0},
+        {"strike": 430.0, "call_gex": 16492.0, "put_gex": -5483.0},
+        {"strike": 440.0, "call_gex": 13780.0, "put_gex": -4186.0},
+    ]
+    result = compute_levels(rows, spot=423.74)  # default = net_neg_gex
+    assert result["call_wall"] is None
+
+
+def test_call_wall_unknown_definition_raises():
+    rows = [{"strike": 100.0, "gex": 50.0}]
+    try:
+        compute_levels(rows, spot=90.0, call_wall_definition="invalid_mode")
+    except ValueError as e:
+        assert "invalid_mode" in str(e)
+        return
+    raise AssertionError("expected ValueError for unknown definition")
+
+
+def test_compute_levels_per_expiry_groups_and_runs_per_expiry():
+    # Two expiries, same ticker. Per-expiry walls should diverge because
+    # near-expiry OI clusters are tighter than far-expiry.
+    uw_rows = [
+        # near expiry — call OI clustered at 430
+        {"expiry": "2026-06-05", "strike": 420.0, "call_gex": 100.0, "put_gex": -500.0},
+        {
+            "expiry": "2026-06-05",
+            "strike": 430.0,
+            "call_gex": 5000.0,
+            "put_gex": -200.0,
+        },
+        {"expiry": "2026-06-05", "strike": 440.0, "call_gex": 1000.0, "put_gex": -50.0},
+        # far expiry — call OI clustered at 440
+        {"expiry": "2026-07-10", "strike": 420.0, "call_gex": 50.0, "put_gex": -300.0},
+        {"expiry": "2026-07-10", "strike": 430.0, "call_gex": 200.0, "put_gex": -100.0},
+        {"expiry": "2026-07-10", "strike": 440.0, "call_gex": 3000.0, "put_gex": -80.0},
+    ]
+    result = compute_levels_per_expiry(
+        uw_rows, spot=425.0, call_wall_definition="oi_cluster"
+    )
+    assert set(result.keys()) == {"2026-06-05", "2026-07-10"}
+    assert result["2026-06-05"]["call_wall"] == 430.0
+    assert result["2026-07-10"]["call_wall"] == 440.0
 
 
 def test_gamma_flip_prefers_crossing_nearest_to_spot():
