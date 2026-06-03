@@ -20,6 +20,7 @@ description: >
 
 See `references/` for the full domain knowledge:
 
+- **`references/analysis-runbook.md`** — end-to-end 8-layer recipe for `分析 <TICKER>` (start here for any ticker analysis)
 - `references/data-sources.md` — UW / TV / IB call playbook
 - `references/strategies.md` — regime × structure matrix
 - `references/gamma-framework.md` — GEX, gamma flip, put/call wall reading
@@ -39,6 +40,11 @@ See `references/` for the full domain knowledge:
 6. Bracket order defaults: take-profit at 50% of max gain, stop-loss at 2× credit received (100% of max loss for spreads). Per-order override allowed.
 
 ## Triggers
+
+For any ticker analysis ("分析 <TICKER>" / "evaluate <ticker> for <structure>"),
+follow `references/analysis-runbook.md` end-to-end. The runbook lists the
+data source per layer, the compute step, and the decision output; do NOT
+skip a layer silently — report any data-source gap explicitly.
 
 Chinese:
 - "分析 <TICKER>"
