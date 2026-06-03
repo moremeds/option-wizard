@@ -24,9 +24,9 @@ SHORT_PREMIUM_STRUCTURES = SPREAD_STRUCTURES | {
 
 def evaluate_short_premium(
     opening_credit: float,
-    current_price: float,
+    current_price: float | None,
     dte: int,
-    delta: float,
+    delta: float | None,
     structure: str,
     take_profit_pct: float = 0.50,
     stop_loss_multiplier: float = 2.0,
@@ -42,6 +42,19 @@ def evaluate_short_premium(
                 "HOLD-AND-ACCEPT-GAMMA before any other request."
             ),
             "current_price": current_price,
+            "opening_credit": opening_credit,
+            "delta": delta,
+            "dte": dte,
+        }
+
+    if current_price is None:
+        return {
+            "recommended_action": "HOLD",
+            "rationale": (
+                f"DTE {dte} above 21; quote unavailable "
+                "(off-hours or no L1 options subscription)"
+            ),
+            "current_price": None,
             "opening_credit": opening_credit,
             "delta": delta,
             "dte": dte,
@@ -78,10 +91,11 @@ def evaluate_short_premium(
             "dte": dte,
         }
 
+    delta_str = f"delta {delta:+.2f} healthy" if delta is not None else "delta unknown"
     return {
         "recommended_action": "HOLD",
         "rationale": (
-            f"{decay_pct:.0%} of credit decayed; DTE {dte} above 21; delta {delta:+.2f} healthy"
+            f"{decay_pct:.0%} of credit decayed; DTE {dte} above 21; {delta_str}"
         ),
         "current_price": current_price,
         "opening_credit": opening_credit,
