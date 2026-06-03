@@ -1,0 +1,7 @@
+{
+  "name": "option-wizard",
+  "version": "0.1.0",
+  "description": "Personal options trading + FCN + IB execution skill",
+  "license": "UNLICENSED",
+  "private": true
+}
