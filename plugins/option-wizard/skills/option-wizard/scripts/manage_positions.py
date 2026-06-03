@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from scripts.defined_risk_audit import audit_book, format_audit_findings
 from scripts.evaluate_position import (
     SHORT_PREMIUM_STRUCTURES,
     evaluate_short_premium,
@@ -186,10 +187,52 @@ def _release_lock() -> None:
     LOCK_PATH.unlink(missing_ok=True)
 
 
+def _ib_positions_to_audit_format(
+    positions: list, account_summary: dict
+) -> tuple[list[dict], float]:
+    """Map ib_insync positions into the {contract_description, position}
+    shape that audit_book expects.
+
+    The audit module was designed against the IB MCP get_account_positions
+    payload (descriptions like `"QQQ    JUN2026 665 P [QQQ   260630P00665000 100]"`).
+    ib_insync positions expose the contract directly, so we synthesize a
+    matching description per leg.
+    """
+    audit_positions = []
+    for pos in positions:
+        c = pos.contract
+        secType = getattr(c, "secType", "")
+        if secType == "STK":
+            desc = c.symbol
+        elif secType == "OPT":
+            strike_str = f"{c.strike:g}"
+            expiry = c.lastTradeDateOrContractMonth
+            occ_expiry = expiry[2:] if expiry.startswith("20") else expiry
+            occ_strike = f"{int(round(c.strike * 1000)):08d}"
+            desc = (
+                f"{c.symbol}   {expiry} {strike_str} {c.right} "
+                f"[{c.symbol}  {occ_expiry}{c.right}{occ_strike} 100]"
+            )
+        else:
+            continue
+        audit_positions.append(
+            {"contract_description": desc, "position": float(pos.position)}
+        )
+    cash = float(
+        account_summary.get("TotalCashValue", account_summary.get("CashBalance", 0))
+    )
+    return audit_positions, cash
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-email", action="store_true", help="skip email delivery")
     parser.add_argument("--port", type=int, default=4001, help="IB Gateway port")
+    parser.add_argument(
+        "--audit-only",
+        action="store_true",
+        help="run the defined-risk audit and exit; skip per-position routine review",
+    )
     parser.add_argument(
         "--force",
         action="store_true",
@@ -206,11 +249,25 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with IBClient(port=args.port) as ib:
             positions = ib.get_positions()
+            account_summary = ib.get_account_summary()
+            audit_positions, cash = _ib_positions_to_audit_format(
+                positions, account_summary
+            )
+            audit_findings = audit_book(audit_positions, cash_balance=cash)
+            audit_section = format_audit_findings(audit_findings)
+
+            if args.audit_only:
+                print(audit_section or "Defined-risk audit: no failures (clean book).")
+                return 0
+
             market = _fetch_market_data(ib, positions)
             rows = scan_positions(
                 positions, market, today=str(datetime.utcnow().date())
             )
-            report = format_scan_report(rows)
+            scan_section = format_scan_report(rows)
+            report = (
+                (audit_section + "\n" + scan_section) if audit_section else scan_section
+            )
         print(report)
 
         if not args.no_email:
