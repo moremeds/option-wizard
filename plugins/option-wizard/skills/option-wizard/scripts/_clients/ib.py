@@ -26,10 +26,18 @@ def _default_client_id() -> int:
     return 99 + (_os.getpid() % 100)
 
 
+def _default_host() -> str:
+    return _os.environ.get("IB_HOST", "127.0.0.1")
+
+
+def _default_port() -> int:
+    return int(_os.environ.get("IB_PORT", "4001"))
+
+
 @dataclass
 class IBClient:
-    host: str = "127.0.0.1"
-    port: int = 4001
+    host: str = field(default_factory=_default_host)
+    port: int = field(default_factory=_default_port)
     client_id: int = field(default_factory=_default_client_id)
     timeout: int = 10
 

@@ -227,7 +227,12 @@ def _ib_positions_to_audit_format(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-email", action="store_true", help="skip email delivery")
-    parser.add_argument("--port", type=int, default=4001, help="IB Gateway port")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="IB Gateway port (overrides IB_PORT env; falls back to 4001)",
+    )
     parser.add_argument(
         "--audit-only",
         action="store_true",
@@ -247,7 +252,8 @@ def main(argv: list[str] | None = None) -> int:
     from scripts._clients.ib import IBClient
 
     try:
-        with IBClient(port=args.port) as ib:
+        ib_kwargs = {"port": args.port} if args.port is not None else {}
+        with IBClient(**ib_kwargs) as ib:
             positions = ib.get_positions()
             account_summary = ib.get_account_summary()
             audit_positions, cash = _ib_positions_to_audit_format(

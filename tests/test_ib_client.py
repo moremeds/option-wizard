@@ -3,7 +3,9 @@ from unittest.mock import MagicMock, patch
 from scripts._clients.ib import IBClient
 
 
-def test_ib_client_default_port_is_live():
+def test_ib_client_default_port_is_live(monkeypatch):
+    monkeypatch.delenv("IB_HOST", raising=False)
+    monkeypatch.delenv("IB_PORT", raising=False)
     with patch("scripts._clients.ib.IB"):
         client = IBClient()
         assert client.host == "127.0.0.1"
@@ -25,7 +27,9 @@ def test_ib_client_connects_with_explicit_settings():
         )
 
 
-def test_ib_client_get_positions_returns_list():
+def test_ib_client_get_positions_returns_list(monkeypatch):
+    monkeypatch.delenv("IB_HOST", raising=False)
+    monkeypatch.delenv("IB_PORT", raising=False)
     with patch("scripts._clients.ib.IB") as mock_ib_cls:
         mock_ib = MagicMock()
         mock_ib.isConnected.return_value = True
