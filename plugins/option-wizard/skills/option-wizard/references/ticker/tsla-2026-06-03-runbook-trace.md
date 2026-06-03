@@ -88,8 +88,8 @@ Qty:          1 contract (3.4% of AvailableFunds)
 - **TV news + chart-state**: opencli `tradingview` plugin was registered but
   commands rejected access declarations (opencli version was 1.7.22, plugin
   needed ≥1.8.0). Fixed in same session: upgraded opencli to 1.8.2, re-synced
-  the plugin cache from source. After fix: TV commands callable (needs
-  `opencli tradingview launch` to actually connect to TradingView.app).
+  the plugin cache from source. After fix: TV commands callable. Then a
+  second-order block surfaced — see "TV-enabled re-analysis (delta)" below.
 - **IB market data on 7/10 puts**: returned all zeros (likely after-hours +
   L1 option subscription not active). Used UW chain `last_price` from 6/02
   close as the pricing proxy. Real entry would need fresh quote.
@@ -97,6 +97,63 @@ Qty:          1 contract (3.4% of AvailableFunds)
   by ~$1/week trend — reported as approximate.
 - **TSLA's prior ER absorption** (4/22): not verifiable without TV news.
   4-signal bullish veto signal #1 marked unknown rather than fabricated.
+
+## TV-enabled re-analysis (delta, same-day follow-up)
+
+After the initial analysis, the TV reader was brought fully online and the
+TV-blocked layers (3 and 6) were re-run. Two extra blocks surfaced and got
+fixed in sequence:
+
+1. **Port 9222 collision** — `chrome-devtools-mcp` (loaded as an MCP server
+   in this Claude Code session) already binds 9222. Every `opencli
+   tradingview launch` attempt against the default port fails silently
+   because the port is taken; the launch returns `ready: false` and no
+   subsequent data command can connect. Fix: launch with `--port 9224` and
+   set `OPENCLI_CDP_ENDPOINT=http://127.0.0.1:9224` for the data commands.
+   Persisted in `~/.zshrc` AND `~/.zshenv` (the latter so non-interactive
+   shells — e.g. tool-spawned subprocesses — also pick it up).
+
+2. **Stale `TradingView --help` process** — a manual `TradingView --help`
+   probe earlier in the session left a detached binary process running.
+   macOS `open -a TradingView` then quietly skipped re-spawning (it
+   considers the app "already running" regardless of argv), so the new
+   `--remote-debugging-port` flag was never applied. The plugin's
+   `osascript ... quit` (polite quit) didn't catch the detached process.
+   Fix: `pkill -KILL -f "TradingView"` before relaunch. Worth a PR upstream
+   to make `launch.js` use hard-kill rather than osascript quit when a
+   detached binary instance is detected.
+
+With TV online, the **4-signal bullish veto check** populated properly:
+
+| # | Signal | Before TV | After TV |
+|---|---|---|---|
+| 1 | Post-ER absorbed gap-up | Unknown | Still unknown (no recent gap-event news) |
+| 2 | 3+ independent channel checks of demand strength | Unknown | **✅ Fires** — 6 sources (Reuters ×2, Invezz, GuruFocus, TradingView, Zacks) all confirming May Chinese EV sales +39.4% and EU recovery |
+| 3 | Validated thematic re-rate | No evidence | ⚠ Partial — Fremont→Optimus pivot + Reuters self-driving piece, mixed with speculative SpaceX-valuation narrative |
+| 4 | Term structure inversion | NOT firing (contango) | NOT firing |
+
+**Count: 2 firm + 1 partial of 4. Threshold for veto is ≥3. No veto.**
+
+Plus:
+- **Watchlist signal**: TSLA is in **none** of the trader's organized lists
+  (`防御` defensive cluster, `青铜圣斗士` growth cluster). Neutral prior — no
+  manual conviction either way, consistent with treating TSLA as an income
+  trade (sell-premium) rather than a directional bet.
+- **Chart-state**: `Ul01ifAY` layout open but symbol/interval both empty —
+  TV is up but TSLA isn't the current focus. No active conviction signal
+  from the terminal layout.
+- **Spot intraday**: TV realtime quote at 2026-06-03 07:44 UTC shows
+  $423.74 +1.89% — pre-market is bid into the open, not gapping down. The
+  short put is not facing immediate gamma stress at entry.
+
+**Structure recommendation unchanged** (bull put spread 400/390, 1 contract)
+but **conviction floor raised**. The principled upgrade path with veto
+signals firing 2.5/4 is: stay at 1 contract for risk discipline given the
+existing book's margin utilization, OR scale to 2 contracts on stronger
+direction conviction. Either is defensible — the runbook gates *size*, not
+the structure itself.
+
+**Decision still NO** (test mode). No position opened in either round.
 
 ## Bugs surfaced and fixed during this trace
 

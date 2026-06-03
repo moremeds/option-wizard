@@ -123,13 +123,38 @@ which one is current.
 - `opencli tradingview chart-state` — current chart layout, interval,
   drawings (qualitative)
 - `opencli tradingview news --symbol NASDAQ:<TICKER> --limit 8` — recent
-  headlines for catalyst-clock validation
+  headlines for catalyst-clock validation AND for the 4-signal bullish veto
+  check in Layer 6 (signals #1, #2, #3 all read from news)
 - `opencli tradingview watchlists --color <flag>` — does the trader have a
   manual prior on this ticker? Treat as tiebreaker, not a decision driver
   (see `price-action-framework.md`).
 
-If TV is unreachable, fall back to UW indicators alone and report the gap
-to the trader.
+**TV setup gotchas (encountered live, codified here):**
+
+- **opencli ≥ 1.8.0 required.** Older opencli rejects the plugin's
+  `access` declarations. Check with `opencli --version`; upgrade with
+  `npm install -g @jackwener/opencli@latest`.
+- **Port 9222 collision** is common when `chrome-devtools-mcp` is loaded
+  as an MCP server (very typical in Claude Code sessions). Chrome holds
+  9222; TV launch on the default port silently fails. Workaround: pick a
+  different port (9224 used in practice) and:
+  ```bash
+  opencli tradingview launch --port 9224
+  export OPENCLI_CDP_ENDPOINT=http://127.0.0.1:9224  # data commands read this
+  ```
+  Persist the env var in **`~/.zshenv`** (not just `~/.zshrc`) so
+  non-interactive subprocess shells also pick it up.
+- **Stale TV processes survive polite quit.** A previously-detached
+  `TradingView` binary (e.g., from a `--help` probe) is not caught by
+  `osascript ... quit`, and macOS `open -a TradingView --args ...` will
+  silently skip re-spawning. If `tradingview launch` returns
+  `ready: false`, hard-kill first: `pkill -KILL -f "TradingView"`, wait
+  2-3 seconds, then re-launch.
+
+If TV is still unreachable after the above, fall back to UW indicators
+alone and report the gap to the trader. **Do not fabricate signals #1-3
+of the veto check** — leave them as "Unknown" and let the conservative
+read (treat as non-firing) apply.
 
 **Compute:**
 - Distance to 200DMA — uses the band table in `price-action-framework.md`
