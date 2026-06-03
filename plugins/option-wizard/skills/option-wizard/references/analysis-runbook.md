@@ -286,6 +286,46 @@ other than YES = abort.
 
 ---
 
+## Layer 8 — Archive (auto, after every run)
+
+**Why:** every analysis is a future audit point. The trader needs a record of
+what data we had, what we concluded, and what we missed — so future-us can
+compare prediction vs outcome and harvest pitfalls.
+
+**Write to** `references/ticker/private/<slug>-YYYY-MM-DD-<event>.md`,
+gitignored, trader's personal journal. SKILL.md §"Reporting & archive" has the
+file format and the master rule. This layer just runs that rule at the
+runbook's exit point.
+
+**Capture** (locked at point of analysis so a future replay is possible):
+
+1. **Frontmatter** — `ticker / event / date / status / result / structures / tags`
+2. **TL;DR** — one paragraph
+3. **Data snapshot table** — every metric used in layers 1-6, with source
+4. **Per-layer execution trace** — what each layer concluded
+5. **Decision + reasoning** — including which Path (A/B/C/...) was presented
+   and which (if any) the trader picked
+6. **Gaps** — list every data source that returned empty / stale / unreachable,
+   so a future audit knows what was extrapolated vs verified
+7. **Empty Outcome / Lesson section** — to be filled at the named audit
+   checkpoint (next ER / expiry / 30d / specific date depending on the trade)
+
+**Always archive, regardless of outcome:**
+- Trader said YES + order submitted → archive with preflight + fill data
+- Trader said NO → archive with preflight + abort reason
+- Mid-runbook abort (data gap, tool failure) → archive with reduced data + abort reason
+- WAIT decision (no trade) → archive the analysis + the wait conditions
+
+**Naming**: `<slug>-YYYY-MM-DD-<event>.md` where `<event>` is a 2-4 word
+hyphenated descriptor (e.g., `premarket`, `short-put-tp-close`,
+`sell-put-roll-decision`, `fcn-counter-offer`).
+
+**Audit promotion**: when filling in §Outcome / Lesson reveals a
+forward-applicable rule, promote it to `references/pitfalls/NN-slug.md` with
+all account-specific numbers stripped.
+
+---
+
 ## Honest reporting of gaps
 
 When a layer's data source is unreachable (TV offline, IB market data
