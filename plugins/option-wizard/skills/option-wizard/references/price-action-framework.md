@@ -95,24 +95,9 @@ Map headlines onto the position decision tree in
 `scripts/evaluate_position.py` (see `references/execution.md` for
 how that script feeds the daily report).
 
-## Watchlist colored flags
+## Watchlists are not used
 
-TradingView's watchlist UI uses per-ticker color flags (green / yellow
-/ red) that the trader sets manually as their personal positioning
-prior. The skill should respect those when they're available — ask:
-
-> "TV watchlist flag for <ticker>?"
-
-Returns the current flag or "unflagged". Treat as a tiebreaker, not a
-decision driver:
-
-- **Green** flag + neutral analytics → lean toward entering the position
-  (your prior trust in the name).
-- **Red** flag + favorable analytics → require a stronger structural
-  reason to override; consider deferring to a different ticker in the
-  same setup.
-- **No flag** → ignore.
-
-Do not let a flag override the gamma flip check or the IV rank threshold
-— those are mechanical and well-tested. The flag is a tiebreaker
-between otherwise-equivalent setups.
+The trader organizes TradingView watchlists for their own reasons (sector
+grouping, idea tracking) — membership and color flags do not encode any
+directional or conviction signal. Do not pull `tradingview watchlists`
+during analysis and do not treat list membership as a tiebreaker.
