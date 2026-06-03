@@ -11,12 +11,14 @@ a human-readable report. The report is delivered to:
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from scripts._clients import tv as tv_client
 from scripts.defined_risk_audit import audit_book, format_audit_findings
 from scripts.evaluate_position import (
     SHORT_PREMIUM_STRUCTURES,
@@ -66,18 +68,22 @@ def scan_positions(positions: list, market: dict[str, dict], today: str) -> list
         try:
             evaluation = evaluate_short_premium(
                 opening_credit=abs(float(pos.avgCost)) / 100,
-                current_price=m.get("current_price", 0.0),
+                current_price=m.get("current_price"),
                 dte=m.get("dte", 0),
-                delta=m.get("delta", 0.0),
+                delta=m.get("delta"),
                 structure=structure,
             )
+            rationale = evaluation["rationale"]
+            source = m.get("source")
+            if source and m.get("current_price") is not None:
+                rationale = f"{rationale} [{source}]"
             rows.append(
                 {
                     "symbol": pos.contract.symbol,
                     "key": key,
                     "action": evaluation["recommended_action"],
                     "dte": evaluation["dte"],
-                    "rationale": evaluation["rationale"],
+                    "rationale": rationale,
                 }
             )
         except Exception as e:
@@ -105,6 +111,8 @@ def _fetch_market_data(ib: Any, positions: list) -> dict[str, dict]:
     pending = []
     try:
         for pos in positions:
+            if not pos.contract.exchange:
+                pos.contract.exchange = "SMART"
             ticker = ib._ib.reqMktData(pos.contract, genericTickList="", snapshot=False)
             pending.append((pos, ticker))
         ib._ib.sleep(3)
@@ -118,15 +126,36 @@ def _fetch_market_data(ib: Any, positions: list) -> dict[str, dict]:
             except Exception:
                 dte = 0
             mid = None
+            source = None
             if t.bid is not None and t.ask is not None and t.bid > 0 and t.ask > 0:
                 mid = (t.bid + t.ask) / 2
-            elif t.last is not None:
+                source = "ib"
+            elif t.last is not None and not math.isnan(t.last) and t.last > 0:
                 mid = t.last
-            delta = getattr(t.modelGreeks, "delta", 0.0) if t.modelGreeks else 0.0
+                source = "ib"
+            delta_raw = getattr(t.modelGreeks, "delta", None) if t.modelGreeks else None
+            delta = (
+                delta_raw
+                if delta_raw is not None and not math.isnan(delta_raw)
+                else None
+            )
+            if mid is None:
+                tv_quote = tv_client.get_option_quote(
+                    symbol=c.symbol,
+                    expiry_yyyymmdd=c.lastTradeDateOrContractMonth,
+                    strike=c.strike,
+                    right=c.right,
+                )
+                if tv_quote is not None:
+                    mid = tv_quote["mid"]
+                    source = "tv"
+                    if delta is None:
+                        delta = tv_quote.get("delta")
             market[_position_key(pos)] = {
-                "current_price": mid or 0.0,
+                "current_price": mid,
                 "delta": delta,
                 "dte": dte,
+                "source": source,
             }
     finally:
         for _, ticker in pending:
