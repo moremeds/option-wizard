@@ -30,10 +30,18 @@ def _sorted_by_strike(rows: Iterable[dict]) -> list[dict]:
     return sorted(cleaned, key=lambda r: r["strike"])
 
 
-def _gamma_flip(rows: list[dict]) -> Optional[float]:
-    """Linear-interpolated strike at which cumulative GEX crosses zero."""
+def _gamma_flip(rows: list[dict], spot: float) -> Optional[float]:
+    """Linear-interpolated strike at which cumulative GEX crosses zero.
+
+    When the cumulative-GEX curve has multiple zero crossings — common when
+    deep-OTM put OI is large enough to push the running sum negative at low
+    strikes before call OI dominates near spot — returns the crossing
+    nearest to spot. That is the trading-relevant flip: dealer hedging
+    behavior changes around spot, not 80% below it.
+    """
     if not rows:
         return None
+    crossings: list[float] = []
     cum = 0.0
     prev_strike, prev_cum = None, 0.0
     for r in rows:
@@ -42,9 +50,11 @@ def _gamma_flip(rows: list[dict]) -> Optional[float]:
         if prev_strike is not None and prev_cum * cum < 0:
             span = strike - prev_strike
             frac = -prev_cum / (cum - prev_cum) if cum != prev_cum else 0.5
-            return prev_strike + frac * span
+            crossings.append(prev_strike + frac * span)
         prev_strike, prev_cum = strike, cum
-    return None
+    if not crossings:
+        return None
+    return min(crossings, key=lambda x: abs(x - spot))
 
 
 def _put_wall(rows: list[dict], spot: float) -> Optional[float]:
@@ -69,7 +79,7 @@ def compute_levels(gex_by_strike: Iterable[dict], spot: float) -> dict:
     """
     rows = _sorted_by_strike(list(gex_by_strike))
     return {
-        "gamma_flip": _gamma_flip(rows),
+        "gamma_flip": _gamma_flip(rows, spot),
         "put_wall": _put_wall(rows, spot),
         "call_wall": _call_wall(rows, spot),
     }
