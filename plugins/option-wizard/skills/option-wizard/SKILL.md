@@ -56,9 +56,65 @@ English:
 
 ## How to invoke scripts
 
-The skill prompt orchestrates the LLM. Numeric work is delegated to the Python scripts under `scripts/`. Examples:
+The skill prompt orchestrates the LLM. Numeric work is delegated to the Python modules under `scripts/`. Only `scripts.manage_positions` has a CLI — every other module exposes pure Python functions that you call via `python -c`, passing the UW data you already fetched as a Python literal.
 
-- FCN analysis: `.venv/bin/python -m scripts.fair_coupon --ticker ORCL --strike-pct 0.75 --tenor-months 6 --observation-months 3`
-- Gamma levels: `.venv/bin/python -m scripts.gex_levels --gex-json <path>` (input is UW spot-exposures output saved to file or stdin)
-- Build IB order: `.venv/bin/python -m scripts.ib_order --structure bull_put_spread --ticker ORCL --legs '...'`
-- Daily position scan: `.venv/bin/python -m scripts.manage_positions`
+Daily position scan (orchestrator entrypoint, has argparse):
+
+```bash
+.venv/bin/python -m scripts.manage_positions          # full scan + email
+.venv/bin/python -m scripts.manage_positions --audit-only --no-email
+```
+
+The other scripts are imported as functions:
+
+```bash
+# Gamma flip + put/call walls from UW GEX-by-strike output
+.venv/bin/python -c '
+import json, sys
+from scripts.gex_levels import compute_levels
+raw = json.load(open(sys.argv[1]))
+rows = [{"strike": float(r["strike"]),
+         "gex": float(r["call_gex"]) + float(r["put_gex"])}
+        for r in raw["result"]]
+print(compute_levels(rows, spot=423.74))
+' /path/to/uw_gex.json
+
+# VRP regime label
+.venv/bin/python -c 'from scripts.vrp import compute_vrp; print(compute_vrp(0.50, 0.40, with_label=True))'
+
+# FCN ladder analysis
+.venv/bin/python -c '
+from scripts.fair_coupon import analyze_fcn
+snap = {"spot": 200.0, "iv": 0.35, "rv": 0.30, "iv_rank": 55,
+        "skew_25d": 0.04, "max_drawdown_5y": -0.45,
+        "gex_levels": {"gamma_flip": 195.0, "put_wall": 180.0, "call_wall": 220.0}}
+r = analyze_fcn("ORCL", strike_pcts=(0.70, 0.75, 0.80, 0.85),
+                tenor_months=6, observation_months=3,
+                pb_quoted_coupon=0.12, snapshot=snap)
+print(r["verdict"], "at", r["anchor_strike_pct"])
+'
+
+# SPX macro hedge sizing
+.venv/bin/python -c '
+from scripts.macro_hedge import build_macro_hedge
+print(build_macro_hedge(portfolio_notional=1_000_000, hedge_horizon_days=60,
+                        scenario="deep_correction_-10", structure="put_spread",
+                        snapshot={"spot": 6000.0, "iv_atm_90d": 0.18}))
+'
+
+# IB order preflight (no submission)
+.venv/bin/python -c '
+from scripts.ib_order import build_preflight
+# legs = [{"action": "SELL", "strike": 420, "right": "P", ...}, ...]
+# preflight = build_preflight(structure="bull_put_spread", legs=legs, ...)
+'
+
+# Defined-risk audit (standalone)
+.venv/bin/python -c '
+from scripts.defined_risk_audit import audit_book, format_audit_findings
+findings = audit_book(positions=[...], cash_balance=38177)
+print(format_audit_findings(findings))
+'
+```
+
+All function signatures accept the exact UW snapshot/positions shapes documented in `references/data-sources.md`. The orchestrator is responsible for fetching UW data first and passing it in — scripts do not call UW themselves (kept pure for testability).
