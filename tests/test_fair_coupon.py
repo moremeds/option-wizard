@@ -184,3 +184,48 @@ def test_counter_offer_email_contains_chinese_and_english_sections():
     assert "Hi" in email
     assert "ORCL" in email
     assert "0.80" in email or "80%" in email
+
+
+# --- Task 2.4: basket FCN ---
+import numpy as np
+from scripts.fair_coupon import joint_ki_prob_mc, analyze_fcn_basket
+
+
+def test_joint_ki_prob_at_full_correlation_equals_single_name():
+    p_either, _, _ = joint_ki_prob_mc(
+        vol_a=0.80, vol_b=0.80, rho=0.999,
+        barrier=0.50, days=252, n_sims=5000, seed=42,
+    )
+    from scripts.fair_coupon import single_name_ki_prob
+    single = single_name_ki_prob(0.80, 0.50, 252)
+    assert abs(p_either - single) < 0.05
+
+
+def test_joint_ki_prob_low_correlation_higher_than_single():
+    p_either, _, _ = joint_ki_prob_mc(
+        vol_a=0.40, vol_b=0.40, rho=0.0,
+        barrier=0.70, days=126, n_sims=5000, seed=42,
+    )
+    from scripts.fair_coupon import single_name_ki_prob
+    single = single_name_ki_prob(0.40, 0.70, 126)
+    assert p_either > single
+
+
+def test_basket_analyze_returns_per_name_and_basket():
+    snapshots = {
+        "INTC": {"spot": 109.33, "iv": 0.82, "rv": 1.01, "iv_rank": 76,
+                 "skew_25d": -0.15, "max_drawdown_5y": -0.643,
+                 "gex_levels": {"gamma_flip": 95.0, "put_wall": 100.0, "call_wall": 115.0}},
+        "AMD":  {"spot": 510.13, "iv": 0.70, "rv": 0.85, "iv_rank": 94,
+                 "skew_25d": -0.18, "max_drawdown_5y": -0.630,
+                 "gex_levels": {"gamma_flip": 460.0, "put_wall": 495.0, "call_wall": 520.0}},
+    }
+    corr = np.array([[1.0, 0.7], [0.7, 1.0]])
+    result = analyze_fcn_basket(
+        tickers=["INTC", "AMD"], snapshots=snapshots, corr_matrix=corr,
+        strike_pct=0.55, tenor_months=6, observation_months=3,
+    )
+    assert "per_name" in result
+    assert "basket" in result
+    assert result["basket"]["p_ki_either"] > 0
+    assert "diversification_premium_pp" in result["basket"]

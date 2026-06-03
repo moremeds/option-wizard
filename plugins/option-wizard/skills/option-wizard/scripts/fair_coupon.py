@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 from typing import Any, Iterable
 
+import numpy as np
 from scipy.stats import norm
 
 LGD_BASE = 0.50
@@ -334,4 +335,121 @@ def analyze_fcn(
         "iv": vol,
         "iv_rank": snapshot.get("iv_rank"),
         "ladder": ladder,
+    }
+
+
+def joint_ki_prob_mc(
+    vol_a: float,
+    vol_b: float,
+    rho: float,
+    barrier: float = 0.50,
+    days: int = 252,
+    n_sims: int = 20_000,
+    seed: int = 42,
+) -> tuple[float, float, float]:
+    """Monte Carlo joint KI for a worst-of-2 FCN.
+
+    Returns (p_either, p_all, p_exactly_one). p_either is the worst-of touch
+    probability used to price the basket.
+
+    Drift convention: matches the single-name closed-form
+    2*Phi(ln(B)/(sigma*sqrt(T))), which assumes a driftless Brownian motion
+    in log-returns (no -0.5*sigma^2 correction). The two paths use the same
+    stochastic model so that at rho->1 the MC collapses to the closed-form
+    single-name result (validated by
+    test_joint_ki_prob_at_full_correlation_equals_single_name).
+    """
+    rho = max(-0.999, min(0.999, rho))
+    rng = np.random.default_rng(seed)
+    dt = 1.0 / 252.0
+    chol = np.array([[1.0, 0.0], [rho, math.sqrt(max(0.0, 1.0 - rho * rho))]])
+    z = rng.standard_normal(size=(n_sims, days, 2)) @ chol.T
+    vols = np.array([vol_a, vol_b])
+    diffusion = vols * math.sqrt(dt)
+    log_paths = np.cumsum(diffusion * z, axis=1)
+    min_paths = np.exp(log_paths.min(axis=1))
+    hits = min_paths <= barrier
+    return (
+        float(hits.any(axis=1).mean()),
+        float(hits.all(axis=1).mean()),
+        float((hits.sum(axis=1) == 1).mean()),
+    )
+
+
+def analyze_fcn_basket(
+    tickers: list[str],
+    snapshots: dict[str, dict],
+    corr_matrix,
+    strike_pct: float,
+    tenor_months: int = 6,
+    observation_months: int = 3,
+    ko_pct: float = 1.0,
+    pb_quoted_coupon: float | None = None,
+    expected_alive_months: float = 3.5,
+    lgd: float = LGD_BASE,
+    discount_rate: float = DEFAULT_DISCOUNT_RATE,
+) -> dict[str, Any]:
+    """Worst-of basket FCN analysis.
+
+    Currently supports baskets of 2 names (joint_ki_prob_mc). For 3+ names,
+    extend to joint_ki_prob_nd (not in v1 scope).
+    """
+    if len(tickers) != 2:
+        raise NotImplementedError("v1 basket FCN supports exactly 2 tickers")
+
+    tenor_years = tenor_months / 12.0
+    tenor_days = int(round(tenor_months * 21))
+
+    per_name = {}
+    single_p_kis = []
+    for t in tickers:
+        snap = snapshots[t]
+        p = single_name_ki_prob(snap["iv"], barrier=strike_pct, days=tenor_days)
+        single_p_kis.append(p)
+        per_name[t] = {
+            "spot": snap["spot"],
+            "iv": snap["iv"],
+            "iv_rank": snap.get("iv_rank"),
+            "p_ki_single": round(p, 4),
+        }
+
+    rho = float(corr_matrix[0, 1])
+    p_either, p_all, p_one = joint_ki_prob_mc(
+        vol_a=snapshots[tickers[0]]["iv"],
+        vol_b=snapshots[tickers[1]]["iv"],
+        rho=rho,
+        barrier=strike_pct,
+        days=tenor_days,
+    )
+
+    fair_basket = fair_coupon_proxy(
+        p_either, lgd, expected_alive_months, discount_rate, tenor_years
+    )
+    worst_single = max(single_p_kis)
+    fair_worst_single = fair_coupon_proxy(
+        worst_single, lgd, expected_alive_months, discount_rate, tenor_years
+    )
+    premium_min_pp = (1.0 - rho) * 0.30 * fair_worst_single
+
+    basket = {
+        "p_ki_either": round(p_either, 4),
+        "p_ki_all": round(p_all, 4),
+        "p_ki_exactly_one": round(p_one, 4),
+        "fair_coupon": round(fair_basket, 4),
+        "fair_coupon_worst_single": round(fair_worst_single, 4),
+        "correlation": round(rho, 3),
+        "diversification_premium_pp": round(premium_min_pp, 4),
+    }
+    if pb_quoted_coupon is not None:
+        basket["pb_quoted_coupon"] = pb_quoted_coupon
+        basket["verdict"] = _verdict(fair_basket, pb_quoted_coupon)
+
+    return {
+        "tickers": tickers,
+        "strike_pct": strike_pct,
+        "tenor_months": tenor_months,
+        "observation_months": observation_months,
+        "ko_pct": ko_pct,
+        "per_name": per_name,
+        "basket": basket,
     }
