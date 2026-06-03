@@ -536,11 +536,34 @@ class UWClient:
         }
         self._timeout = timeout
 
-    def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _get(self, path: str, params: dict[str, Any] | None = None,
+              max_retries: int = 3) -> dict[str, Any]:
+        """GET with exponential backoff on 429 and 5xx.
+
+        Retries up to `max_retries` times with delays 1s, 2s, 4s.
+        Non-retryable errors (4xx other than 429) raise immediately.
+        """
         url = f"{BASE_URL}{path}"
-        resp = httpx.get(url, headers=self._headers, params=params, timeout=self._timeout)
-        resp.raise_for_status()
-        return resp.json()
+        last_exc: Exception | None = None
+        for attempt in range(max_retries):
+            try:
+                resp = httpx.get(url, headers=self._headers, params=params, timeout=self._timeout)
+                if resp.status_code == 429 or 500 <= resp.status_code < 600:
+                    # retryable
+                    last_exc = httpx.HTTPStatusError(
+                        f"UW returned {resp.status_code}", request=resp.request, response=resp
+                    )
+                    import time as _time
+                    _time.sleep(2 ** attempt)
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+            except httpx.RequestError as e:
+                last_exc = e
+                import time as _time
+                _time.sleep(2 ** attempt)
+        assert last_exc is not None
+        raise last_exc
 
     # --- endpoints (one method per UW endpoint we consume) ---
 
@@ -874,7 +897,22 @@ from typing import Iterable, Optional
 
 
 def _sorted_by_strike(rows: Iterable[dict]) -> list[dict]:
-    return sorted(rows, key=lambda r: float(r["strike"]))
+    """Sort rows by strike, skipping rows with non-finite strike or gex.
+
+    Real UW responses occasionally include partial rows (null gex on
+    illiquid strikes). Drop them rather than crash the whole analysis.
+    """
+    import math
+    cleaned = []
+    for r in rows:
+        try:
+            s = float(r["strike"])
+            g = float(r["gex"])
+            if math.isfinite(s) and math.isfinite(g):
+                cleaned.append({"strike": s, "gex": g})
+        except (KeyError, TypeError, ValueError):
+            continue
+    return sorted(cleaned, key=lambda r: r["strike"])
 
 
 def _gamma_flip(rows: list[dict]) -> Optional[float]:
@@ -2082,14 +2120,31 @@ from typing import Any
 from ib_insync import IB, Option, Stock, util  # noqa: F401  (util imported for downstream)
 
 
+import os as _os
+
+
+def _default_client_id() -> int:
+    """Avoid collision between concurrent processes (e.g., cron and a
+    SessionStart hook firing on the same morning). Caller can override
+    via OPTION_WIZARD_IB_CLIENT_ID env var; otherwise we shift the
+    base 99 by PID modulo 100 so two scripts get distinct IDs.
+    """
+    override = _os.environ.get("OPTION_WIZARD_IB_CLIENT_ID")
+    if override is not None:
+        return int(override)
+    return 99 + (_os.getpid() % 100)
+
+
 @dataclass
 class IBClient:
     host: str = "127.0.0.1"
     port: int = 4001
-    client_id: int = 99
+    client_id: int = None  # set in __post_init__ if not supplied
     timeout: int = 10
 
     def __post_init__(self) -> None:
+        if self.client_id is None:
+            self.client_id = _default_client_id()
         self._ib = IB()
 
     def connect(self) -> None:
@@ -3084,33 +3139,41 @@ def _fetch_market_data(ib: Any, positions: list) -> dict[str, dict]:
 
     Uses reqMktData with snapshot=False to get a streaming subscription, then
     waits up to 3 seconds for greek+price fields to populate. Returns a dict
-    keyed by `_position_key(pos)`.
+    keyed by `_position_key(pos)`. Subscriptions are cancelled in finally
+    so a killed process does not leak them on IB Gateway.
     """
     from datetime import datetime as _dt
     market = {}
     pending = []
-    for pos in positions:
-        ticker = ib._ib.reqMktData(pos.contract, genericTickList="", snapshot=False)
-        pending.append((pos, ticker))
-    ib._ib.sleep(3)  # let market data populate
-    for pos, t in pending:
-        c = pos.contract
-        try:
-            expiry = _dt.strptime(c.lastTradeDateOrContractMonth, "%Y%m%d").date()
-            dte = (expiry - _dt.utcnow().date()).days
-        except Exception:
-            dte = 0
-        mid = None
-        if t.bid is not None and t.ask is not None and t.bid > 0 and t.ask > 0:
-            mid = (t.bid + t.ask) / 2
-        elif t.last is not None:
-            mid = t.last
-        delta = getattr(t.modelGreeks, "delta", 0.0) if t.modelGreeks else 0.0
-        market[_position_key(pos)] = {
-            "current_price": mid or 0.0,
-            "delta": delta,
-            "dte": dte,
-        }
+    try:
+        for pos in positions:
+            ticker = ib._ib.reqMktData(pos.contract, genericTickList="", snapshot=False)
+            pending.append((pos, ticker))
+        ib._ib.sleep(3)  # let market data populate
+        for pos, t in pending:
+            c = pos.contract
+            try:
+                expiry = _dt.strptime(c.lastTradeDateOrContractMonth, "%Y%m%d").date()
+                dte = (expiry - _dt.utcnow().date()).days
+            except Exception:
+                dte = 0
+            mid = None
+            if t.bid is not None and t.ask is not None and t.bid > 0 and t.ask > 0:
+                mid = (t.bid + t.ask) / 2
+            elif t.last is not None:
+                mid = t.last
+            delta = getattr(t.modelGreeks, "delta", 0.0) if t.modelGreeks else 0.0
+            market[_position_key(pos)] = {
+                "current_price": mid or 0.0,
+                "delta": delta,
+                "dte": dte,
+            }
+    finally:
+        for _, ticker in pending:
+            try:
+                ib._ib.cancelMktData(ticker.contract)
+            except Exception:
+                pass
     return market
 
 
@@ -3132,23 +3195,58 @@ def format_scan_report(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+LOCK_PATH = Path.home() / ".config" / "option-wizard" / "manage_positions.lock"
+LOCK_STALE_SECONDS = 600  # if a lock is older than this, ignore it (stuck process)
+
+
+def _acquire_lock() -> bool:
+    """File-based lock prevents cron + SessionStart from running in parallel.
+
+    Returns True if we acquired the lock (and should proceed); False if a
+    fresh lock exists (another run is in flight, we should exit quietly).
+    """
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if LOCK_PATH.exists():
+        age = (datetime.utcnow() - datetime.utcfromtimestamp(LOCK_PATH.stat().st_mtime)).total_seconds()
+        if age < LOCK_STALE_SECONDS:
+            return False
+    LOCK_PATH.write_text(str(_os.getpid()))
+    return True
+
+
+def _release_lock() -> None:
+    LOCK_PATH.unlink(missing_ok=True)
+
+
 def main(argv: list[str] | None = None) -> int:
+    import os as _os
+    from pathlib import Path
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-email", action="store_true", help="skip email delivery")
     parser.add_argument("--port", type=int, default=4001, help="IB Gateway port")
+    parser.add_argument("--force", action="store_true",
+                         help="ignore lockfile (override if you know another run is stuck)")
     args = parser.parse_args(argv)
 
-    from scripts._clients.ib import IBClient
-    with IBClient(port=args.port) as ib:
-        positions = ib.get_positions()
-        market = _fetch_market_data(ib, positions)
-        rows = scan_positions(positions, market, today=str(datetime.utcnow().date()))
-        report = format_scan_report(rows)
-    print(report)
+    if not args.force and not _acquire_lock():
+        print("manage_positions: another run is in progress (lockfile fresh); skipping")
+        return 0
 
-    if not args.no_email:
-        from scripts.email_sender import send_daily_scan
-        send_daily_scan(report, rows)
+    from scripts._clients.ib import IBClient
+    try:
+        with IBClient(port=args.port) as ib:
+            positions = ib.get_positions()
+            market = _fetch_market_data(ib, positions)
+            rows = scan_positions(positions, market, today=str(datetime.utcnow().date()))
+            report = format_scan_report(rows)
+        print(report)
+
+        if not args.no_email:
+            from scripts.email_sender import send_daily_scan
+            send_daily_scan(report, rows)
+    finally:
+        _release_lock()
 
     return 0
 

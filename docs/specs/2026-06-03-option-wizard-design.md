@@ -262,7 +262,7 @@ For long-vol macro hedges, only the take-profit bracket is set (lock in gains on
 
 ### 9.4 21-DTE Hard Review
 
-When any short-premium position reaches 21 days to expiry, the skill emits a blocking prompt the next time the trader interacts:
+When any short-premium position reaches 21 days to expiry, the skill emits a high-priority context block at the next SessionStart and at the top of any subsequent response. The block is not physically enforced (the harness has no mechanism to refuse user prompts), but the skill's response policy is to redirect any unrelated request back to the 21-DTE decision until the trader picks an action. Format:
 
 ```
 GAMMA WINDOW — POSITION REQUIRES DECISION TODAY
