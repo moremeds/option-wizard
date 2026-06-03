@@ -31,7 +31,7 @@ The skill follows the layout conventions of `himself65/trade-skills` (public ref
 - Private bank client; receives PB quotes for FCN / ELN regularly and needs to negotiate from a position of model-backed knowledge.
 - Holds an IB Gateway live account (port 4001) for self-directed orders.
 - Reads Chinese, writes Chinese; technical terms (delta, IV crush, gamma flip, KI, etc.) stay in English.
-- Risk preference: defined-risk only. Will never accept naked short calls or margin-leveraged short puts.
+- Risk preference: no naked short calls. Short puts must be cash-secured (no margin leverage). Multi-leg spreads, butterflies, collars, and Jade Lizard structures are acceptable. Cash-collateralized assignment risk on short puts is treated as accepted, not "undefined".
 
 ## 4. Data Architecture
 
@@ -158,7 +158,7 @@ When the trader passes multiple tickers, the basket path computes a worst-of FCN
 
 ## 7. Income Structures (single-name)
 
-The skill supports five income structures and refuses the rest.
+The skill supports five income structures and refuses the rest. Risk posture summary: no naked calls; short puts must be cash-secured (sufficient cash to cover assignment at strike); multi-leg structures and collars use defined-risk option spreads. CSP and Jade Lizard's short put leg are cash-collateralized — the trader explicitly accepts assignment risk in exchange for credit.
 
 | Structure | Cash / collateral requirement | Notable rules |
 |---|---|---|
@@ -376,7 +376,7 @@ The skill ships when all of the following hold:
 - A paper-account run successfully creates a `create_order_instruction` for a defined-risk spread and the OCA bracket pair (or documents the fallback if OCA is not supported).
 - `manage_positions` correctly emits a 21-DTE blocking prompt on at least one paper-account position.
 - The daily run sends a test email successfully to `chenxi.li08@outlook.com` via Gmail SMTP with the expected subject format.
-- A macro hedge call returns three candidate SPX structures with cost ≤ the configured cap.
+- A macro hedge call with `structure="auto"` returns one regime-routed recommendation with cost ≤ the configured cap. A separate `build_macro_hedge_menu` call returns up to three candidate structures (butterfly, spread, long put) ranked by cost-per-protection where applicable.
 - Refusal path is exercised: asking for a naked short call must produce an explicit decline with reasoning.
 
 ## 15. Out of Scope for v1 (Future)

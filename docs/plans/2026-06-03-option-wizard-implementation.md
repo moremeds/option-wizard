@@ -16,7 +16,7 @@
 
 ```
 ~/projects/option-wizard/
-├── .claude-plugin/plugin.json
+├── .claude-plugin/marketplace.json                    marketplace manifest (mirrors trade-skills)
 ├── .gitignore                                         (exists)
 ├── CLAUDE.md                                          trader profile + hard rules
 ├── README.md                                          repo entry
@@ -25,7 +25,9 @@
 ├── docs/
 │   ├── specs/2026-06-03-option-wizard-design.md       (exists)
 │   └── plans/2026-06-03-option-wizard-implementation.md  this file
-├── plugins/option-wizard/skills/option-wizard/
+├── plugins/option-wizard/
+│   ├── plugin.json                                    per-plugin manifest
+│   └── skills/option-wizard/
 │   ├── SKILL.md
 │   ├── README.md
 │   ├── scripts/
@@ -157,14 +159,27 @@ git commit -m "chore: initialize pyproject and python 3.13 venv"
 - Create: `CLAUDE.md`
 - Create: `package.json`
 
-- [ ] **Step 1: Write .claude-plugin/plugin.json**
+- [ ] **Step 1: Write .claude-plugin/marketplace.json and plugins/option-wizard/plugin.json**
+
+Mirrors the himself65/trade-skills layout: top-level `marketplace.json` declares the marketplace; the per-plugin manifest lives inside `plugins/<plugin>/`.
+
+`.claude-plugin/marketplace.json`:
+
+```json
+{
+  "name": "option-wizard-marketplace",
+  "plugins": ["plugins/option-wizard"]
+}
+```
+
+`plugins/option-wizard/plugin.json`:
 
 ```json
 {
   "name": "option-wizard",
   "version": "0.1.0",
   "description": "Personal options trading, FCN evaluation, and IB execution skill",
-  "skills": ["plugins/option-wizard/skills/option-wizard"]
+  "skills": ["skills/option-wizard"]
 }
 ```
 
@@ -248,8 +263,8 @@ Chinese response. English technical terms. Concrete numbers, structures, verdict
 - [ ] **Step 5: Commit**
 
 ```bash
-git add .claude-plugin/ README.md CLAUDE.md package.json
-git commit -m "feat: project scaffold (plugin manifest, README, CLAUDE.md)"
+git add .claude-plugin/ plugins/option-wizard/plugin.json README.md CLAUDE.md package.json
+git commit -m "feat: project scaffold (marketplace.json + plugin.json, README, CLAUDE.md)"
 ```
 
 ---
@@ -476,10 +491,8 @@ def test_uw_client_iv_rank_calls_correct_endpoint():
         assert result == {"data": [{"iv_rank": 91}]}
 
 
-def test_uw_client_missing_key_raises():
-    import os
-    if "UW_API_KEY" in os.environ:
-        del os.environ["UW_API_KEY"]
+def test_uw_client_missing_key_raises(monkeypatch):
+    monkeypatch.delenv("UW_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="UW_API_KEY"):
         UWClient(api_key=None)
 ```
@@ -1116,6 +1129,40 @@ def test_analyze_fcn_checklist_flags_below_flip_strike():
     flags = result["ladder"][0]["checklist"]
     item1 = next(f for f in flags if f["id"] == "strike_vs_gamma_flip")
     assert item1["status"] == "FAIL"  # 0.70 * 244.58 = 171.21 below flip 192.5
+
+
+def test_analyze_fcn_attaches_counter_offer_email_on_fail():
+    """When any checklist item fails, the rung should include a bilingual
+    counter-offer email even without an explicit PB quote."""
+    snapshot = {
+        "spot": 244.58, "iv": 0.804, "rv": 0.610, "iv_rank": 91,
+        "skew_25d": -0.20, "max_drawdown_5y": -0.582,
+        "gex_levels": {"gamma_flip": 192.5, "put_wall": 240.0, "call_wall": 250.0},
+    }
+    result = analyze_fcn(
+        ticker="ORCL", strike_pcts=[0.70], tenor_months=6,
+        observation_months=3, snapshot=snapshot,
+    )
+    rung = result["ladder"][0]
+    assert "counter_offer_email" in rung
+    assert "Hi" in rung["counter_offer_email"]
+    assert "您好" in rung["counter_offer_email"] or "你好" in rung["counter_offer_email"]
+
+
+def test_analyze_fcn_no_email_when_all_pass():
+    """When all checklist items pass and no quote provided, no email."""
+    snapshot = {
+        "spot": 244.58, "iv": 0.804, "rv": 0.610, "iv_rank": 91,
+        "skew_25d": -0.20, "max_drawdown_5y": -0.582,
+        "gex_levels": {"gamma_flip": 100.0, "put_wall": 240.0, "call_wall": 250.0},
+    }
+    result = analyze_fcn(
+        ticker="ORCL", strike_pcts=[0.85], tenor_months=6,
+        observation_months=3, snapshot=snapshot,
+    )
+    rung = result["ladder"][0]
+    # 0.85 * 244.58 = 207.89 > flip 100; cushion vs -0.582 max DD is fine.
+    assert "counter_offer_email" not in rung
 ```
 
 - [ ] **Step 2: Run tests to verify failure**
@@ -1318,6 +1365,24 @@ def analyze_fcn(
         if pb_quoted_coupon is not None:
             rung["pb_quoted_coupon"] = pb_quoted_coupon
             rung["verdict"] = _verdict(fair_base, pb_quoted_coupon)
+        # Auto-attach bilingual counter-offer email when the quote is rich
+        # or any checklist item failed. Recommended counter terms: bump
+        # strike up one notch from this rung and target 30% of model fair.
+        verdict_rich = rung.get("verdict") == "rich"
+        any_fail = any(c["status"] == "FAIL" for c in checklist)
+        if verdict_rich or any_fail:
+            # Recommend stepping up one strike-pct rung (max 0.85) and
+            # asking for coupon = 30%-40% of model fair as the counter band.
+            rec_strike_pct = min(strike_pct + 0.05, 0.85)
+            rec_low = round(fair_base * 0.30, 4)
+            rec_high = round(fair_base * 0.40, 4)
+            rung["counter_offer_email"] = build_counter_offer_email(
+                ticker=ticker,
+                rung=rung,
+                recommended_strike_pct=rec_strike_pct,
+                recommended_coupon_low=rec_low,
+                recommended_coupon_high=rec_high,
+            )
         ladder.append(rung)
 
     return {
@@ -1427,6 +1492,13 @@ def joint_ki_prob_mc(
 
     Returns (p_either, p_all, p_exactly_one). p_either is the worst-of touch
     probability used to price the basket.
+
+    Drift convention: matches the single-name closed-form
+    `2·Φ(ln(B)/(σ·√T))`, which assumes a driftless Brownian motion in
+    log-returns (no `-0.5·σ²` correction). The two paths must use the
+    same stochastic model so that the full-correlation test
+    (`test_joint_ki_prob_at_full_correlation_equals_single_name`) holds:
+    at ρ→1 the MC must collapse to the closed-form single-name result.
     """
     rho = max(-0.999, min(0.999, rho))
     rng = np.random.default_rng(seed)
@@ -1434,9 +1506,9 @@ def joint_ki_prob_mc(
     chol = np.array([[1.0, 0.0], [rho, math.sqrt(max(0.0, 1.0 - rho * rho))]])
     z = rng.standard_normal(size=(n_sims, days, 2)) @ chol.T
     vols = np.array([vol_a, vol_b])
-    drift = -0.5 * vols ** 2 * dt
+    # Driftless Brownian in log-return space — matches single_name_ki_prob.
     diffusion = vols * math.sqrt(dt)
-    log_paths = np.cumsum(drift + diffusion * z, axis=1)
+    log_paths = np.cumsum(diffusion * z, axis=1)
     min_paths = np.exp(log_paths.min(axis=1))
     hits = min_paths <= barrier
     return (
@@ -2280,17 +2352,21 @@ def build_pl_matrix(structure: str, legs: list[dict], spot: float,
     return rows
 
 
-def _max_loss_gain(matrix: list[dict]) -> tuple[float, float]:
-    """Approximate from the sampled matrix. For defined-risk spreads the
-    matrix endpoints typically reach max — refine if structure-specific."""
-    pls = [r["pl_dollar"] for r in matrix]
-    return min(pls), max(pls)
+def _account_check(structure: str, legs: list[dict], account: dict,
+                    max_loss: float | None = None) -> dict:
+    """Verify the trader can support the trade.
 
-
-def _account_check(structure: str, legs: list[dict], account: dict) -> dict:
+    For CSP: cash needed = sum of (strike × 100 × qty) on short put legs.
+    For CC / Collar: holdings ≥ short call contracts × 100 (shares to cover).
+    For credit spreads (bull put, bear call, iron condor, butterfly):
+      buying power required = |max_loss|. Caller must pass `max_loss`
+      (negative number) computed from the structure-specific formula or
+      from the sampled P/L matrix's true minimum. `_payoff_at_expiry(0, ...)`
+      is NOT safe for call-side structures because spot=0 makes all calls
+      worthless, returning net credit instead of max loss.
+    """
     bp = float(account.get("buying_power", 0))
     positions = account.get("positions", [])
-    # crude buying-power requirement: |max loss| for spreads, strike × 100 × qty for CSP
     if structure == "cash_secured_put":
         need = sum(float(l["strike"]) * int(l["qty"]) * 100
                    for l in legs if l["action"].lower() == "sell" and l["right"].lower() == "put")
@@ -2306,9 +2382,12 @@ def _account_check(structure: str, legs: list[dict], account: dict) -> dict:
             "contracts": contracts,
         }
     else:
-        # defined-risk: net credit/debit + spread width
-        worst = abs(min(0.0, _payoff_at_expiry(0.0, legs)))  # crude floor
-        need = worst
+        if max_loss is None:
+            raise ValueError(
+                f"_account_check requires max_loss for {structure}; "
+                "compute from structure formula or matrix min"
+            )
+        need = abs(min(0.0, float(max_loss)))
     return {
         "buying_power_required": round(need, 2),
         "buying_power_available": bp,
@@ -2316,12 +2395,68 @@ def _account_check(structure: str, legs: list[dict], account: dict) -> dict:
     }
 
 
+def _exact_max_loss(structure: str, legs: list[dict], pl_matrix: list[dict]) -> float:
+    """Structure-specific max loss; falls back to matrix minimum.
+
+    Sampled matrix endpoints can miss true extrema for very ITM scenarios
+    (bear call spread peaks at spot → ∞, not within ±20%). For known
+    structures use the closed-form; for unknown structures fall back to
+    the matrix min as a coarse approximation.
+    """
+    if structure in {"bull_put_spread", "put_credit_spread"}:
+        puts = [l for l in legs if l["right"].lower() == "put"]
+        short_strikes = [float(l["strike"]) for l in puts if l["action"].lower() == "sell"]
+        long_strikes = [float(l["strike"]) for l in puts if l["action"].lower() == "buy"]
+        if short_strikes and long_strikes:
+            width = max(short_strikes) - min(long_strikes)
+            qty = int(puts[0]["qty"])
+            credit = sum((1 if l["action"].lower() == "sell" else -1) *
+                         float(l.get("limit_price", 0)) * int(l["qty"]) * 100
+                         for l in puts)
+            return -(width * qty * 100 - credit)
+    if structure == "bear_call_spread":
+        calls = [l for l in legs if l["right"].lower() == "call"]
+        short_strikes = [float(l["strike"]) for l in calls if l["action"].lower() == "sell"]
+        long_strikes = [float(l["strike"]) for l in calls if l["action"].lower() == "buy"]
+        if short_strikes and long_strikes:
+            width = max(long_strikes) - min(short_strikes)
+            qty = int(calls[0]["qty"])
+            credit = sum((1 if l["action"].lower() == "sell" else -1) *
+                         float(l.get("limit_price", 0)) * int(l["qty"]) * 100
+                         for l in calls)
+            return -(width * qty * 100 - credit)
+    # fallback: matrix min (safe for puts-only / butterflies / long-puts)
+    return min(r["pl_dollar"] for r in pl_matrix)
+
+
+def _exact_max_gain(structure: str, legs: list[dict], pl_matrix: list[dict]) -> float:
+    """For credit spreads: max gain = net credit (both legs expire worthless).
+    Falls back to matrix max otherwise.
+    """
+    if structure in SPREAD_STRUCTURES:
+        credit = sum((1 if l["action"].lower() == "sell" else -1) *
+                     float(l.get("limit_price", 0)) * int(l["qty"]) * 100
+                     for l in legs)
+        return max(0.0, credit)
+    return max(r["pl_dollar"] for r in pl_matrix)
+
+
 def build_preflight(structure: str, ticker: str, spot: float, legs: list[dict],
                      uw_regime: dict, account: dict) -> dict[str, Any]:
     validate_structure(structure, legs)
     matrix = build_pl_matrix(structure, legs, spot)
-    max_loss, max_gain = _max_loss_gain(matrix)
+    # Use structure-specific exact formulas where available; the sampled
+    # matrix is for display only.
+    max_loss = _exact_max_loss(structure, legs, matrix)
+    max_gain = _exact_max_gain(structure, legs, matrix)
     net_credit = _net_credit(legs)
+    # Spread width for downstream bracket-builder use.
+    extras = {}
+    if structure in SPREAD_STRUCTURES:
+        strikes = sorted({float(l["strike"]) for l in legs})
+        if len(strikes) >= 2:
+            qty = int(legs[0]["qty"])
+            extras["spread_width_dollar"] = (max(strikes) - min(strikes)) * qty * 100
     return {
         "ticker": ticker,
         "structure": structure,
@@ -2332,7 +2467,8 @@ def build_preflight(structure: str, ticker: str, spot: float, legs: list[dict],
         "max_loss": round(max_loss, 2),
         "max_gain": round(max_gain, 2),
         "uw_regime": uw_regime,
-        "account_check": _account_check(structure, legs, account),
+        "account_check": _account_check(structure, legs, account, max_loss=max_loss),
+        **extras,
     }
 ```
 
@@ -2506,20 +2642,25 @@ git commit -m "test(ib): paper account verification of order submission + OCA su
 from scripts.ib_order import build_brackets
 
 
-def test_brackets_default_50pct_take_profit_and_2x_stop_loss():
+def test_brackets_default_50pct_take_profit_and_full_stop_for_spread():
+    # Spread width $10 × 5 contracts × $100 = $5000.
+    # Net credit at open $1050. Max loss = $5000 − $1050 = $3950.
+    # To stop at max loss, you must close the spread at a $5000 debit:
+    #   realized = credit − close_debit = 1050 − 5000 = −3950 = max_loss.
     opening = {
         "structure": "bull_put_spread",
         "net_credit_dollar": 1050.0,
-        "max_loss": -4450.0,
+        "max_loss": -3950.0,
+        "spread_width_dollar": 5000.0,
         "ticker": "ORCL",
     }
     brackets = build_brackets(opening)
     tp = next(b for b in brackets if b["bracket_type"] == "take_profit")
     sl = next(b for b in brackets if b["bracket_type"] == "stop_loss")
-    # take-profit at 50% of credit = close at debit of $1050/2 = $525
+    # take-profit closes when the spread can be bought back at 50% of credit
     assert tp["close_at_debit_or_credit"] == pytest.approx(525.0, abs=1)
-    # stop loss at 100% of max_loss (defined-risk spread) → close at debit of $4450
-    assert sl["close_at_debit_or_credit"] == pytest.approx(4450.0, abs=1)
+    # stop loss closes at the spread width (locks in full max loss)
+    assert sl["close_at_debit_or_credit"] == pytest.approx(5000.0, abs=1)
     # both must share an OCA group identifier
     assert tp["oca_group"] == sl["oca_group"]
 
@@ -2557,22 +2698,37 @@ SHORT_PREMIUM_STRUCTURES = SPREAD_STRUCTURES | {"covered_call", "cash_secured_pu
 
 def build_brackets(opening: dict, take_profit_pct: float = 0.50,
                     stop_loss_multiplier: float = 2.0) -> list[dict]:
+    """Bracket helper.
+
+    For credit spreads, realized P/L = opening_credit − closing_debit. To
+    stop at exactly the max loss you must close the spread at a debit
+    equal to the spread width (not abs(max_loss), which equals
+    width − credit). Caller must pass `spread_width_dollar` in opening
+    for spread structures.
+
+    For CSP / CC / Jade Lizard the per-leg short option is the unit;
+    stop is set at `stop_loss_multiplier × opening_credit` as a debit
+    cap (close cost when buying back).
+    """
     structure = opening["structure"]
     if structure not in SHORT_PREMIUM_STRUCTURES:
         return []  # long-vol / long-put structures use only a take-profit, handled separately
     credit = float(opening.get("net_credit_dollar", 0))
-    max_loss = float(opening.get("max_loss", 0))  # negative for spreads
 
     oca = f"opt_wiz_{opening['ticker']}_{uuid.uuid4().hex[:8]}"
 
     take_profit_debit = credit * take_profit_pct
 
     if structure in SPREAD_STRUCTURES:
-        # defined risk: stop = 100% of max loss
-        stop_loss_debit = abs(max_loss)
+        width = float(opening.get("spread_width_dollar", 0))
+        if width <= 0:
+            raise ValueError("spread_width_dollar required for spread structures")
+        stop_loss_debit = width
+        stop_rationale = "close at spread width (locks in full max loss)"
     else:
         # CSP / CC / jade lizard: stop = N× credit (default 2×)
         stop_loss_debit = credit * stop_loss_multiplier
+        stop_rationale = f"close at {stop_loss_multiplier:.0f}× credit"
 
     return [
         {
@@ -2585,10 +2741,7 @@ def build_brackets(opening: dict, take_profit_pct: float = 0.50,
             "bracket_type": "stop_loss",
             "oca_group": oca,
             "close_at_debit_or_credit": round(stop_loss_debit, 2),
-            "rationale": (
-                "close at 100% of max loss" if structure in SPREAD_STRUCTURES
-                else f"close at {stop_loss_multiplier:.0f}× credit"
-            ),
+            "rationale": stop_rationale,
         },
     ]
 ```
@@ -3061,8 +3214,11 @@ def test_butterfly_for_mild_correction_target():
 
 
 def test_put_spread_for_deep_correction():
+    # SPX 1-lot ATM/-10% put spread is ~$14k at 18% IV and 60 DTE; a
+    # $1M portfolio's 60-day cap (1.5% × 60/365) is ~$2.5k, so the call
+    # must raise. Use a larger portfolio in the happy-path test.
     result = build_macro_hedge(
-        portfolio_notional=1_000_000,
+        portfolio_notional=10_000_000,
         hedge_horizon_days=60,
         scenario="deep_correction_-10",
         underlying="SPX",
@@ -3071,6 +3227,18 @@ def test_put_spread_for_deep_correction():
     )
     assert result["structure"] == "put_spread"
     assert len(result["legs"]) == 2
+
+
+def test_put_spread_rejected_on_small_account():
+    with pytest.raises(ValueError, match="cost"):
+        build_macro_hedge(
+            portfolio_notional=1_000_000,
+            hedge_horizon_days=60,
+            scenario="deep_correction_-10",
+            underlying="SPX",
+            structure="put_spread",
+            snapshot=SPX_SNAPSHOT,
+        )
 
 
 def test_long_put_for_crash_scenario():
