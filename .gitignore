@@ -1,6 +1,7 @@
 .DS_Store
 __pycache__/
 *.pyc
+*.egg-info/
 .venv/
 .env
 .env.local
@@ -8,3 +9,4 @@ node_modules/
 *.log
 outputs/
 .worktrees/
+.mcp.json

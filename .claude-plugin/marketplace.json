@@ -1,0 +1,4 @@
+{
+  "name": "option-wizard-marketplace",
+  "plugins": ["plugins/option-wizard"]
+}
