@@ -316,7 +316,7 @@ See `references/` for the full domain knowledge:
 
 1. Defined-risk only. Refuse naked short calls and margin-leveraged short puts; explain why when refusing.
 2. UW first for numeric metrics: IV rank, RV, skew, IV term structure, max pain, GEX by strike, greeks by strike, dark pool, interpolated IV. Do not recompute these client-side. Compute only what UW lacks (gamma flip from GEX, put/call walls from GEX, VRP from IV−RV, FCN fair coupon).
-3. Every order shows the pre-flight (legs, mid price, net debit/credit, max loss, max gain, breakeven, margin, P/L matrix at expiry across spot −20 / −10 / −5 / 0 / +5 / +10 / +20 percent, account verification, UW regime check, liquidity check, catalyst clock) before submission. Exactly one YES/NO question. YES → call IB MCP `create_order_instruction`. Anything else → abort.
+3. Every order shows the pre-flight (legs, mid price, net debit/credit, max loss, max gain, breakeven, margin, P/L matrix at expiry across spot −20 / −10 / −5 / 0 / +5 / +10 / +20 percent, account verification, UW regime check, liquidity check, catalyst clock) before submission. Exactly one YES/NO question. YES → submit via `ib_insync.placeOrder` (option orders) or `create_order_instruction` (stock drafts for tap-to-approve). Anything else → abort.
 4. Any short-premium position at 21 DTE produces a blocking review prompt. The trader must pick close / roll / hold-and-accept-gamma before any other request is answered.
 5. FCN does not go through IB. FCN output is the 8-item PB checklist, a 70/75/80/85% strike ladder, a fair vs quoted verdict, and a bilingual counter-offer email (Chinese first, English second).
 6. Bracket order defaults: take-profit at 50% of max gain, stop-loss at 2× credit received (100% of max loss for spreads). Per-order override allowed.
@@ -571,13 +571,15 @@ class UWClient:
         return self._get(f"/api/stock/{ticker}/iv-rank")
 
     def realized_volatility(self, ticker: str) -> dict[str, Any]:
-        return self._get(f"/api/stock/{ticker}/realized-volatility")
+        # Path verified live 2026-06-03 via scripts/smoke/uw_smoke.py
+        return self._get(f"/api/stock/{ticker}/volatility/realized")
 
     def historical_risk_reversal_skew(self, ticker: str) -> dict[str, Any]:
         return self._get(f"/api/stock/{ticker}/historical-risk-reversal-skew")
 
     def iv_term_structure(self, ticker: str) -> dict[str, Any]:
-        return self._get(f"/api/stock/{ticker}/implied-volatility-term-structure")
+        # Path verified live 2026-06-03 via scripts/smoke/uw_smoke.py
+        return self._get(f"/api/stock/{ticker}/volatility/term-structure")
 
     def max_pain(self, ticker: str) -> dict[str, Any]:
         return self._get(f"/api/stock/{ticker}/max-pain")
@@ -619,6 +621,17 @@ git commit -m "feat(uw): REST client wrapping the endpoints option-wizard uses"
 ### Task 1.2: UW live smoke test + endpoint path verification
 
 **Goal:** Resolve spec §13 open item #3 — confirm exact UW endpoint paths and JSON field shapes against the live API.
+
+**Status (2026-06-03):** ✅ **Resolved out-of-band.** A standalone uv-script
+at `scripts/smoke/uw_smoke.py` was run against the live UW API on
+2026-06-03. All 10 endpoints option-wizard depends on return 200 OK
+against ORCL with a consistent `{data}` (or `{data, date}`) top-level
+shape. Two paths were corrected (see Task 1.1 inline comments):
+`realized-volatility` → `volatility/realized`,
+`implied-volatility-term-structure` → `volatility/term-structure`. The
+pytest version below is still worth landing for CI but is no longer
+blocking: it covers the same surface and lets the test suite re-verify
+on every change to `_clients/uw.py`.
 
 **Files:**
 - Create: `tests/integration/__init__.py` (empty)
@@ -1817,7 +1830,7 @@ Content covers (each as a short section, 2-4 paragraphs each):
 1. **UW first policy** — restate the rule from SKILL.md, list the UW endpoints UW serves directly with the exact path and the corresponding `UWClient` method name.
 2. **Client-side derivations** — gamma flip / put wall / call wall / VRP / FCN fair coupon, with the script file that computes each.
 3. **TradingView role** — what TV is used for, that `finance-data-providers:tradingview-reader` skill is the entry point, examples of asking it for SMA / RSI / news.
-4. **IB role** — read positions and balances via IB MCP, write order instructions, contract resolution. Note that `create_order_instruction` is a pending-approval step, not auto-execution.
+4. **IB role** — IB MCP is read-only for account state (positions, balances, orders, trade history) and equity-only for writes (`create_order_instruction`, which is a draft requiring user approval). All option execution and bracket orders go through `ib_insync` directly. See `scripts/smoke/ib_mcp_findings.md` for the verified capability matrix.
 5. **Call order for a fresh analysis** — list of the standard sequence: UW vol metrics → UW GEX → derive levels → UW greeks for candidate strikes → TV spot confirmation → IB account context.
 
 - [ ] **Step 2: Commit**
@@ -1940,13 +1953,13 @@ git commit -m "docs(refs): FCN framework with 8-item PB defense checklist"
 
 Content covers:
 
-1. **IB MCP two-step model** — create_order_instruction → user approves in TWS.
+1. **Execution layering** — restate spec §9.1: `ib_insync` is canonical for all option orders + brackets; IB MCP `create_order_instruction` is used only for equity drafts (FCN underlying delivery, covered-call stock-leg buys) where the trader wants tap-to-approve.
 2. **Pre-trade pre-flight checklist** — every item the spec §9.2 lists.
-3. **Bracket order defaults** — 50% take-profit, 2× credit stop-loss, table of per-structure defaults from spec.
+3. **Bracket order defaults** — 50% take-profit, 2× credit stop-loss, table of per-structure defaults from spec. Mechanics: built via `ib_insync.bracketOrder(parent, takeProfit, stopLoss)` which returns 3 linked `Order` objects with OCA group set on the children.
 4. **21 DTE hard review** — block on the next interaction, three options (close / roll / accept-gamma).
 5. **Roll constraints** — defined-risk preservation, net credit or limited debit, no earnings span.
 6. **No-assignment policy** — 21 DTE rule is the safety; if missed, prefer roll over accept-assignment.
-7. **OCA group handling** — link the three legs; fallback if IB MCP does not support OCA (manual cancel-on-fill in `manage_positions`).
+7. **OCA group mechanics at the ib_insync layer** — `Order.ocaGroup` and `Order.ocaType` semantics; cancelling one child via `ib.cancelOrder(child)` removes both siblings when ocaType=1 (cancel-all-with-block).
 8. **Failure modes** — IB disconnection, partial fill, margin call mid-position.
 
 - [ ] **Step 2: Commit**
@@ -2555,14 +2568,34 @@ git commit -m "feat(ib): order construction with rejection clauses and pre-fligh
 
 ---
 
-### Task 4.3: Paper-account verification of `create_order_instruction` AND `ib_insync.placeOrder`
+### Task 4.3: Paper-account verification of `ib_insync.placeOrder` + IB MCP stock-draft path
 
-**Goal:** Resolve spec §13 open items #1 and #2 — confirm two separate behaviors:
+**Status (2026-06-03):** Spec §13 open items #1 and #2 (IB MCP draft vs
+live; IB MCP OCA support) are **already resolved by capability probe**:
 
-1. **MCP path** (`mcp__claude_ai_Interactive_Brokers_IBKR__create_order_instruction`) — verify whether it creates a pending-approval instruction or submits live.
-2. **Python path** (`scripts._clients.ib.IBClient.place_order` which wraps `ib_insync.IB.placeOrder`) — this is known to submit live (no approval step). The pre-flight `YES/NO` in `build_preflight` is therefore the only safety gate for the Python path.
+- `create_order_instruction` is **draft-only** (writes to a separate
+  `get_order_instructions` queue, never the live `get_account_orders`
+  queue). Confirmed by `scripts/smoke/ib_mcp_findings.md`.
+- IB MCP **has no OCA / parent / child semantics** — schema doesn't
+  expose those fields. Brackets must be attached at the `ib_insync`
+  layer.
+- IB MCP **cannot place option orders at all** (equity + ETF only).
 
-Both paths exist in the design: the LLM in-session may use the MCP, while the daily hook uses the Python path. Each must be verified on paper before any live order.
+The verification this task still has to do is narrowed:
+
+1. **Python path** (`scripts._clients.ib.IBClient.place_order` →
+   `ib_insync.IB.placeOrder`) — confirm on a paper account that orders
+   submit live with no approval step. The pre-flight `YES/NO` in
+   `build_preflight` is the only safety gate.
+2. **Bracket order** (`ib_insync.bracketOrder(...)`) — confirm on paper
+   that submitting a parent order with two children produces three
+   linked OCA orders visible in TWS, and that filling the parent
+   triggers the OCA group automatically (cancel one child cancels the
+   other).
+3. **MCP stock-draft path** (`create_order_instruction` for a stock) —
+   confirm on paper that the resulting instruction lands in
+   `get_order_instructions`, opens correctly via the deep-link, and only
+   becomes a live order if the trader approves it in the IBKR app.
 
 **Files:**
 - Create: `tests/integration/test_ib_paper_smoke.py`
@@ -2571,49 +2604,74 @@ Both paths exist in the design: the LLM in-session may use the MCP, while the da
 - [ ] **Step 1: Write the verification doc**
 
 ```markdown
-# IB MCP `create_order_instruction` Verification
+# IB execution paper verification
 
-Before option-wizard places live orders, verify two assumptions on a paper account:
+## What's already known (no test needed)
 
-1. `mcp__claude_ai_Interactive_Brokers_IBKR__create_order_instruction` produces a pending-approval state in TWS, not auto-fill.
-2. The MCP supports OCA (One-Cancels-All) groups for bracket order linkage. If not, document the fallback.
+- IB MCP `create_order_instruction` is **draft-only** and supports **equity
+  + ETF only**. It cannot place option orders. It has no OCA / parent /
+  child fields. Confirmed via `scripts/smoke/ib_mcp_findings.md`.
+- All option orders therefore go through `ib_insync` directly.
+- Brackets are attached via `ib_insync.bracketOrder(...)`, which builds
+  three linked orders (parent + take-profit child + stop-loss child) with
+  an OCA group on the children. Documented in the ib_insync source and
+  IBKR API guide.
 
-## Setup
+## What we still verify on paper
 
-- Open TWS or IB Gateway in paper account mode (port 7497 for TWS paper).
-- Run `mcp__claude_ai_Interactive_Brokers_IBKR__get_account_summary` and confirm the account number begins with `D` (paper) or matches a known paper account.
+### Setup
 
-## Test A (MCP path): Single-leg pending-approval check
+- Open TWS or IB Gateway in paper account mode (port 7497 for TWS paper,
+  4002 for IB Gateway paper).
+- Run `mcp__claude_ai_Interactive_Brokers_IBKR__get_account_summary` and
+  confirm the account number begins with `D` (paper) or matches a known
+  paper account.
 
-Use the MCP to submit a small defined-risk trade. Example:
+### Test A (Python path): ib_insync places live without approval
 
-- Underlying: SPY
-- Structure: 1-contract bull put spread, short 5% OTM, long 10% OTM, 45 DTE
-- Limit price: aggressive mid (likely to not fill instantly)
+The Python `IBClient.place_order` wrapping `ib_insync.IB.placeOrder` is
+known to submit live with no approval step. Verify on paper that:
 
-Then check whether the order appears in TWS as `Pre-Submit` / `Pending` (good) or `Filled` (bad). Document the observation.
+- An order placed via `IBClient.place_order` shows up immediately in TWS
+  as `PreSubmitted` → `Submitted` (filled if liquid) without any user
+  approval prompt.
+- The safety implication: `scripts/ib_order.py` must enforce the `YES/NO`
+  pre-flight gate before ever calling `IBClient.place_order`. There is
+  no second chance.
 
-## Test B (MCP path): OCA bracket support
+### Test B (Python path): bracketOrder produces a working OCA group
 
-After submitting the opening order, attempt to submit two child orders with the same `ocaGroup` field. If IB MCP accepts the field and TWS shows both as part of one OCA group, OCA is supported.
+Submit a single-leg parent buy + bracket pair (take-profit sell + stop-loss
+sell). Verify in TWS that:
 
-If not supported, the fallback is in `scripts/manage_positions.py`: detect the fill of one bracket leg via daily polling and submit a cancel for the other.
+- All three orders appear, the parent as `PreSubmitted`/`Submitted`, the
+  children as `PendingSubmit`/`Hold` (depending on TWS configuration).
+- Both children share an `ocaGroup` value (TWS column or the order
+  detail panel).
+- After the parent fills, cancelling one child cancels the other.
 
-## Test C (Python path): ib_insync behavior
+### Test C (MCP stock-draft path): instruction → deep-link → approve
 
-The Python `IBClient.place_order` wrapping `ib_insync.IB.placeOrder` is known to submit live with no approval step. Verify on paper that:
+Use the MCP to draft a stock order (e.g. 1 share of ORCL at $1.00 LIMIT).
+Verify:
 
-- An order placed via `IBClient.place_order` shows up immediately in TWS as `PreSubmitted` → `Submitted` (filled if liquid) without any user approval prompt.
-- The safety implication: `scripts/ib_order.py` must enforce the `YES/NO` pre-flight gate before ever calling `IBClient.place_order`. There is no second chance.
+- `create_order_instruction` returns an `instruction_id` and a URL.
+- `get_order_instructions` includes the instruction.
+- `get_account_orders` does **not** include it.
+- Opening the URL on the IBKR app prompts the trader to approve before
+  it becomes a live order.
+- After approval, the order moves to `get_account_orders` with the
+  expected limit price. Cancel it from the IBKR app to clean up.
 
-## Outcome
+### Outcome checklist
 
-Record findings inline below and reference from `scripts/ib_order.py` and `references/execution.md`.
+Record findings inline below and reference from `scripts/ib_order.py`
+and `references/execution.md`.
 
-- [ ] (MCP) `create_order_instruction` is pending-approval: YES / NO / partial
-- [ ] (MCP) OCA groups supported: YES / NO
 - [ ] (Python) `ib_insync.placeOrder` submits live with no approval: YES / NO
-- [ ] Fallback documented in `manage_positions.py`: YES / NO
+- [ ] (Python) `ib_insync.bracketOrder` produces a working OCA group: YES / NO
+- [ ] (MCP) `create_order_instruction` instruction lands in `get_order_instructions` queue: YES / NO
+- [ ] (MCP) Deep-link approval flow works end-to-end: YES / NO
 ```
 
 - [ ] **Step 2: Write a manual-run smoke test that exercises a paper order**
@@ -3279,6 +3337,232 @@ Expected: 3 passed. (The `main()` entrypoint is not covered by unit tests; it is
 ```bash
 git add plugins/option-wizard/skills/option-wizard/scripts/manage_positions.py tests/test_manage_positions.py
 git commit -m "feat(positions): daily scan entrypoint with priority-sorted report"
+```
+
+---
+
+### Task 5.3: `scripts/defined_risk_audit.py` — existing-book audit (spec §10.3)
+
+**Goal:** Surface margin-secured short positions on the user's existing
+book in the daily report. Output a per-underlying row listing assignment
+cost, cash-coverage ratio, and a suggested defined-risk conversion.
+
+**Files:**
+- Create: `plugins/option-wizard/skills/option-wizard/scripts/defined_risk_audit.py`
+- Create: `tests/test_defined_risk_audit.py`
+- Modify: `plugins/option-wizard/skills/option-wizard/scripts/manage_positions.py`
+  to call `audit_book()` and prepend its findings to the daily report.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# tests/test_defined_risk_audit.py
+from scripts.defined_risk_audit import audit_book
+
+
+def _pos(contract_id, description, position, market_price=0.0):
+    return {
+        "contract_id": contract_id,
+        "contract_description": description,
+        "position": position,
+        "market_price": market_price,
+    }
+
+
+def test_audit_flags_uncovered_short_puts_by_underlying():
+    positions = [
+        _pos(1, "QQQ    JUN2026 665 P [QQQ   260630P00665000 100]", -2),
+        _pos(2, "QQQ    JUN2026 695 P [QQQ   260630P00695000 100]", -1),
+    ]
+    cash = 38_177.0
+    findings = audit_book(positions, cash_balance=cash)
+    qqq = next(f for f in findings if f["underlying"] == "QQQ")
+    assert qqq["assignment_cost"] == 665 * 200 + 695 * 100
+    assert qqq["coverage_ratio"] < 1.0
+    assert qqq["fails"] == "cash_secured_put"
+
+
+def test_audit_passes_fully_cash_secured_short_put():
+    positions = [_pos(1, "ORCL   JUN2026 200 P [ORCL  260619P00200000 100]", -1)]
+    findings = audit_book(positions, cash_balance=25_000.0)
+    assert findings == []
+
+
+def test_audit_passes_covered_call():
+    positions = [
+        _pos(1, "ORCL", 300, market_price=170.0),
+        _pos(2, "ORCL   JUN2026 250 C [ORCL  260619C00250000 100]", -2),
+    ]
+    findings = audit_book(positions, cash_balance=0.0)
+    assert findings == []
+
+
+def test_audit_flags_uncovered_short_call():
+    positions = [
+        _pos(1, "ORCL", 100, market_price=170.0),
+        _pos(2, "ORCL   JUN2026 250 C [ORCL  260619C00250000 100]", -2),
+    ]
+    findings = audit_book(positions, cash_balance=0.0)
+    orcl = next(f for f in findings if f["underlying"] == "ORCL")
+    assert orcl["fails"] == "covered_call"
+
+
+def test_audit_recognizes_a_paired_spread_as_defined_risk():
+    positions = [
+        _pos(1, "QQQ    JUN2026 695 P [QQQ   260630P00695000 100]", -1),
+        _pos(2, "QQQ    JUN2026 685 P [QQQ   260630P00685000 100]", +1),
+    ]
+    findings = audit_book(positions, cash_balance=0.0)
+    assert findings == []  # spread is defined-risk, no flag
+```
+
+- [ ] **Step 2: Run tests, expect failure**
+
+Run: `uv run pytest tests/test_defined_risk_audit.py -v`
+Expected: ImportError or AttributeError on `scripts.defined_risk_audit`.
+
+- [ ] **Step 3: Implement `defined_risk_audit.py`**
+
+```python
+# plugins/option-wizard/skills/option-wizard/scripts/defined_risk_audit.py
+"""
+Defined-risk audit (spec §10.3).
+
+Reads positions in the shape returned by IB MCP get_account_positions:
+    {"contract_id": int, "contract_description": str, "position": float,
+     "market_price": float, ...}
+
+Parses option descriptions of the form:
+    "QQQ    JUN2026 665 P [QQQ   260630P00665000 100]"
+
+Per underlying, checks:
+  - aggregate cash-secured coverage on net-short puts
+  - share coverage on net-short calls
+  - whether each short option is paired with a long protective option of
+    the same expiry within $20 of strike (defined-risk spread)
+
+Returns a list of findings ready to format into the daily report.
+"""
+from __future__ import annotations
+
+import re
+from collections import defaultdict
+from typing import Any
+
+
+_OPTION_RE = re.compile(
+    r"^(?P<underlying>\S+)\s+(?P<expiry_label>\S+)\s+(?P<strike>\d+(?:\.\d+)?)\s+(?P<right>[PC])"
+)
+_OCC_RE = re.compile(
+    r"\[(?P<occ_underlying>\S+)\s+(?P<occ_expiry>\d{6})(?P<occ_right>[PC])(?P<occ_strike>\d{8})\s+\d+\]"
+)
+
+
+def _parse_option(description: str) -> dict[str, Any] | None:
+    m = _OPTION_RE.match(description)
+    if not m:
+        return None
+    occ = _OCC_RE.search(description)
+    expiry = None
+    if occ:
+        expiry = "20" + occ.group("occ_expiry")
+    return {
+        "underlying": m.group("underlying"),
+        "strike": float(m.group("strike")),
+        "right": m.group("right"),
+        "expiry": expiry,
+    }
+
+
+def _is_stock(description: str) -> bool:
+    return _OPTION_RE.match(description) is None and "[" not in description
+
+
+def audit_book(positions: list[dict[str, Any]], cash_balance: float) -> list[dict[str, Any]]:
+    shares_by_underlying: dict[str, float] = defaultdict(float)
+    options_by_underlying: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    for p in positions:
+        desc = p.get("contract_description", "")
+        qty = float(p.get("position", 0.0))
+        if _is_stock(desc):
+            shares_by_underlying[desc.strip()] += qty
+            continue
+        opt = _parse_option(desc)
+        if opt is None:
+            continue
+        opt["position"] = qty
+        options_by_underlying[opt["underlying"]].append(opt)
+
+    findings: list[dict[str, Any]] = []
+    for underlying, legs in options_by_underlying.items():
+        shorts_puts = [l for l in legs if l["right"] == "P" and l["position"] < 0]
+        longs_puts = [l for l in legs if l["right"] == "P" and l["position"] > 0]
+        shorts_calls = [l for l in legs if l["right"] == "C" and l["position"] < 0]
+        longs_calls = [l for l in legs if l["right"] == "C" and l["position"] > 0]
+
+        # paired short → ignore (defined-risk spread)
+        def _is_protected(short_leg: dict[str, Any], pool: list[dict[str, Any]]) -> bool:
+            return any(
+                l["expiry"] == short_leg["expiry"]
+                and abs(l["strike"] - short_leg["strike"]) <= 20.0
+                for l in pool
+            )
+
+        uncovered_puts = [l for l in shorts_puts if not _is_protected(l, longs_puts)]
+        uncovered_calls = [l for l in shorts_calls if not _is_protected(l, longs_calls)]
+
+        if uncovered_puts:
+            assignment_cost = sum(l["strike"] * abs(l["position"]) * 100 for l in uncovered_puts)
+            findings.append({
+                "underlying": underlying,
+                "fails": "cash_secured_put",
+                "short_legs": uncovered_puts,
+                "assignment_cost": assignment_cost,
+                "coverage_ratio": cash_balance / assignment_cost if assignment_cost else float("inf"),
+            })
+
+        if uncovered_calls:
+            shares = shares_by_underlying.get(underlying, 0.0)
+            short_qty = sum(abs(l["position"]) * 100 for l in uncovered_calls)
+            if shares < short_qty:
+                findings.append({
+                    "underlying": underlying,
+                    "fails": "covered_call",
+                    "short_legs": uncovered_calls,
+                    "shares_held": shares,
+                    "shares_needed": short_qty,
+                })
+
+    return findings
+```
+
+- [ ] **Step 4: Run tests, expect pass**
+
+Run: `uv run pytest tests/test_defined_risk_audit.py -v`
+Expected: 5 passed.
+
+- [ ] **Step 5: Wire into `manage_positions.py`**
+
+In `scripts/manage_positions.py`, after fetching positions and before the
+per-position routine review, call:
+
+```python
+from scripts.defined_risk_audit import audit_book
+
+findings = audit_book(positions, cash_balance=account_summary["total_cash_value"])
+if findings:
+    report.prepend_section("Defined-Risk Audit", _format_audit(findings))
+```
+
+The `--audit-only` flag short-circuits after this step so the audit can
+be run independently of the routine review.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add plugins/option-wizard/skills/option-wizard/scripts/defined_risk_audit.py tests/test_defined_risk_audit.py plugins/option-wizard/skills/option-wizard/scripts/manage_positions.py
+git commit -m "feat(audit): defined-risk audit of existing book per spec §10.3"
 ```
 
 ---

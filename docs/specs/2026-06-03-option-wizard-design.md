@@ -225,15 +225,38 @@ The skill proactively suggests adding or sizing-up macro hedge when:
 
 ## 9. Execution Module
 
-### 9.1 IB MCP Two-Step Model
+### 9.1 Execution Layering: ib_insync for options, IB MCP for stock drafts
 
-The IB MCP exposes `create_order_instruction` rather than direct execution. The skill creates an instruction; the trader approves it in TWS (Trader Workstation) before it becomes a working order. This separation gives a final out: even after `YES` in the skill, the trader can reject in TWS.
+The IB MCP (`mcp__claude_ai_Interactive_Brokers_IBKR__*`) capability matrix
+was verified live on 2026-06-03 (see `scripts/smoke/ib_mcp_findings.md`):
 
-A paper-account dry run is mandatory before any live order. The skill verifies whether `create_order_instruction` produces a pending-approval state or a live order before being trusted with real capital.
+- **`create_order_instruction` supports Equity and ETF only.** It cannot
+  place any option order — single leg, spread, condor, or anything else.
+- **No OCA / parent-child / bracket fields** in its schema (only
+  `contract_id`, `side`, `order_type`, `quantity`, `limit_price`,
+  `time_in_force`). Bracket groups must be assembled below the MCP layer.
+- **Instructions are drafts, not live orders.** `get_order_instructions`
+  is a separate queue from `get_account_orders`; the MCP returns an
+  instruction ID + deep-link that the trader opens in IBKR to approve.
+
+The execution layer is therefore split:
+
+| Order type | Path | Why |
+|---|---|---|
+| Any option order (CC, CSP, spread, condor, jade lizard, macro hedge legs) | `ib_insync` via IB Gateway (port 4001) | MCP cannot place options at all |
+| Bracket / OCA group around any option order | `ib_insync.bracketOrder(...)` | MCP has no OCA semantics |
+| Stock buy/sell that we want the trader to approve via tap | IB MCP `create_order_instruction` (draft) → trader approves in IBKR app | Two-step out is a feature for human-in-loop confirms |
+| Stock buy/sell that the system has already pre-flighted and we want live | `ib_insync` `placeOrder` | Same path as options keeps one mental model |
+| Account state reads (positions, balances, orders, history) | IB MCP read-only tools | Native to the MCP, no Gateway dependency |
+
+The "two-step" out the MCP gave us for the stock-draft path remains useful
+for FCN underlying-stock delivery exits and covered-call stock-leg buys;
+both are equity orders the trader may want to eyeball before they fire.
 
 ### 9.2 Pre-Trade Pre-Flight (every order)
 
-Before any `create_order_instruction` call, the skill displays:
+Before any order is submitted (via either `ib_insync.placeOrder` or IB MCP
+`create_order_instruction`), the skill displays:
 
 - Underlying spot (from TradingView realtime)
 - Each leg with action, right, strike, expiry, quantity, mid price
@@ -250,7 +273,9 @@ The skill emits exactly one `YES / NO` question. Only `YES` triggers submission.
 
 ### 9.3 Default Bracket Orders
 
-Every short-premium opening order is paired with two GTC orders in an OCA group:
+Every short-premium opening order is paired with two GTC orders in an OCA
+group, attached via `ib_insync.bracketOrder(...)` (the MCP has no OCA
+semantics — see §9.1):
 
 | Trigger | Default | Configurable? |
 |---|---|---|
@@ -325,6 +350,34 @@ Failure modes:
 - Email send timeout → retry once after 30 seconds, then log and continue.
 - Manual override: a `--no-email` flag on `manage_positions.py` skips the send step for one-off runs.
 
+### 10.3 Defined-Risk Audit (Existing Book)
+
+The "defined-risk only" rule in §3 applies to anything option-wizard
+**recommends or executes** going forward. Existing positions opened
+outside the skill (margin-secured short puts, calls without underlying
+shares, etc.) are not automatically rolled or closed by the skill — but
+they are surfaced in a daily audit section so they don't get forgotten.
+
+`manage_positions.py` produces a `Defined-Risk Audit` section in the
+SessionStart block and the daily email when any existing short position
+fails one of these checks:
+
+| Check | Formula | Fails when |
+|---|---|---|
+| Cash-secured short put | `cash_balance ≥ Σ(strike × abs(contracts) × 100)` per underlying | aggregate assignment cost across that underlying's short puts exceeds settled cash |
+| Covered short call | `shares_held ≥ abs(contracts) × 100` per underlying | short call quantity exceeds long stock quantity |
+| Defined-risk spread | both legs same underlying, opposite side, same expiry, paired strikes | a short option has no offsetting long protection within ≤ $20 of strike for the same expiry |
+
+Output per failing underlying is one row: `underlying | short_legs |
+assignment_cost | cash_coverage_ratio | suggested_conversion`. Suggested
+conversion is the cheapest defined-risk reshape (e.g., "buy 695 P for
+$3.95 to convert -1 696 P / -1 695 P into a -1 696 P / +1 695 P spread,
+caps loss at $100 vs current $69,500").
+
+This section is informational; it does not auto-execute conversions. A
+separate `--audit-only` flag on `manage_positions.py` runs only the audit
+(skips the per-position routine review).
+
 ## 11. SKILL.md Frontmatter
 
 The `name` is `option-wizard`. The `description` enumerates triggers:
@@ -354,17 +407,49 @@ The daily hook for `manage_positions.py` is added to `~/.claude/settings.json` i
 
 ## 13. Open Items for Implementation Phase
 
-These were left intentionally for the implementation plan to resolve:
+Resolved 2026-06-03 by smoke tests + IB MCP capability probe (see
+`scripts/smoke/uw_smoke.py`, `scripts/smoke/ib_mcp_findings.md`):
 
-1. Confirm `create_order_instruction` behavior on a paper account before any live order is placed.
-2. Confirm IB MCP support for OCA groups (bracket order linkage); fall back to manual cancel-on-fill detection in `manage_positions.py` if not supported.
-3. Verify exact UW endpoint paths and JSON field names against the live API documentation; the paths in Section 4.2 were derived from the UW skill manifest and need confirmation before scripts are written.
-4. Choose exact underlying for macro hedge (`SPX` cash-settled index vs `SPY` ETF — the trader picks during implementation).
-5. Pick per-order position-sizing cap (suggested: ≤ 2% of account net liquidation value per single-name short-premium trade, ≤ 1.5% annualized total for macro hedge).
-6. Default short-leg delta target for Sell Put / Bull Put Spread (suggested: −0.25 unless overridden).
-7. Whether to publish to a GitHub repo for multi-machine sync via `npx skills add`.
-8. Confirm the Gmail sender address and generate the App Password before the email hook is enabled. Sender address and password are not part of the repo.
-9. Macro hedge Black-Scholes pricer omits dividend yield `q`. Negligible for SPX cash-settled index (~0% effective yield), but for SPY (~1.3% trailing yield) put values are slightly overpriced. Add `q` parameter if SPY becomes the default underlying.
+- ~~`create_order_instruction` behavior~~ → **Resolved.** It creates a
+  draft in a separate `get_order_instructions` queue; the trader approves
+  via deep-link in IBKR. Confirmed by the queue being empty while a live
+  QQQ order sits in `get_account_orders`.
+- ~~IB MCP OCA support~~ → **Resolved: not supported.** Schema has no
+  OCA / parent / child fields. Brackets are attached via
+  `ib_insync.bracketOrder(...)` instead (see §9.3).
+- ~~Exact UW endpoint paths~~ → **Resolved.** All 10 endpoints verified
+  live against ORCL; paths corrected for `realized_volatility`
+  (`/volatility/realized`) and `iv_term_structure`
+  (`/volatility/term-structure`). Other 8 paths in §4.2 were correct.
+
+Newly surfaced (must be addressed during implementation):
+
+- **IB MCP cannot place option orders.** Equity + ETF only. All option
+  orders go through `ib_insync` directly. The "MCP-first, ib_insync
+  fallback" framing from earlier drafts is wrong (see §9.1).
+- **`search_contracts` returns `underlying_contract_id`, not a tradeable
+  `contract_id` for stock orders.** For a net-new symbol, resolution
+  step is required (qualify via `ib_insync` or dig through the result's
+  `sections` array).
+
+Still open:
+
+1. Choose exact underlying for macro hedge (`SPX` cash-settled index vs
+   `SPY` ETF — the trader picks during implementation).
+2. Pick per-order position-sizing cap (suggested: ≤ 2% of account net
+   liquidation value per single-name short-premium trade, ≤ 1.5%
+   annualized total for macro hedge).
+3. Default short-leg delta target for Sell Put / Bull Put Spread
+   (suggested: −0.25 unless overridden).
+4. Whether to publish to a GitHub repo for multi-machine sync via
+   `npx skills add`.
+5. Confirm the Gmail sender address and generate the App Password before
+   the email hook is enabled. Sender address and password are not part
+   of the repo.
+6. Macro hedge Black-Scholes pricer omits dividend yield `q`. Negligible
+   for SPX cash-settled index (~0% effective yield), but for SPY (~1.3%
+   trailing yield) put values are slightly overpriced. Add `q` parameter
+   if SPY becomes the default underlying.
 
 ## 14. Acceptance Criteria for v1
 
@@ -373,8 +458,10 @@ The skill ships when all of the following hold:
 - Given a ticker and an FCN quote, output includes the 8-item checklist, fair coupon ladder, and a bilingual counter-offer email.
 - Given a ticker without an FCN quote, output includes one full-menu recommendation across all five income structures plus a regime-aware fourth-structure pick where appropriate.
 - Given two or three tickers, output includes a worst-of basket FCN analysis alongside per-name single-strategy picks.
-- A paper-account run successfully creates a `create_order_instruction` for a defined-risk spread and the OCA bracket pair (or documents the fallback if OCA is not supported).
+- A paper-account run successfully submits a defined-risk spread via `ib_insync` with an OCA bracket attached via `ib_insync.bracketOrder(...)`; both the entry and the two bracket legs are visible in IBKR's open-orders view.
+- A separate paper-account run successfully drafts a stock order via IB MCP `create_order_instruction`, the draft appears in `get_order_instructions` (not `get_account_orders`), and the deep-link opens correctly in the IBKR app.
 - `manage_positions` correctly emits a 21-DTE blocking prompt on at least one paper-account position.
+- `manage_positions --audit-only` correctly flags every margin-secured short put on the live account against the §10.3 defined-risk audit and outputs a suggested defined-risk conversion for each underlying.
 - The daily run sends a test email successfully to `chenxi.li08@outlook.com` via Gmail SMTP with the expected subject format.
 - A macro hedge call with `structure="auto"` returns one regime-routed recommendation with cost ≤ the configured cap. A separate `build_macro_hedge_menu` call returns up to three candidate structures (butterfly, spread, long put) ranked by cost-per-protection where applicable.
 - Refusal path is exercised: asking for a naked short call must produce an explicit decline with reasoning.
