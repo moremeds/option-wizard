@@ -1,0 +1,73 @@
+# Trader Profile (template — copy to `private/trader-profile.md`)
+
+This is the **template** for the personal customization layer that
+CLAUDE.md `@`-includes. Copy it to a gitignored location and edit:
+
+```bash
+mkdir -p private/
+cp docs/setup/trader-profile.md.example private/trader-profile.md
+$EDITOR private/trader-profile.md
+```
+
+If `private/trader-profile.md` doesn't exist, the skill runs with
+generic defaults (universal hard rules + UW/TV/IB source order); no
+customization is required to use the skill.
+
+---
+
+## Profile
+
+Describe yourself in 2-4 sentences. The skill uses this to calibrate
+tone, suggested structures, and risk language. Examples:
+
+- "Active US-equity options trader, focus on mega-cap tech."
+- "Conservative income-focused; prefer monthly CSP and covered calls on
+  blue-chips."
+- "Directional trader, use defined-risk verticals on small-caps with
+  binary catalysts."
+- "Macro overlay only — SPX hedges against an underlying long stock
+  portfolio."
+
+Other relevant context:
+
+- Account type: e.g., IB live, IB paper, Tastytrade, Schwab cash
+- Language preference: e.g., English; Chinese with English technical
+  terms; bilingual
+- Risk tolerance / style descriptor
+
+## Brokers
+
+- **Primary:** _____ (e.g., IB Gateway live at `127.0.0.1:4001`)
+- **Secondary (optional):** _____ — delete this bullet if not used
+  - Connection / pull method: _____ (MCP server, CLI command, manual
+    export)
+
+## Position-review scope
+
+When the trader asks "review positions" / "持仓 review", which brokers
+to pull and how to consolidate:
+
+- Pull order: _____
+- Consolidation: single combined book / separate per broker / etc.
+
+If only one broker, this section simplifies to "pull broker X."
+
+## Response style
+
+How should the skill talk to you?
+
+- Language: _____ (e.g., English; Chinese with English technical terms)
+- Tone: _____ (e.g., terse with concrete numbers, no hedging; or
+  thorough walk-through reasoning)
+- Format preferences: _____ (e.g., always include P/L matrix; prefer
+  bullet lists over prose; show every gap explicitly)
+
+## Macro hedge budget
+
+Total annualized macro hedge cost ≤ ___% of portfolio NLV. (Default in
+CLAUDE.md is 1.5%; override here if your risk budget differs.)
+
+## Anything else
+
+Add ticker watchlists, blackout dates, prohibited strategies, or any
+other persistent context the skill should respect.
