@@ -26,11 +26,13 @@ incantations.
 ## Hard rules (apply to every response)
 
 1. Defined-risk only. Refuse naked short calls and margin-leveraged short puts; explain why when refusing.
-2. UW first for numeric metrics: IV rank, RV, skew, IV term structure, max pain, GEX by strike, greeks by strike, dark pool, interpolated IV. Do not recompute these client-side. Compute only what UW lacks (gamma flip from GEX, put/call walls from GEX, VRP from IV−RV, FCN fair coupon).
-3. Every order shows the pre-flight (legs, mid price, net debit/credit, max loss, max gain, breakeven, margin, P/L matrix at expiry across spot −20 / −10 / −5 / 0 / +5 / +10 / +20 percent, account verification, UW regime check, liquidity check, catalyst clock) before submission. Exactly one YES/NO question. YES → submit via `ib_insync.placeOrder` (IB option orders) or `create_order_instruction` (IB stock drafts for tap-to-approve); Futu orders have no auto-submit path — flag "manual entry in Moo Moo / OpenD trade" in the preflight. Anything else → abort. Live-account preflight is the safety boundary — do **not** propose paper-account (IB TWS paper instance) tests, and do not treat paper-account criteria as a blocker.
+2. **Source discipline (strict split).** UW serves **options data only**: IV rank, RV, skew, IV term structure, max pain, GEX by strike, greeks by strike, dark pool, flow, interpolated IV. **Never use UW for price or technical indicators** — spot, OHLCV, SMA / EMA / 20-50-200 MA, RSI, MACD, BBANDS, ATR, volume bars come from **TradingView via `finance-data-providers:tradingview-reader` only** (UW's `get_extended_technical_indicator` / `get_ticker_indicator_series` are forbidden for analysis use — their series typically lag by weeks). Do not recompute UW-served metrics client-side; compute only what UW lacks (gamma flip from GEX, put/call walls from GEX, VRP from IV−RV, FCN fair coupon).
+3. Every order shows the pre-flight (legs, mid price, net debit/credit, max loss, max gain, breakeven, margin, P/L matrix at expiry across spot −20 / −10 / −5 / 0 / +5 / +10 / +20 percent, account verification, UW regime check, liquidity check, catalyst clock) before submission. Exactly one YES/NO question. YES → submit via `ib_insync.placeOrder` (IB option orders) or `create_order_instruction` (IB stock drafts for tap-to-approve). Non-IB broker orders (any secondary broker configured in `private/trader-profile.md`) typically have no auto-submit path — flag "manual entry in the broker's trading app" in the preflight. Anything else → abort. Live-account preflight is the safety boundary — do **not** propose paper-account (IB TWS paper instance) tests, and do not treat paper-account criteria as a blocker.
 4. Any short-premium position at 21 DTE surfaces as an entry in the consolidated **Action items** section at the end of the book review (see §"Book-review output structure"). It is **not** a mid-flow blocking YES/NO prompt — the trader picks close / roll / hold-and-accept-gamma from the action-items menu, and only then does the full hard-rule-#3 preflight expand.
 5. FCN does not go through IB. FCN output is the 8-item PB checklist, a 70/75/80/85% strike ladder, a fair vs quoted verdict, and a bilingual counter-offer email (Chinese first, English second).
 6. Bracket order defaults: take-profit at 50% of max gain, stop-loss at 2× credit received (100% of max loss for spreads). Per-order override allowed.
+7. **Freshness gate.** Every data point quoted in an analysis must be **≤ 1 trading day stale** (live or T-1 close). Older = **gap**, not signal — list under "What this analysis is missing" and do **not** extrapolate forward. Always check UW response timestamps (`price_data.date`, indicator series last date, chain `last_price.date`) before quoting any number; if stale, treat as gap and either re-pull from a fresh source or flag explicitly.
+8. **Ticker analysis structure is non-negotiable.** Every "分析 <TICKER>" / "evaluate <ticker>" response opens with a **Layer Coverage table** (template in `references/analysis-runbook.md`) declaring per-layer source + freshness + ✓/skipped status. Skipping is allowed only when the layer's data is unreachable; it must appear as `skipped` in the table AND under "What this analysis is missing" — never silently dropped. Following the full 8-layer runbook end-to-end is the structural baseline; the trader has explicitly flagged "miss or skip" as a recurring problem and the Layer Coverage table is the structural counter.
 
 ## Triggers
 
@@ -63,6 +65,7 @@ points into specific layers without re-reading the whole runbook.
 
 | Situation | Files to load |
 |---|---|
+| **Any trader request — match it to a workflow first** | `references/workflows-overview.md` (routing index for the 4 workflows: analyze stock / analyze index / analyze positions / analyze FCN). Read this **first** to pick the workflow, then drill into the deep-reference file the workflow points to |
 | Full ticker analysis ("分析 <TICKER>", "evaluate <ticker> for <structure>") | `references/analysis-runbook.md` end-to-end — every layer in order, with the per-layer data source and decision output |
 | Picking structure once vol regime + direction are known | `references/strategies.md` (regime × structure matrix); apply §"Strong bullish conviction veto" before recommending jade lizard / iron condor / calendar |
 | **About to recommend jade lizard / iron condor / calendar / diagonal** | **MANDATORY**: `references/strategies.md` §"Strong bullish conviction veto" — run the 4-signal check FIRST. If ≥3 fire, refuse and recommend long call / bull put spread / risk reversal / CSP instead |
@@ -71,7 +74,7 @@ points into specific layers without re-reading the whole runbook.
 | Reading TV chart, tape, news, catalyst-clock validation | `references/price-action-framework.md`; `references/data-sources.md` for TV setup gotchas (opencli ≥ 1.8.0, port 9222 collision with chrome-devtools-mcp, stale TV process recovery) |
 | FCN / ELN quote evaluation ("PB 给我报了 X% coupon on Y") | `references/fcn-framework.md`; `scripts.fair_coupon::analyze_fcn`. Output is the 8-item PB checklist + 70/75/80/85% strike ladder + bilingual counter-offer email — do NOT route through IB (hard rule #5) |
 | SPX macro hedge sizing | `scripts.macro_hedge::build_macro_hedge`. Respect the 1.5% NLV annualized cost cap (hard rule #5). Trigger heuristics in `references/strategies.md` §"Macro hedge trigger heuristics" |
-| Position book review ("我账户里这些仓位有没有问题") | Pull **both brokers**: IB MCP first, then Futu via `cd ~/projects/portfolio-analyser && npx tsx src/cli.ts ft --range 1y` (OpenD on :11111) — read just the positions block from the JSON, skip the 3-persona HTML enrichment. Translate Futu positions to IB-shape (`contract_description` / `position` / `market_price`) before feeding into `scripts.defined_risk_audit::audit_book` and `scripts.manage_positions` (orchestrator CLI: `.venv/bin/python -m scripts.manage_positions --audit-only --no-email`). Output follows §"Book-review output structure" — action items consolidated at the END of the report, not drilled into mid-flow. |
+| Position book review ("我账户里这些仓位有没有问题") | Pull **every configured broker** — IB MCP primary (`get_account_summary` + `get_account_positions` + `get_account_orders`), plus any secondary brokers documented in `private/trader-profile.md` using the pull command(s) specified there (e.g., a CLI script, MCP server, or Python wrapper the user provides). Translate non-IB positions into the IB-shape dict (`contract_description` / `position` / `market_price`) before feeding into `scripts.defined_risk_audit::audit_book` and `scripts.manage_positions` (orchestrator CLI: `.venv/bin/python -m scripts.manage_positions --audit-only --no-email`). Report which broker(s) succeeded and any pull-time data gaps. Output follows §"Book-review output structure" — action items consolidated at the END of the report, not drilled into mid-flow. |
 | 21 DTE review on short-premium positions | `scripts.evaluate_position`; hard rule #4 — surfaces in the Action items section at the end of the book review (close / roll / hold-and-accept-gamma). Trader picks from the menu; only then expand into hard-rule-#3 preflight. |
 | Pre-submission preflight + YES/NO gate | `references/execution.md`; `scripts.ib_order::build_preflight`. Hard rule #3 — must show legs + mid + max loss + max gain + breakeven + margin + P/L matrix (spot ±5/10/20%) + account verification + UW regime check + liquidity + catalyst clock before exactly one YES/NO question |
 | Honest gap reporting when a data source is unreachable | `references/analysis-runbook.md` §"Honest reporting of gaps" — list every missing layer under "What this analysis is missing" rather than fabricating signals |
@@ -81,9 +84,9 @@ points into specific layers without re-reading the whole runbook.
 
 ## Book-review output structure
 
-Every position book review follows the same four-stage layout. **Do not interrupt stages 1-3 to demand a per-position YES/NO** — that pattern produced a session-long detour on the 2026-06-03 Futu review and is no longer the workflow.
+Every position book review follows the same four-stage layout. **Do not interrupt stages 1-3 to demand a per-position YES/NO** — that pattern produced a session-long detour during a multi-broker review and is no longer the workflow.
 
-1. **Data pull** — both brokers (IB MCP + Futu via portfolio-analyser CLI). Report which broker(s) succeeded and any pull-time data gaps (e.g., cash balance not in Futu report).
+1. **Data pull** — every configured broker (IB MCP for the primary IB account, plus any secondary brokers per `private/trader-profile.md` using the pull command specified there). Report which broker(s) succeeded and any pull-time data gaps (e.g., a CLI report that doesn't include cash balance).
 2. **Book-level analysis** — concentration (abs MV % and Δ-1 notional vs NLV), Greeks (net Δ / Γ / Θ / V, plus Δ-1 single-name bars), every leg laid out, defined-risk audit verdict (with script false-positive callouts where the $20 strike-width limit misfires), 22-45 DTE watchlist, catalyst clock, data quality flags.
 3. **No mid-flow decision prompts.** 21 DTE short-premium positions, approaching-21-DTE positions, ER catalysts, large shorts, data anomalies — all of these are *observed* in stage 2 but **not** acted on yet.
 4. **One consolidated "Action items" block at the END.** Grouped into Position-level decisions (P1, P2, …), Data quality (D1, D2, …), Book-level risks (R1, R2, …), Infrastructure (I1, I2, …). Each item is one line with the choice menu inline (close/roll/hold, verify, fix, etc.). Include trigger phrases ("P1 submit", "D2 verify", "R3 fix") so the trader can pick fast. **Wait** for the trader to pick — then expand the chosen item(s) into preflight / drill-down / fix in the next turn.
@@ -98,9 +101,11 @@ Edge case — structurally dangerous position (naked short call discovered, unde
 
 ## Reporting & archive
 
-**After producing any substantive analysis report, auto-write to `references/ticker/private/<slug>-YYYY-MM-DD-<event>.md`** — without asking, before responding-done. This is the default for:
+**Output the analysis to the screen first.** Do NOT auto-write to `private/` by default. The trader explicitly requests save with phrases like "保存这份" / "save this" / "archive" / "存档" — only then write to `references/ticker/private/<slug>-YYYY-MM-DD-<event>.md`.
 
-- Full ticker analysis (`分析 <TICKER>`) — even if conclusion is WAIT / no trade
+Reports that the trader typically wants saved (but still requires explicit ask):
+
+- Full ticker analysis (`分析 <TICKER>`)
 - Position book review / `持仓 review`
 - FCN/ELN evaluation with concrete deal numbers
 - Macro / SPX hedge decision
@@ -126,7 +131,7 @@ Body must capture: TL;DR, Data snapshot (point-in-time, with sources), Analysis,
 
 **Audit cadence**: trader (or skill on re-invocation against same ticker) revisits each `private/` file at its named checkpoint (next ER / expiry / 30d for macro) and fills in the outcome section. Lessons that generalize get promoted to `references/pitfalls/NN-slug.md` (account-stripped).
 
-**Don't ask permission per report — auto-archive is the default behavior.** The single exception: if user explicitly says "don't save this" or "don't archive", skip and confirm.
+**Save is explicit, not default.** The trader prefers to review the screen output first and decide whether it's worth preserving. Surface a one-line "want me to save this?" hint at the very end of substantive reports if you think the artifact is worth keeping, but do not write the file until they say yes.
 
 ## How to invoke scripts
 

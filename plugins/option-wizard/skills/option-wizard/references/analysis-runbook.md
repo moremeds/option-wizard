@@ -6,9 +6,41 @@ source, a defined compute step, and a defined decision output. Skip a layer
 only when its inputs are unreachable, and report the skip explicitly to the
 trader — incomplete coverage is allowed but must be flagged.
 
-Source order (per CLAUDE.md): UW first for vol/dealer/microstructure
-numbers, TV via `finance-data-providers:tradingview-reader` for chart/news,
-IB for account state. Never recompute a number UW serves directly.
+Source order (per CLAUDE.md + SKILL.md hard rule #2):
+- **UW**: options data **only** — IV rank, RV, skew, IV term structure, max
+  pain, GEX by strike, greeks by strike, dark pool, flow, interpolated IV.
+- **TV via `finance-data-providers:tradingview-reader`**: price + technical
+  indicators **only** — spot, OHLCV, volume bars, SMA(20/50/200), EMA, RSI,
+  MACD, BBANDS, ATR, chart structure, news.
+- **IB**: account state — positions, balances, margin.
+
+Never recompute a number UW serves directly. Never use UW for price or
+technical indicators (SKILL.md hard rule #2). Freshness: every quoted
+number must be ≤ 1 trading day stale (SKILL.md hard rule #7).
+
+---
+
+## Required header on every ticker analysis: Layer Coverage table
+
+Before any narrative, emit this table to declare what was pulled vs
+skipped, source, and freshness. Anything marked `skipped` MUST also
+appear under "What this analysis is missing" at the end.
+
+```
+| Layer | Status | Source | Data freshness |
+|---|---|---|---|
+| L0 Account state          | ✓ / skipped | IB MCP                | live / T-1 / gap (>1 day = gap) |
+| L1 Vol / dealer regime    | ✓ / skipped | UW                    | T-0 or T-1 / gap |
+| L2 IV term + skew         | ✓ / skipped | UW                    | T-0 or T-1 / gap |
+| L3 Price action           | ✓ / skipped | **TV ONLY** (no UW)   | live / T-1 / gap |
+| L4 Tape (flow + dark pool)| ✓ / skipped | UW                    | T-0 or T-1 / gap |
+| L5 Catalyst clock         | ✓ / skipped | UW + TV news          | T-1 / gap |
+| L6 Structure pick         | ✓           | computed              | — |
+| L7 Preflight              | ✓ / skipped | computed              | — |
+```
+
+Skipping a layer is OK when its source is unreachable. Silently dropping
+one is not (SKILL.md hard rule #8).
 
 ---
 
@@ -106,25 +138,34 @@ Limit ~30 strikes (sorted by volume in UW output) to keep response small.
 
 ---
 
-## Layer 3 — Price action (UW + TV)
+## Layer 3 — Price action (TV ONLY — never UW)
 
 **Why:** structural levels + tape posture. A range-bound chop reads
 differently than a trending breakout; trade-window structure depends on
 which one is current.
 
-**Pull (UW):**
-- `get_extended_technical_indicator` — SMA(200), SMA(50), RSI(14), MACD,
-  BBANDS (daily). UW only returns recent history; extrapolate forward
-  with the rate-of-change.
-- `get_ticker_candles_by_range` (range=4h or 1h, interval=1m) — last
-  ~21 sessions for tape context.
+**Source rule (SKILL.md hard rule #2):** All price + technical indicators
+come from **TradingView via `finance-data-providers:tradingview-reader`
+only**. UW indicator endpoints (`get_extended_technical_indicator`,
+`get_ticker_indicator_series`) are **forbidden** for this layer — their
+series typically lag by weeks and were the root cause of three back-to-back
+analyses (NVDA / QQQ / SPY 2026-06-03 to 06-04) using April-vintage RSI /
+ATR / SMA values labelled as "today's estimates." That class of error is
+banned.
 
-**Pull (TV via `finance-data-providers:tradingview-reader`):**
-- `opencli tradingview chart-state` — current chart layout, interval,
-  drawings (qualitative)
+**Pull (TV — mandatory):**
+- `opencli tradingview chart-state` — current spot, daily candles, volume
+  bars (always T-0 or T-1)
+- `opencli tradingview chart` with `SMA(20)`, `SMA(50)`, `SMA(200)`, `EMA(21)`
+  overlays — moving averages + crosses
+- `opencli tradingview chart` with `RSI(14)`, `MACD(12,26,9)`, `BBANDS(20,2)`,
+  `ATR(14)` — momentum + vol envelope
 - `opencli tradingview news --symbol NASDAQ:<TICKER> --limit 8` — recent
   headlines for catalyst-clock validation AND for the 4-signal bullish veto
   check in Layer 6 (signals #1, #2, #3 all read from news)
+- Always include **volume bars** (daily + intraday session VWAP). The trader
+  has explicitly flagged that options analysis must always carry volume +
+  MA technicals — not optional.
 
 **Do not pull `tradingview watchlists`.** The trader organizes watchlists
 for their own reasons (sector grouping, idea tracking) — membership and
@@ -153,10 +194,21 @@ suggested using them as a "tiebreaker"; that guidance is rescinded.
   `ready: false`, hard-kill first: `pkill -KILL -f "TradingView"`, wait
   2-3 seconds, then re-launch.
 
-If TV is still unreachable after the above, fall back to UW indicators
-alone and report the gap to the trader. **Do not fabricate signals #1-3
-of the veto check** — leave them as "Unknown" and let the conservative
-read (treat as non-firing) apply.
+If TV is still unreachable after the above, **do NOT fall back to UW
+indicators.** UW's `get_extended_technical_indicator` series is
+chronically stale (weeks-old, not days-old) and using it for L3 was the
+exact failure mode that triggered SKILL.md hard rule #2. Instead:
+
+1. Mark Layer 3 as **`skipped`** in the Layer Coverage table.
+2. Surface "TV unreachable; price action layer not run" under §"What this
+   analysis is missing."
+3. Ask the trader whether to proceed without L3 or pause until TV is fixed.
+4. Veto-check signals #1-3 stay "Unknown" → conservative (non-firing) read.
+
+If the trader explicitly authorizes a UW-indicator fallback (rare,
+documented as exception in the report), every UW indicator value MUST be
+labelled with its `as_of` date and a freshness flag (`current` if ≤ 1
+trading day, `STALE` otherwise). Stale values do not get extrapolated.
 
 **Compute:**
 - Distance to 200DMA — uses the band table in `price-action-framework.md`
@@ -286,16 +338,18 @@ other than YES = abort.
 
 ---
 
-## Layer 8 — Archive (auto, after every run)
+## Layer 8 — Archive (on explicit ask, after the screen output)
 
 **Why:** every analysis is a future audit point. The trader needs a record of
 what data we had, what we concluded, and what we missed — so future-us can
-compare prediction vs outcome and harvest pitfalls.
+compare prediction vs outcome and harvest pitfalls. **But the trader reviews
+the screen output first and decides whether the analysis is worth preserving.**
 
 **Write to** `references/ticker/private/<slug>-YYYY-MM-DD-<event>.md`,
-gitignored, trader's personal journal. SKILL.md §"Reporting & archive" has the
-file format and the master rule. This layer just runs that rule at the
-runbook's exit point.
+gitignored, trader's personal journal, **only when the trader explicitly asks**
+("save", "保存", "archive", "存档"). SKILL.md §"Reporting & archive" has the
+file format and the master rule. This layer runs that rule on demand, not
+automatically.
 
 **Capture** (locked at point of analysis so a future replay is possible):
 

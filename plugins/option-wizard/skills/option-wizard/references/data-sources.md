@@ -1,11 +1,44 @@
 # Data Sources
 
-## UW first policy
+## Source split (SKILL.md hard rule #2)
 
-Restating SKILL.md: any numeric metric Unusual Whales serves directly is
-fetched from UW, not recomputed client-side. UW's pricing/exposure data
-is sourced from exchange feeds we don't have, and rebuilding it from
-Yahoo/IB would silently introduce error.
+**Strict, non-negotiable split:**
+
+| Domain | Source | Forbidden alternative |
+|---|---|---|
+| Spot, OHLCV, daily/intraday candles, volume bars | **TV** via `finance-data-providers:tradingview-reader` | UW `get_company_info`, chain `price_data` (for "live spot"), `get_ticker_candles_by_range` (for analysis-grade technicals) |
+| SMA(20/50/200), EMA, RSI(14), MACD, BBANDS, ATR | **TV** | UW `get_extended_technical_indicator`, `get_ticker_indicator_series` — **banned for L3 analysis**; chronic multi-week staleness was the root cause of the 2026-06 NVDA / QQQ / SPY analyses being degraded to extrapolation |
+| IV rank, RV (UW computed), 25Δ skew, IV term structure | **UW** | TV (does not serve these) |
+| Max pain, GEX-by-strike, greeks-by-strike, interpolated IV | **UW** | — (UW exclusive) |
+| Flow alerts, flow per expiry, dark pool prints | **UW** | — (UW exclusive) |
+| Account state (positions, balances, margin) | **IB MCP** | — |
+
+## Freshness gate (SKILL.md hard rule #7)
+
+Every data point quoted in an analysis must be **≤ 1 trading day stale**.
+Older = **gap**, not signal. Check freshness explicitly:
+
+- TV chart-state → returns live or T-0 close; freshness is usually fine
+  but record the timestamp in the Layer Coverage table.
+- UW chain endpoints → check `last_price.date` and `price_data.date`. If
+  the field is more than 1 trading day before today, flag as STALE.
+- UW indicator endpoints → routinely 2-6 weeks behind. **Do not extract
+  daily-fresh technicals from these.** If used at all (only in an
+  authorized exception), every value must carry an `as_of` timestamp and
+  a `STALE` flag.
+- IB MCP positions / balances → live during market hours; T-1 close after
+  hours. Always fresh enough.
+
+If a number cannot be brought current, list it under "What this analysis
+is missing" and do not extrapolate it into the decision.
+
+## UW options-data policy
+
+Any numeric **options** metric Unusual Whales serves directly is fetched
+from UW, not recomputed client-side. UW's options/exposure data is
+sourced from exchange feeds we don't have, and rebuilding it from
+Yahoo/IB would silently introduce error. This UW-first policy applies
+**only to the options-data domain** above — not to price or technicals.
 
 Endpoints we consume (one method per endpoint in
 `scripts/_clients/uw.py::UWClient`):
@@ -21,7 +54,7 @@ Endpoints we consume (one method per endpoint in
 | `/api/stock/{t}/interpolated-iv` | `interpolated_iv(t)` | Strike-specific IV for non-listed barriers |
 | `/api/stock/{t}/greeks` | `greeks_by_strike(t)` | Position Greeks for candidate strikes |
 | `/api/darkpool/{t}` | `dark_pool(t)` | Off-exchange print pressure |
-| `/api/stock/{t}/technical-indicator/{fn}` | `technical_indicator(t, fn)` | SMA/RSI/MACD pull |
+| ~~`/api/stock/{t}/technical-indicator/{fn}`~~ | ~~`technical_indicator(t, fn)`~~ | **BANNED for L3 analysis** — chronic staleness (typically 2-6 weeks behind). Use TV instead. Method retained only for legacy callers; do not introduce new usage. |
 
 All paths verified live against ORCL on 2026-06-03 (see
 `scripts/smoke/uw_smoke.py` and `tests/integration/test_uw_smoke.py`).
@@ -86,26 +119,35 @@ attached via `ib_insync.bracketOrder(...)` which returns three linked
 
 ## Call order for a fresh analysis
 
-The standard sequence for evaluating a ticker for a new position:
+The standard sequence for evaluating a ticker for a new position
+(parallel-where-possible; the per-layer freshness gate must pass for
+each pull before its number is quoted):
 
-1. **UW vol regime** — `iv_rank`, `volatility/realized`, `volatility/term-structure`,
-   `historical-risk-reversal-skew`. Computes VRP, term inversion flag,
-   skew penalty.
-2. **UW GEX** — `spot-exposures/strike`. Pipe through `gex_levels.compute_levels`
-   for flip / put wall / call wall.
-3. **UW interpolated IV + greeks** at candidate strikes — `interpolated_iv`
-   and `greeks_by_strike(ticker, expiry=...)` for the strikes the
-   strategy module identifies (e.g., for a CSP, the 70-90Δ short put
-   strike; for a bull put spread, both legs).
-4. **TV spot confirmation** — TV reader, last 1-day with current bid/ask;
-   sanity check vs UW quote and IB position price.
-5. **IB account context** — `get_account_summary` (net liq, buying power,
+1. **IB account context** — `get_account_summary` (net liq, buying power,
    maintenance margin), `get_account_positions` for any existing
-   exposure in the same name (don't pile a short put under a covered
-   call you already have).
+   exposure in the same name. (Layer 0)
+2. **UW vol regime** — `iv_rank`, `volatility/realized`,
+   `volatility/term-structure`, `historical-risk-reversal-skew`. Computes
+   VRP, term inversion flag, skew penalty. (Layer 1-2)
+3. **UW GEX + max pain** — `spot-exposures/strike` per expiry +
+   `max_pain`. Pipe through `gex_levels.compute_levels_per_expiry` with
+   `call_wall_definition='oi_cluster'` for the trade window. (Layer 1)
+4. **TV chart + technicals** — `opencli tradingview chart-state` for live
+   spot, daily candles, volume bars; pull SMA(20/50/200), RSI(14), MACD,
+   BBANDS, ATR overlays from TV. **Never use UW for these.** (Layer 3,
+   SKILL.md hard rule #2)
+5. **TV news** — `opencli tradingview news --symbol NASDAQ:<T> --limit 8`
+   for catalyst-clock validation + bullish-veto signals 1-3. (Layer 3 + 5)
+6. **UW flow + dark pool** — `get_flow_alerts`, `get_flow_per_expiry`,
+   `get_dark_pool_trades`. (Layer 4)
+7. **UW interpolated IV + greeks** at candidate strikes — `interpolated_iv`
+   and `greeks_by_strike(ticker, expiry=...)` once the strategy module
+   has picked the candidate strikes. (Layer 6 input)
 
 When the answer is "no position" or "wait for a different setup", you
-can short-circuit at step 1 or 2. Never skip steps to reach a
-recommendation faster — missing the GEX read or the IV rank check is
-how we end up selling premium below the gamma flip on a ticker the
-market is structurally short.
+can short-circuit early but every layer that was supposed to fire must
+be marked `skipped` in the Layer Coverage table and explained — never
+silently drop one. Missing the GEX read or the IV rank check is how
+we end up selling premium below the gamma flip on a ticker the market
+is structurally short; missing TV is how we end up quoting April-vintage
+RSI as "today's read."

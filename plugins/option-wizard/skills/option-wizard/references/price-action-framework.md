@@ -1,13 +1,23 @@
 # Price Action Framework
 
+## Source rule (SKILL.md hard rule #2)
+
+**TV is the ONLY source for price + technicals.** Spot, OHLCV, SMA / EMA,
+RSI, MACD, BBANDS, ATR, volume bars all come from TradingView via the
+`finance-data-providers:tradingview-reader` skill. UW indicator endpoints
+(`get_extended_technical_indicator`, `get_ticker_indicator_series`) are
+**banned** for L3 analysis — chronic staleness (typically 2-6 weeks
+behind) was the root cause of the 2026-06 NVDA/QQQ/SPY analyses being
+degraded to extrapolation. See `data-sources.md` §"Source split" for the
+full table.
+
 ## TradingView entry
 
-The skill never scrapes TradingView directly. Numeric vol/GEX/skew is
-already covered by Unusual Whales (see `data-sources.md`). What TV is
-used for is the qualitative chart read: trend posture, candle
-absorption, news flow, watchlist-level positioning prior. The entry
-point is the **`finance-data-providers:tradingview-reader`** skill,
-which returns rendered text snapshots of charts and news.
+The skill never scrapes TradingView directly. Numeric options metrics
+(IV rank, GEX, skew, max pain) come from UW (`data-sources.md`); price
++ technicals come from TV. The TV entry point is the
+**`finance-data-providers:tradingview-reader`** skill, which returns
+rendered text snapshots of charts and news.
 
 Typical asks:
 
