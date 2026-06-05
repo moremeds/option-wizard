@@ -57,7 +57,14 @@ def _price_put_leg(
     approximate.
     """
     if chain and chain_expiry:
-        strike_pct = strike_dollar / spot
+        # Pass-2 (P2-A): IEEE-754 roundtrip is exact for round spot prices
+        # (e.g., 6200 * 0.95 / 6200 == 0.95) but NOT for live ones
+        # (e.g., 6195.43 * 0.95 / 6195.43 == 0.9499999999999998), which
+        # would silently miss the chain key. Round to 4 decimals so the
+        # lookup matches chain keys built with the same convention by the
+        # orchestrator. 4 decimals = 1bp resolution, well below any real
+        # strike spacing.
+        strike_pct = round(strike_dollar / spot, 4)
         mid = read_chain_mid(chain, chain_expiry, strike_pct, "put")
         if mid is not None:
             return mid, chain_leg_provenance(

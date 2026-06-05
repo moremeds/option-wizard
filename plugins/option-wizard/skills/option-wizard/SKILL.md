@@ -46,6 +46,8 @@ incantations.
    - IB for IV rank / skew / GEX / max pain (IB doesn't compute these derivative metrics)
 
    **Rule of thumb:** if any of the three serves it directly, never recompute. Verdict / analysis output must carry `data_provenance` for every quoted metric so the trader can audit the source.
+
+   **Skill-wide chain-mid path:** `scripts.fair_aq_dq`, `scripts.fair_coupon`, `scripts.macro_hedge` ALL accept an optional `chain` field on their snapshot input. When provided, listed-strike option mids are read directly from the chain (per workflow §2 source-selection: UW analytical default / IB live-trade) instead of recomputed via BSM. Output fields tag the source: `fair_coupon_source` ∈ {chain, model}, `pricing_source` ∈ {chain, mixed, bsm}, leg-level `mid_source` and `mid_provenance`. Orchestrator MUST pull a chain into the snapshot before calling these scripts when the trader is in live-trade or fair-value-comparison mode.
 3. Every order shows the pre-flight (legs, mid price, net debit/credit, max loss, max gain, breakeven, margin, P/L matrix at expiry across spot −20 / −10 / −5 / 0 / +5 / +10 / +20 percent, account verification, UW regime check, liquidity check, catalyst clock) before submission. Exactly one YES/NO question. YES → submit via `ib_insync.placeOrder` (IB option orders) or `create_order_instruction` (IB stock drafts for tap-to-approve). Non-IB broker orders (any secondary broker configured in `private/trader-profile.md`) typically have no auto-submit path — flag "manual entry in the broker's trading app" in the preflight. Anything else → abort. Live-account preflight is the safety boundary — do **not** propose paper-account (IB TWS paper instance) tests, and do not treat paper-account criteria as a blocker.
 4. Any short-premium position at 21 DTE surfaces as an entry in the consolidated **Action items** section at the end of the book review (see §"Book-review output structure"). It is **not** a mid-flow blocking YES/NO prompt — the trader picks close / roll / hold-and-accept-gamma from the action-items menu, and only then does the full hard-rule-#3 preflight expand.
 5. **PB structured products (FCN / AQ / DQ): no IB ORDER ROUTING; IB MARKET DATA is allowed.** This is two separate concerns:
@@ -194,7 +196,7 @@ print(compute_levels(rows, spot=423.74))
 # VRP regime label
 .venv/bin/python -c 'from scripts.vrp import compute_vrp; print(compute_vrp(0.50, 0.40, with_label=True))'
 
-# FCN ladder analysis
+# FCN ladder analysis (model path — no chain in snapshot)
 .venv/bin/python -c '
 from scripts.fair_coupon import analyze_fcn
 snap = {"spot": 200.0, "iv": 0.35, "rv": 0.30, "iv_rank": 55,
@@ -204,6 +206,33 @@ r = analyze_fcn("ORCL", strike_pcts=(0.70, 0.75, 0.80, 0.85),
                 tenor_months=6, observation_months=3,
                 pb_quoted_coupon=0.12, snapshot=snap)
 print(r["verdict"], "at", r["anchor_strike_pct"])
+# Each rung carries r["ladder"][i]["fair_coupon_source"] = "model" here.
+'
+
+# FCN ladder analysis (chain path — preferred when chain available).
+# Adding "chain" + "chain_source" + "chain_timestamps" + "spot_timestamp"
+# to the snapshot activates chain-priced fair coupon. Each rung output gets
+# fair_coupon_source="chain" and fair_coupon_provenance.leg.source="UW"|"IB"
+# pointing back to the exact listed strike that priced the rung.
+.venv/bin/python -c '
+from scripts.fair_coupon import analyze_fcn
+snap = {"spot": 200.0, "iv": 0.35, "rv": 0.30, "iv_rank": 55,
+        "skew_25d": 0.04, "max_drawdown_5y": -0.45,
+        "gex_levels": {"gamma_flip": 195.0, "put_wall": 180.0, "call_wall": 220.0},
+        "chain_source": "UW", "spot_timestamp": "2026-06-05T10:00:00Z",
+        "chain_timestamps": {"2026-12-18": "2026-06-05T10:00:00Z"},
+        "chain": {"2026-12-18": {
+            0.70: {"put": {"mid": 1.20, "iv": 0.42}},
+            0.75: {"put": {"mid": 2.40, "iv": 0.40}},
+            0.80: {"put": {"mid": 4.80, "iv": 0.38}},
+            0.85: {"put": {"mid": 9.10, "iv": 0.36}},
+        }}}
+r = analyze_fcn("ORCL", strike_pcts=(0.70, 0.75, 0.80, 0.85),
+                tenor_months=6, observation_months=3,
+                pb_quoted_coupon=0.12, snapshot=snap,
+                quote_start_iso="2026-06-05T00:00:00Z")
+for rung in r["ladder"]:
+    print(rung["strike_pct"], rung["fair_coupon_base"], rung["fair_coupon_source"])
 '
 
 # AQ / DQ quote evaluation
@@ -219,12 +248,36 @@ print(v.markup_pp, v.decision, v.refusal_reasons)
 print(optimize_terms(q, snapshot)[:5])
 '
 
-# SPX macro hedge sizing
+# SPX macro hedge sizing (BSM path — no chain in snapshot).
+# Each leg gets mid_source="fallback"; pricing_source="bsm" at top level.
 .venv/bin/python -c '
 from scripts.macro_hedge import build_macro_hedge
 print(build_macro_hedge(portfolio_notional=1_000_000, hedge_horizon_days=60,
                         scenario="deep_correction_-10", structure="put_spread",
                         snapshot={"spot": 6000.0, "iv_atm_90d": 0.18}))
+'
+
+# SPX macro hedge sizing (chain path — preferred when chain available).
+# Adding "chain" + "chain_source" + "spot_timestamp" + "chain_timestamps"
+# activates per-leg chain mid lookup. Top-level pricing_source rolls up to
+# "chain" if every leg priced off the chain, "mixed" if some fell back to
+# BSM, "bsm" if none used chain. Each leg gets mid_source + mid_provenance
+# (full path back to chain[expiry][strike_pct][right]["mid"] for audit).
+.venv/bin/python -c '
+from scripts.macro_hedge import build_macro_hedge
+snap = {"spot": 6000.0, "iv_atm_90d": 0.18,
+        "chain_source": "UW", "spot_timestamp": "2026-06-05T10:00:00Z",
+        "chain_timestamps": {"2026-08-15": "2026-06-05T10:00:00Z"},
+        "chain": {"2026-08-15": {
+            0.90: {"put": {"mid": 18.50, "iv": 0.21}},
+            1.00: {"put": {"mid": 100.30, "iv": 0.18}},
+        }}}
+out = build_macro_hedge(portfolio_notional=10_000_000, hedge_horizon_days=70,
+                        scenario="deep_correction_-10", structure="put_spread",
+                        snapshot=snap)
+print(out["pricing_source"], out["cost_dollar"])
+for leg in out["legs"]:
+    print(leg["action"], leg["strike"], leg["limit_price"], leg["mid_source"])
 '
 
 # IB order preflight (no submission)

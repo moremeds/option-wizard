@@ -240,3 +240,64 @@ def test_build_preflight_preserves_caller_supplied_mid_source():
         account={"NLV": 1_000_000, "buying_power": 500_000, "cash": 100_000},
     )
     assert pf["mid_sources"] == ["IB"]
+
+
+def test_build_preflight_preserves_mid_provenance_from_macro_hedge():
+    """P2-D: when macro_hedge feeds its leg list (with full mid_provenance
+    objects) into build_preflight, the rich provenance survives the
+    handoff. Gemini's tribunal review flagged this as a CRITICAL drop;
+    this test refutes the claim and locks in the contract.
+    """
+    from scripts.ib_order import build_preflight
+    from scripts.macro_hedge import build_macro_hedge
+
+    snapshot = {
+        "spot": 6200.0,
+        "iv_atm_90d": 0.18,
+        "chain_source": "UW",
+        "spot_timestamp": "2026-06-05T10:00:00Z",
+        "chain_timestamps": {"2026-08-15": "2026-06-05T10:00:00Z"},
+        "chain": {
+            "2026-08-15": {
+                0.90: {"put": {"mid": 18.50, "iv": 0.21}},
+                1.00: {"put": {"mid": 100.30, "iv": 0.18}},
+            }
+        },
+    }
+    hedge = build_macro_hedge(
+        portfolio_notional=50_000_000, hedge_horizon_days=70,
+        scenario="deep_correction_-10", structure="put_spread",
+        snapshot=snapshot,
+    )
+    # Sanity: macro_hedge legs carry mid_provenance with UW source
+    for leg in hedge["legs"]:
+        assert leg["mid_source"] == "UW"
+        assert "mid_provenance" in leg
+        assert leg["mid_provenance"]["source"] == "UW"
+
+    # Convert macro_hedge leg dicts to build_preflight's expected shape.
+    # build_preflight needs 'action' in upper case ('BUY'/'SELL') and 'right'
+    # in upper case ('P'/'C'); spread it through with overrides.
+    pf_legs = [
+        {
+            **leg,
+            "action": "BUY" if leg["action"] == "buy" else "SELL",
+            "right": "P",
+        }
+        for leg in hedge["legs"]
+    ]
+    pf = build_preflight(
+        structure="bull_put_spread",
+        ticker="SPX",
+        spot=6200.0,
+        legs=pf_legs,
+        uw_regime={"label": "NEUTRAL"},
+        account={"NLV": 50_000_000, "buying_power": 25_000_000, "cash": 1_000_000},
+    )
+    # mid_provenance should ride through into preflight legs (Gemini G1 refutation)
+    for leg in pf["legs"]:
+        assert "mid_provenance" in leg, "build_preflight dropped mid_provenance"
+        assert leg["mid_provenance"]["source"] == "UW"
+        assert leg["mid_source"] == "UW"
+    # Rollup at preflight level
+    assert pf["mid_sources"] == ["UW"]

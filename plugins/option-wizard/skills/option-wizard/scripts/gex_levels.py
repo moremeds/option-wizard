@@ -184,6 +184,9 @@ def compute_levels_per_expiry(
     uw_rows: Iterable[dict],
     spot: float,
     call_wall_definition: str = "net_neg_gex",
+    *,
+    chain_source: str = "UW",
+    chain_timestamps: dict[str, str] | None = None,
 ) -> dict[str, dict]:
     """Per-expiry gamma flip + walls from a flat UW per-strike-per-expiry list.
 
@@ -196,7 +199,13 @@ def compute_levels_per_expiry(
 
     Input: list of dicts from get_greek_exposure_by_strike_expiry. Each row
     must include 'expiry' plus the fields compute_levels expects.
-    Returns: {expiry: {gamma_flip, put_wall, call_wall}}
+    Returns: {expiry: {gamma_flip, put_wall, call_wall, data_provenance}}
+
+    Pass-2 (P2-B): chain_source + chain_timestamps propagate through to
+    each per-expiry compute_levels call so the data_provenance block
+    carries the right source + per-expiry timestamp. Without this, the
+    aggregated output had data_provenance with timestamp=None and a
+    hardcoded UW default for every expiry — useless for an audit trail.
     """
     by_expiry: dict[str, list[dict]] = {}
     for r in uw_rows:
@@ -206,7 +215,14 @@ def compute_levels_per_expiry(
             continue
         by_expiry.setdefault(exp, []).append(r)
 
+    timestamps = chain_timestamps or {}
     return {
-        exp: compute_levels(rows, spot, call_wall_definition=call_wall_definition)
+        exp: compute_levels(
+            rows,
+            spot,
+            call_wall_definition=call_wall_definition,
+            chain_source=chain_source,
+            chain_timestamp=timestamps.get(exp),
+        )
         for exp, rows in by_expiry.items()
     }
