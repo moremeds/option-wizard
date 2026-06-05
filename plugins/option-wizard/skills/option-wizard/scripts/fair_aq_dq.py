@@ -549,43 +549,15 @@ def _accumulation_pv(
     return daily_notional * alive_obs * discount
 
 
-def _nearest_expiry_to_tenor(
-    chain: dict[str, Any], tenor_months: int, quote_start_iso: str
-) -> str:
-    """Pick the listed expiry closest to (quote_start + tenor_months).
-
-    Pass-3 finding (A4): filter past expiries before picking nearest. A stale
-    snapshot with only expired chain dates would otherwise pick a dead option.
-    """
-    from datetime import datetime
-
-    target = datetime.fromisoformat(quote_start_iso.replace("Z", "+00:00"))
-    target_days = tenor_months * 30
-
-    best = None
-    best_diff = None
-    for exp in chain.keys():
-        exp_dt = datetime.fromisoformat(exp + "T00:00:00+00:00")
-        days_to_exp = (exp_dt - target).days
-        if days_to_exp < 0:
-            continue  # expired — skip
-        diff = abs(days_to_exp - target_days)
-        if best_diff is None or diff < best_diff:
-            best = exp
-            best_diff = diff
-    if best is None:
-        raise ValueError(
-            "No future-dated expiries in chain — orchestrator must refresh"
-        )
-    return best
-
-
-def _read_chain_mid(
-    chain: dict, expiry: str, strike_pct: float, right: Literal["put", "call"]
-) -> float | None:
-    """Read mid price from chain at exact (expiry, strike_pct, right).
-    Returns None if not present. Caller decides whether to use fallback."""
-    return chain.get(expiry, {}).get(strike_pct, {}).get(right, {}).get("mid")
+# Chain-lookup primitives are now shared via scripts._market. We re-export
+# them under the original `_underscore` names so existing callers and tests
+# don't break.
+from scripts._market import (
+    nearest_expiry_to_tenor as _nearest_expiry_to_tenor,
+)
+from scripts._market import (
+    read_chain_mid as _read_chain_mid,
+)
 
 
 def _expected_alive_obs(ko_prob_total: float, n_obs: int) -> float:
