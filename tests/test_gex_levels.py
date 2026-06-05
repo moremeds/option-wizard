@@ -129,3 +129,27 @@ def test_gamma_flip_prefers_crossing_nearest_to_spot():
     assert 200.0 < result["gamma_flip"] < 425.0, (
         f"expected near-spot crossing, got {result['gamma_flip']}"
     )
+
+
+# ─── Phase D: data_provenance ───────────────────────────────
+
+
+def test_compute_levels_includes_data_provenance():
+    rows = [
+        {"strike": 90.0, "call_gex": 100, "put_gex": -500},
+        {"strike": 95.0, "call_gex": 200, "put_gex": -300},
+        {"strike": 100.0, "call_gex": 800, "put_gex": -200},
+        {"strike": 105.0, "call_gex": 1500, "put_gex": -100},
+    ]
+    from scripts.gex_levels import compute_levels
+
+    result = compute_levels(rows, spot=100.0, chain_source="UW",
+                            chain_timestamp="2026-06-05T10:00:00Z")
+    assert "data_provenance" in result
+    for key in ("gamma_flip", "put_wall", "call_wall"):
+        entry = result["data_provenance"][key]
+        assert entry["source"] == "computed"
+        assert "UW" in entry["detail"]
+        assert entry["timestamp"] == "2026-06-05T10:00:00Z"
+        # Value mirrors the level (might be None if unidentifiable)
+        assert entry["value"] == result[key]

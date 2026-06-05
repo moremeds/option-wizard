@@ -271,17 +271,37 @@ def build_preflight(
         if len(strikes) >= 2:
             qty = int(legs[0]["qty"])
             extras["spread_width_dollar"] = (max(strikes) - min(strikes)) * qty * 100
+
+    # Phase D: enrich each leg with a `mid_source` tag if the caller didn't
+    # already supply one. Convention: 'IB' if a mid came from IB MCP /
+    # ib_insync chain (live-trade gating), 'UW' if from UW analytical, or
+    # 'unspecified' if the orchestrator didn't pass provenance. The
+    # preflight surfaces this so the trader can see whether the mid that
+    # priced the YES/NO gate came from a paid broker feed (seconds-fresh)
+    # or analytical data (potentially staler).
+    legs_with_provenance = []
+    for leg in legs:
+        if "mid_source" in leg:
+            legs_with_provenance.append(leg)
+        else:
+            legs_with_provenance.append({**leg, "mid_source": "unspecified"})
+
+    mid_sources = sorted({l["mid_source"] for l in legs_with_provenance})
+
     return {
         "ticker": ticker,
         "structure": structure,
         "spot": spot,
-        "legs": legs,
+        "legs": legs_with_provenance,
         "net_credit_dollar": round(net_credit, 2),
         "pl_matrix": matrix,
         "max_loss": round(max_loss, 2),
         "max_gain": round(max_gain, 2),
         "uw_regime": uw_regime,
-        "account_check": _account_check(structure, legs, account, max_loss=max_loss),
+        "account_check": _account_check(
+            structure, legs_with_provenance, account, max_loss=max_loss
+        ),
+        "mid_sources": mid_sources,
         **extras,
     }
 

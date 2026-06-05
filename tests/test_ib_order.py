@@ -192,3 +192,51 @@ def test_brackets_for_csp_use_2x_credit_rule():
     brackets = build_brackets(opening)
     sl = next(b for b in brackets if b["bracket_type"] == "stop_loss")
     assert sl["close_at_debit_or_credit"] == pytest.approx(1000.0, abs=1)
+
+
+# ─── Phase D: mid_source provenance on legs ─────────────────
+
+
+def test_build_preflight_tags_mid_source_unspecified_by_default():
+    """Legs without a mid_source get tagged 'unspecified' so the trader
+    sees the gap rather than silently trusting an unknown source."""
+    from scripts.ib_order import build_preflight
+
+    legs = [
+        {"action": "SELL", "right": "P", "strike": 420.0, "qty": 1, "limit_price": 1.50},
+        {"action": "BUY", "right": "P", "strike": 415.0, "qty": 1, "limit_price": 0.50},
+    ]
+    pf = build_preflight(
+        structure="bull_put_spread",
+        ticker="SPY",
+        spot=430.0,
+        legs=legs,
+        uw_regime={"label": "NEUTRAL"},
+        account={"NLV": 1_000_000, "buying_power": 500_000, "cash": 100_000},
+    )
+    assert pf["mid_sources"] == ["unspecified"]
+    for leg in pf["legs"]:
+        assert leg["mid_source"] == "unspecified"
+
+
+def test_build_preflight_preserves_caller_supplied_mid_source():
+    """When the orchestrator passes mid_source per leg (e.g., 'IB' for
+    broker-feed mids, 'UW' for analytical), preflight preserves the tag
+    and surfaces the rollup in mid_sources."""
+    from scripts.ib_order import build_preflight
+
+    legs = [
+        {"action": "SELL", "right": "P", "strike": 420.0, "qty": 1,
+         "limit_price": 1.50, "mid_source": "IB"},
+        {"action": "BUY", "right": "P", "strike": 415.0, "qty": 1,
+         "limit_price": 0.50, "mid_source": "IB"},
+    ]
+    pf = build_preflight(
+        structure="bull_put_spread",
+        ticker="SPY",
+        spot=430.0,
+        legs=legs,
+        uw_regime={"label": "NEUTRAL"},
+        account={"NLV": 1_000_000, "buying_power": 500_000, "cash": 100_000},
+    )
+    assert pf["mid_sources"] == ["IB"]

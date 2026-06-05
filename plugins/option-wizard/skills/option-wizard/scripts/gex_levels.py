@@ -126,8 +126,11 @@ def compute_levels(
     gex_by_strike: Iterable[dict],
     spot: float,
     call_wall_definition: str = "net_neg_gex",
+    *,
+    chain_source: str = "UW",
+    chain_timestamp: str | None = None,
 ) -> dict:
-    """Return dict with keys gamma_flip, put_wall, call_wall.
+    """Return dict with keys gamma_flip, put_wall, call_wall, data_provenance.
 
     Each input row must have 'strike' plus either 'gex' (pre-aggregated net)
     or 'call_gex' + 'put_gex' (raw UW). Spot is the current underlying price.
@@ -137,12 +140,43 @@ def compute_levels(
       'net_neg_gex' (default) — strike above spot with most negative net GEX
       'oi_cluster'           — strike above spot with largest positive call_gex
                                 (requires call_gex in input rows)
+
+    data_provenance tags every level as 'computed' from the given
+    chain_source (default UW). Trader-visible audit trail consistent with
+    the chain-mid discipline in fair_aq_dq / fair_coupon / macro_hedge.
     """
     rows = _sorted_by_strike(list(gex_by_strike))
+    flip = _gamma_flip(rows, spot)
+    put_wall = _put_wall(rows, spot)
+    call_wall = _call_wall(rows, spot, definition=call_wall_definition)
+    provenance = {
+        "gamma_flip": {
+            "value": flip,
+            "source": "computed",
+            "detail": f"net-GEX sign change in {chain_source} GEX-by-strike",
+            "timestamp": chain_timestamp,
+        },
+        "put_wall": {
+            "value": put_wall,
+            "source": "computed",
+            "detail": f"max positive net GEX below spot ${spot:.2f} in {chain_source} GEX-by-strike",
+            "timestamp": chain_timestamp,
+        },
+        "call_wall": {
+            "value": call_wall,
+            "source": "computed",
+            "detail": (
+                f"call wall via {call_wall_definition} above spot ${spot:.2f} "
+                f"in {chain_source} GEX-by-strike"
+            ),
+            "timestamp": chain_timestamp,
+        },
+    }
     return {
-        "gamma_flip": _gamma_flip(rows, spot),
-        "put_wall": _put_wall(rows, spot),
-        "call_wall": _call_wall(rows, spot, definition=call_wall_definition),
+        "gamma_flip": flip,
+        "put_wall": put_wall,
+        "call_wall": call_wall,
+        "data_provenance": provenance,
     }
 
 
