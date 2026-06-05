@@ -22,6 +22,7 @@ from scripts.fair_aq_dq import (
     _nearest_expiry_to_tenor,
     _read_chain_mid,
     _short_put_leg_pv,
+    analyze_quote,
 )
 
 # ─── Mock snapshot fixtures ────────────────────────────────
@@ -356,8 +357,12 @@ def test_expected_alive_obs_edge_cases():
 
 
 def test_fair_yield_returns_breakdown_dict():
-    q = _mock_quote(tenor_months=12, doubling_factor=2.0,
-                   pb_quoted_yield_pa=0.09, daily_notional_usd=10_000.0)
+    q = _mock_quote(
+        tenor_months=12,
+        doubling_factor=2.0,
+        pb_quoted_yield_pa=0.09,
+        daily_notional_usd=10_000.0,
+    )
     s = _mock_snapshot(iv_rank=60.0)
     s.chain = _mock_chain()
     s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
@@ -383,3 +388,103 @@ def test_fair_yield_markup_positive_when_pb_overcharges():
     out = _fair_yield(q, s)
     markup = q.pb_quoted_yield_pa - out["fair_yield_pa"]
     assert markup > 0  # fair_yield should be lower than PB quote
+
+
+# ─── analyze_quote integration (Task 14) ───────────────────
+
+
+def test_analyze_quote_short_circuits_on_refusal():
+    q = _mock_quote(doubling_factor=3.0)  # red line trigger
+    s = _mock_snapshot()
+    s.chain = _mock_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+
+    v = analyze_quote(q, s, nlv_usd=1_000_000.0)
+    assert v.decision == "REFUSE"
+    assert len(v.refusal_reasons) > 0
+    assert v.refusal_reasons
+
+
+def test_analyze_quote_returns_full_verdict_on_clean_quote():
+    q = _mock_quote(doubling_factor=2.0, tenor_months=12)
+    s = _mock_snapshot(iv_rank=60.0)
+    s.chain = _mock_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+    s.earnings_date_iso = "2026-07-05"  # outside mid 50%
+
+    v = analyze_quote(q, s, nlv_usd=50_000_000.0)
+    # Markup-tier REFUSE is also valid (no refusal red lines triggered, but
+    # the synthetic chain mids may yield a markup > 5pp). The point of this
+    # test is to verify the full breakdown / provenance pipeline runs to
+    # completion, NOT the specific decision tier.
+    assert v.decision in ("COUNTER", "ACCEPT_IF_MUST", "REFUSE")
+    assert v.breakdown["short_premium_pv"] > 0  # breakdown populated
+    assert isinstance(v.data_provenance, dict)
+    assert "spot" in v.data_provenance
+    # Differentiate from the refusal short-circuit case: refusal_reasons,
+    # if present, must come from the markup-tier check (not red lines).
+    for r in v.refusal_reasons:
+        assert "markup" in r.lower(), f"unexpected red-line refusal in clean test: {r}"
+
+
+def test_analyze_quote_decision_tiers(monkeypatch):
+    """Verify the three decision thresholds boundary behavior.
+
+    Pass-2 finding (Codex-10): this test was previously `pass` — vacuous.
+    Now we monkeypatch _fair_yield to return controlled markup values and
+    assert the tier mapping is correct at the boundaries (1.5pp, 5.0pp).
+    """
+    q = _mock_quote()
+    s = _mock_snapshot()
+    s.chain = _mock_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+    s.earnings_date_iso = "2026-07-05"
+
+    def fake_fair_yield_factory(fair_yield_pa):
+        def fake(q_arg, s_arg):
+            return {
+                "fair_yield_pa": fair_yield_pa,
+                "ko_probability": 0.30,
+                "breakdown": {
+                    "short_premium_pv": 100.0,
+                    "pb_ko_leg_pv": 50.0,
+                    "tail_pv": 10.0,
+                    "pb_quoted_payoff_pv": 200.0,
+                    "fair_payoff_to_client_pv": 40.0,
+                    "markup_pv": 160.0,
+                    "alive_obs": 180.0,
+                    "forfeited_obs": 72.0,
+                },
+                "data_provenance": {
+                    "spot": {"value": q_arg.spot, "source": s_arg.spot_source}
+                },
+            }
+
+        return fake
+
+    # markup_pp = (pb_quoted_yield 0.09 - fair_yield_pa) × 100
+    # markup_pp = 1.0 (ACCEPT_IF_MUST):
+    monkeypatch.setattr(
+        "scripts.fair_aq_dq._fair_yield", fake_fair_yield_factory(fair_yield_pa=0.080)
+    )
+    v = analyze_quote(q, s, nlv_usd=50_000_000.0)
+    assert v.decision == "ACCEPT_IF_MUST", (
+        f"expected ACCEPT_IF_MUST at markup=1.0, got {v.decision}"
+    )
+
+    # markup_pp = 3.0 (COUNTER):
+    monkeypatch.setattr(
+        "scripts.fair_aq_dq._fair_yield", fake_fair_yield_factory(fair_yield_pa=0.060)
+    )
+    v = analyze_quote(q, s, nlv_usd=50_000_000.0)
+    assert v.decision == "COUNTER", f"expected COUNTER at markup=3.0, got {v.decision}"
+
+    # markup_pp = 6.0 (REFUSE):
+    monkeypatch.setattr(
+        "scripts.fair_aq_dq._fair_yield", fake_fair_yield_factory(fair_yield_pa=0.030)
+    )
+    v = analyze_quote(q, s, nlv_usd=50_000_000.0)
+    assert v.decision == "REFUSE", f"expected REFUSE at markup=6.0, got {v.decision}"
+    # Markup-tier REFUSE should populate refusal_reasons (Codex-14)
+    assert v.refusal_reasons, "markup-tier REFUSE should record a reason"
+    assert any("markup" in r.lower() for r in v.refusal_reasons)

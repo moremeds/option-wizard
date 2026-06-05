@@ -119,7 +119,62 @@ class Verdict:
 
 
 def analyze_quote(q: Quote, s: Snapshot, nlv_usd: float | None = None) -> Verdict:
-    raise NotImplementedError("Implemented in Task 14")
+    """End-to-end quote analysis. 6-step pipeline:
+    1. Refusal red-line check
+    2. Chain pull (caller-provided in Snapshot)
+    3. Fair-value compute
+    4. Markup decision tier
+    5. Empty levers list (optimize_terms is separate call)
+    6. Return Verdict.
+    """
+    # Late-bound _fair_yield lookup via module dict so test monkeypatches stick.
+    import sys
+
+    _self = sys.modules[__name__]
+
+    refusal_reasons = _check_refusal_red_lines(q, s, nlv_usd)
+
+    if refusal_reasons:
+        return Verdict(
+            fair_yield_pa=float("nan"),
+            pb_quoted_yield_pa=q.pb_quoted_yield_pa,
+            markup_pp=float("nan"),
+            pb_annual_profit_usd=float("nan"),
+            ko_probability=float("nan"),
+            decision="REFUSE",
+            refusal_reasons=refusal_reasons,
+            breakdown={},
+            data_provenance={"refusal_short_circuit": True},
+        )
+
+    fair = _self._fair_yield(q, s)
+    markup_pp = (q.pb_quoted_yield_pa - fair["fair_yield_pa"]) * 100.0
+
+    n_obs = _num_observations(q.tenor_months, q.obs_freq)
+    pb_annual_profit = (markup_pp / 100.0) * q.daily_notional_usd * n_obs
+
+    tier_refusal_reasons: list[str] = []
+    if markup_pp > 5.0:
+        decision = "REFUSE"
+        tier_refusal_reasons.append(
+            f"Markup {markup_pp:.2f}pp > 5.0pp refusal threshold"
+        )
+    elif markup_pp > 1.5:
+        decision = "COUNTER"
+    else:
+        decision = "ACCEPT_IF_MUST"
+
+    return Verdict(
+        fair_yield_pa=fair["fair_yield_pa"],
+        pb_quoted_yield_pa=q.pb_quoted_yield_pa,
+        markup_pp=markup_pp,
+        pb_annual_profit_usd=pb_annual_profit,
+        ko_probability=fair["ko_probability"],
+        decision=decision,
+        refusal_reasons=tier_refusal_reasons,
+        breakdown=fair["breakdown"],
+        data_provenance=fair["data_provenance"],
+    )
 
 
 def optimize_terms(
@@ -227,7 +282,6 @@ def _earnings_in_middle_50pct(
 
 
 from scipy.stats import norm
-
 
 # Broadie-Glasserman (1997) discrete-monitoring constant. Derived from the
 # Riemann zeta function ζ(1/2). Shifts the effective barrier away from spot
@@ -358,12 +412,7 @@ def _read_chain_mid(
 ) -> float | None:
     """Read mid price from chain at exact (expiry, strike_pct, right).
     Returns None if not present. Caller decides whether to use fallback."""
-    return (
-        chain.get(expiry, {})
-        .get(strike_pct, {})
-        .get(right, {})
-        .get("mid")
-    )
+    return chain.get(expiry, {}).get(strike_pct, {}).get(right, {}).get("mid")
 
 
 def _expected_alive_obs(ko_prob_total: float, n_obs: int) -> float:
@@ -469,13 +518,11 @@ def _fair_yield(q: Quote, s: Snapshot) -> dict[str, Any]:
     if spot_drift_pct > 0.005:
         raise ValueError(
             f"Quote spot ${q.spot:.2f} diverges from Snapshot spot ${s.spot:.2f} "
-            f"by {spot_drift_pct*100:.2f}% — re-pull fresh chain data before "
+            f"by {spot_drift_pct * 100:.2f}% — re-pull fresh chain data before "
             f"evaluating. Stale snapshot makes fair-value untrustworthy."
         )
 
-    nearest_expiry = _nearest_expiry_to_tenor(
-        s.chain, q.tenor_months, s.spot_timestamp
-    )
+    nearest_expiry = _nearest_expiry_to_tenor(s.chain, q.tenor_months, s.spot_timestamp)
     chain_e = s.chain[nearest_expiry]
 
     # ── Direction-dependent leg selection ─────────────────────────
@@ -495,9 +542,7 @@ def _fair_yield(q: Quote, s: Snapshot) -> dict[str, Any]:
     strike_leg_mid = _read_chain_mid(
         s.chain, nearest_expiry, q.strike_pct, strike_leg_right
     )
-    ko_leg_mid = _read_chain_mid(
-        s.chain, nearest_expiry, q.ko_pct, ko_leg_right
-    )
+    ko_leg_mid = _read_chain_mid(s.chain, nearest_expiry, q.ko_pct, ko_leg_right)
     tail_leg_mid = _read_chain_mid(
         s.chain, nearest_expiry, tail_strike_pct, tail_leg_right
     )
@@ -515,8 +560,11 @@ def _fair_yield(q: Quote, s: Snapshot) -> dict[str, Any]:
     shares_per_obs = q.daily_notional_usd / q.spot
 
     ko_prob = _ko_probability(
-        spot=q.spot, ko_barrier=q.ko_pct * q.spot,
-        iv=iv_at_ko, tenor_yr=tenor_yr, obs_freq=q.obs_freq,
+        spot=q.spot,
+        ko_barrier=q.ko_pct * q.spot,
+        iv=iv_at_ko,
+        tenor_yr=tenor_yr,
+        obs_freq=q.obs_freq,
     )
 
     alive_obs = _expected_alive_obs(ko_prob, n_obs)
@@ -550,17 +598,20 @@ def _fair_yield(q: Quote, s: Snapshot) -> dict[str, Any]:
 
     fair_payoff_pv = short_premium_pv - pb_ko_leg_pv - tail_pv
 
-    pb_quoted_payoff_pv = (
-        q.pb_quoted_yield_pa * q.daily_notional_usd * n_obs * tenor_yr
-    )
+    pb_quoted_payoff_pv = q.pb_quoted_yield_pa * q.daily_notional_usd * n_obs * tenor_yr
     markup_pv = pb_quoted_payoff_pv - fair_payoff_pv
     fair_yield_pa = fair_payoff_pv / (q.daily_notional_usd * n_obs * tenor_yr)
 
     provenance = {
-        "spot": {"value": q.spot, "source": s.spot_source,
-                "timestamp": s.spot_timestamp},
-        "chain_source": {"source": s.chain_source,
-                        "pulled_at": s.chain_timestamps.get(nearest_expiry)},
+        "spot": {
+            "value": q.spot,
+            "source": s.spot_source,
+            "timestamp": s.spot_timestamp,
+        },
+        "chain_source": {
+            "source": s.chain_source,
+            "pulled_at": s.chain_timestamps.get(nearest_expiry),
+        },
         "strike_leg_mid": {
             "value": strike_leg_mid,
             "source": f"{s.chain_source} chain[{nearest_expiry}][{q.strike_pct}]['{strike_leg_right}']['mid']",
