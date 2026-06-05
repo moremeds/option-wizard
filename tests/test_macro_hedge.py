@@ -184,3 +184,53 @@ def test_no_chain_in_snapshot_uses_pure_bsm():
     leg = result["legs"][0]
     assert leg["mid_source"] == "fallback"
     assert "BSM fallback" in leg["mid_provenance"]["detail"]
+
+
+# ─── Pass-3 adversarial: cost-cap error discloses pricing source (A4) ──
+
+
+def test_cost_cap_error_includes_pricing_source():
+    """When cost cap fires, the error must say whether the cost came from
+    chain mids (real) or BSM fallback (approximate) so the trader knows
+    whether the cap-breach is real."""
+    import pytest as _pt
+
+    # No chain in snapshot → pure BSM path
+    with _pt.raises(ValueError, match="BSM fallback"):
+        build_macro_hedge(
+            portfolio_notional=1_000_000,
+            hedge_horizon_days=60,
+            scenario="crash_-20",
+            structure="long_put",
+            snapshot={"spot": 6200.0, "iv_atm_90d": 0.50},  # high IV → over cap
+            max_annual_cost_pct=0.015,
+        )
+
+
+def test_chain_with_zero_mid_falls_back_to_bsm():
+    """P3-A2: mid=0.0 from real chain (illiquid strike) should NOT silently
+    price the leg at $0. Falls back to BSM so the cost estimate reflects
+    actual market risk."""
+    snapshot = {
+        "spot": 6200.0,
+        "iv_atm_90d": 0.18,
+        "chain_source": "UW",
+        "spot_timestamp": "2026-06-05T10:00:00Z",
+        "chain_timestamps": {"2026-08-15": "2026-06-05T10:00:00Z"},
+        "chain": {
+            "2026-08-15": {
+                0.90: {"put": {"mid": 0.0, "iv": 0.21}},  # no bid
+            }
+        },
+    }
+    result = build_macro_hedge(
+        portfolio_notional=5_000_000,
+        hedge_horizon_days=70,
+        scenario="crash_-20",
+        structure="long_put",
+        snapshot=snapshot,
+    )
+    # Should fall back to BSM, not price at $0
+    assert result["legs"][0]["limit_price"] > 0
+    assert result["legs"][0]["mid_source"] == "fallback"
+    assert result["pricing_source"] == "bsm"

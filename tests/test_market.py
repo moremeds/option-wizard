@@ -138,3 +138,26 @@ def test_source_constants_exposed():
     assert SOURCE_IB == "IB"
     assert SOURCE_FALLBACK == "fallback"
     assert SOURCE_COMPUTED == "computed"
+
+
+# ─── Pass-3 adversarial: 0.0 mid handling (A2) ─────────────
+
+
+def test_read_chain_mid_treats_zero_as_no_quote():
+    """UW chains return mid=0.0 for illiquid / no-bid strikes. If accepted
+    as a real price, hedge legs would be priced at $0 and silently pass
+    cost-cap checks. Return None so caller falls back to BSM."""
+    chain = {
+        "2027-06-18": {
+            0.50: {"put": {"mid": 0.0, "iv": 0.55}},   # no bid
+            0.95: {"put": {"mid": 5.20, "iv": 0.38}},  # liquid
+        }
+    }
+    assert read_chain_mid(chain, "2027-06-18", 0.50, "put") is None
+    assert read_chain_mid(chain, "2027-06-18", 0.95, "put") == 5.20
+
+
+def test_read_chain_mid_treats_negative_as_no_quote():
+    """Defensive: negative mid is data corruption; treat as no quote."""
+    chain = {"2027-06-18": {0.95: {"put": {"mid": -1.0, "iv": 0.38}}}}
+    assert read_chain_mid(chain, "2027-06-18", 0.95, "put") is None

@@ -297,16 +297,11 @@ def build_macro_hedge(
 
     cost = _net_premium(legs)
     cost_cap = portfolio_notional * max_annual_cost_pct * t_years
-    if cost > cost_cap:
-        raise ValueError(
-            f"hedge cost ${cost:,.0f} exceeds cost cap ${cost_cap:,.0f} "
-            f"({max_annual_cost_pct * 100:.1f}% annualized of ${portfolio_notional:,.0f} over {hedge_horizon_days}d)"
-        )
 
-    # Per-output `pricing_source` rollup: 'chain' if every leg priced off
-    # the chain, 'mixed' if some legs fell back to BSM, 'bsm' if no legs
-    # used the chain. Lets the trader see at a glance whether the cost
-    # estimate is market-real or model-approximated.
+    # Compute pricing_source before the cost-cap check so the error message
+    # can disclose it. Pass-3 A4: a 'mixed' or 'bsm' cost can over- or
+    # under-estimate the true market cost vs a 'chain'-priced one — the
+    # trader needs to know which case they're in when the cap fires.
     sources = {leg["mid_source"] for leg in legs}
     if sources == {"UW"} or sources == {"IB"}:
         pricing_source = "chain"
@@ -314,6 +309,15 @@ def build_macro_hedge(
         pricing_source = "mixed"
     else:
         pricing_source = "bsm"
+
+    if cost > cost_cap:
+        raise ValueError(
+            f"hedge cost ${cost:,.0f} exceeds cost cap ${cost_cap:,.0f} "
+            f"({max_annual_cost_pct * 100:.1f}% annualized of "
+            f"${portfolio_notional:,.0f} over {hedge_horizon_days}d). "
+            f"pricing_source={pricing_source!r} — "
+            f"{'chain mids' if pricing_source == 'chain' else 'BSM fallback (cost may differ from market)'}"
+        )
 
     return {
         "underlying": underlying,

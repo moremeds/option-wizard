@@ -40,13 +40,22 @@ def read_chain_mid(
 ) -> float | None:
     """Read mid price from chain at exact (expiry, strike_pct, right).
 
-    Returns None if not present. Caller decides whether to use a fallback
-    pricing model — this function never fabricates a price. Returning None
-    is the signal that the orchestrator must either pull a different strike
-    or accept the BSM-fallback degradation (and record `fallback_used=True`
-    in provenance).
+    Returns None if missing OR if the mid is non-positive (Pass-3 A2:
+    real UW chains return mid=0.0 for illiquid / no-bid strikes; if we
+    accepted it as a valid price, hedge legs would be priced at $0 and
+    silently pass the cost cap. Treat <= 0 as 'no quote' so the caller
+    falls back to BSM and the provenance correctly flags it).
+
+    Caller decides whether to use a fallback pricing model — this function
+    never fabricates a price. Returning None is the signal that the
+    orchestrator must either pull a different strike or accept the
+    BSM-fallback degradation (and record `fallback_used=True` in
+    provenance).
     """
-    return chain.get(expiry, {}).get(strike_pct, {}).get(right, {}).get("mid")
+    mid = chain.get(expiry, {}).get(strike_pct, {}).get(right, {}).get("mid")
+    if mid is None or mid <= 0:
+        return None
+    return mid
 
 
 def read_chain_iv(
