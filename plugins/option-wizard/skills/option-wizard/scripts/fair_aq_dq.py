@@ -177,13 +177,107 @@ def analyze_quote(q: Quote, s: Snapshot, nlv_usd: float | None = None) -> Verdic
     )
 
 
+# Negotiation difficulty grids per framework §5.
+_TERM_GRID_BASE = {
+    "tenor_months": [3, 6, 9, 12, 18],
+    "doubling_factor": [1.0, 1.5, 2.0, 2.5, 3.0],
+    "obs_freq": ["daily", "weekly", "monthly"],
+}
+# ko_pct grid is DIRECTION-AWARE: AQ KO above spot (>1.0); DQ KO below (<1.0).
+_KO_GRID_AQ = [1.02, 1.03, 1.05, 1.07, 1.10]
+_KO_GRID_DQ = [0.98, 0.97, 0.95, 0.93, 0.90]
+
+
+def _term_grid_for(direction: Literal["AQ", "DQ"]) -> dict[str, list]:
+    return {
+        **_TERM_GRID_BASE,
+        "ko_pct": _KO_GRID_AQ if direction == "AQ" else _KO_GRID_DQ,
+    }
+
+
+def _concession_difficulty(param: str, old_val, new_val) -> float:
+    """Heuristic difficulty score for PB to accept this concession (framework §5)."""
+    if param == "tenor_months":
+        return 1.5 if new_val < old_val else 0.5  # cutting tenor is easy
+    if param == "ko_pct":
+        # "Pushing KO further from spot" = lowering hit probability = PB hates
+        return 3.5 if abs(new_val - 1.0) > abs(old_val - 1.0) else 1.0
+    if param == "doubling_factor":
+        return 4.5 if new_val < old_val else 0.5  # reducing 2× is hardest ask
+    if param == "obs_freq":
+        return {"weekly": 2.0, "monthly": 3.0}.get(new_val, 0.5)
+    return 1.0
+
+
 def optimize_terms(
     q: Quote,
     s: Snapshot,
     sweep: list[str] | None = None,
     nlv_usd: float | None = None,
 ) -> list[dict[str, Any]]:
-    raise NotImplementedError("Implemented in Task 15")
+    """Sweep each parameter through its (direction-aware) grid; compute markup_pp
+    for each mutation. Return list sorted by leverage_score = delta_pp / difficulty
+    (descending — top entries are easiest negotiation wins).
+
+    nlv_usd propagates to analyze_quote so concentration-refusal red lines persist
+    across mutations (a refused-for-concentration quote should not re-pass via
+    optimization without curing the concentration).
+
+    Pass-3 finding (A3): if the base quote itself is REFUSED (e.g., concentration
+    violation), return a single sentinel row with `refused_base=True` instead of
+    silently returning [].
+    """
+    grid = _term_grid_for(q.direction)
+    params = sweep if sweep else list(grid.keys())
+    base_verdict = analyze_quote(q, s, nlv_usd=nlv_usd)
+    if base_verdict.decision == "REFUSE":
+        return [
+            {
+                "param_changed": None,
+                "old_value": None,
+                "new_value": None,
+                "markup_pp": base_verdict.markup_pp,
+                "delta_pp": 0.0,
+                "pb_concession_difficulty": 0.0,
+                "leverage_score": 0.0,
+                "refused_base": True,
+                "refusal_reasons": list(base_verdict.refusal_reasons),
+            }
+        ]
+    base_markup = base_verdict.markup_pp
+
+    variants: list[dict[str, Any]] = []
+    for param in params:
+        for val in grid[param]:
+            if val == getattr(q, param):
+                continue
+            try:
+                mutated = replace(q, **{param: val})
+            except (ValueError, TypeError):
+                continue  # Mutation violates Quote.__post_init__ validation
+            try:
+                v_mut = analyze_quote(mutated, s, nlv_usd=nlv_usd)
+            except (ValueError, KeyError):
+                continue
+            if v_mut.decision == "REFUSE":
+                continue  # Mutation hits a different red line — skip
+            delta = base_markup - v_mut.markup_pp
+            difficulty = _concession_difficulty(param, getattr(q, param), val)
+            score = delta / max(0.5, difficulty)
+            variants.append(
+                {
+                    "param_changed": param,
+                    "old_value": getattr(q, param),
+                    "new_value": val,
+                    "markup_pp": v_mut.markup_pp,
+                    "delta_pp": delta,
+                    "pb_concession_difficulty": difficulty,
+                    "leverage_score": score,
+                }
+            )
+
+    variants.sort(key=lambda x: x["leverage_score"], reverse=True)
+    return variants
 
 
 def build_counter_offer_email(

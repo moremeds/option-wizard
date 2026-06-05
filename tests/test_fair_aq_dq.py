@@ -23,6 +23,7 @@ from scripts.fair_aq_dq import (
     _read_chain_mid,
     _short_put_leg_pv,
     analyze_quote,
+    optimize_terms,
 )
 
 # ─── Mock snapshot fixtures ────────────────────────────────
@@ -488,3 +489,59 @@ def test_analyze_quote_decision_tiers(monkeypatch):
     # Markup-tier REFUSE should populate refusal_reasons (Codex-14)
     assert v.refusal_reasons, "markup-tier REFUSE should record a reason"
     assert any("markup" in r.lower() for r in v.refusal_reasons)
+
+
+# ─── optimize_terms (Task 15) ──────────────────────────────
+
+
+def test_optimize_terms_returns_sorted_pareto():
+    # Use a low PB quote so the base lands in COUNTER (markup 1.5–5.0 pp).
+    # The synthetic chain mids are small, so 0.03 (3%) gives ~2.86pp markup
+    # against the ~0.14pp synthetic fair yield.
+    q = _mock_quote(tenor_months=12, doubling_factor=2.0, pb_quoted_yield_pa=0.03)
+    s = _mock_snapshot()
+    s.chain = _mock_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+    s.earnings_date_iso = "2026-07-05"
+
+    variants = optimize_terms(q, s, nlv_usd=50_000_000.0)
+    assert len(variants) > 0
+    assert not any(v.get("refused_base") for v in variants)
+    for v in variants:
+        assert "param_changed" in v
+        assert "old_value" in v
+        assert "new_value" in v
+        assert "markup_pp" in v
+        assert "delta_pp" in v
+        assert "pb_concession_difficulty" in v
+        assert "leverage_score" in v
+    # Sorted by leverage_score descending
+    scores = [v["leverage_score"] for v in variants]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_optimize_terms_respects_sweep_param():
+    # See test_optimize_terms_returns_sorted_pareto comment re: 0.03 yield.
+    q = _mock_quote(pb_quoted_yield_pa=0.03)
+    s = _mock_snapshot()
+    s.chain = _mock_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+    s.earnings_date_iso = "2026-07-05"
+
+    variants = optimize_terms(q, s, sweep=["tenor_months"], nlv_usd=50_000_000.0)
+    assert variants  # not empty / not the refused_base sentinel
+    for v in variants:
+        assert v["param_changed"] == "tenor_months"
+
+
+def test_optimize_terms_refused_base_returns_sentinel():
+    """Pass-3 A3: REFUSE base → single sentinel row, not silent []."""
+    q = _mock_quote(doubling_factor=3.0)  # red line trigger
+    s = _mock_snapshot()
+    s.chain = _mock_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+
+    variants = optimize_terms(q, s, nlv_usd=1_000_000.0)
+    assert len(variants) == 1
+    assert variants[0].get("refused_base") is True
+    assert variants[0]["refusal_reasons"]  # populated
