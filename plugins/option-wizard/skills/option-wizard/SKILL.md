@@ -26,7 +26,26 @@ incantations.
 ## Hard rules (apply to every response)
 
 1. Defined-risk only. Refuse naked short calls and margin-leveraged short puts; explain why when refusing.
-2. **Source discipline (strict split).** UW serves **options data only**: IV rank, RV, skew, IV term structure, max pain, GEX by strike, greeks by strike, dark pool, flow, interpolated IV. **Never use UW for price or technical indicators** — spot, OHLCV, SMA / EMA / 20-50-200 MA, RSI, MACD, BBANDS, ATR, volume bars come from **TradingView via `finance-data-providers:tradingview-reader` only** (UW's `get_extended_technical_indicator` / `get_ticker_indicator_series` are forbidden for analysis use — their series typically lag by weeks). Do not recompute UW-served metrics client-side; compute only what UW lacks (gamma flip from GEX, put/call walls from GEX, VRP from IV−RV, FCN fair coupon).
+2. **Source discipline (3-source taxonomy).** Three sources, each canonical for non-overlapping core territory + overlapping zones where freshness picks the winner.
+
+   **Canonical per source:**
+   - **UW** — options-derivative metrics no one else serves: IV rank, skew, GEX by strike, max pain, RV, dark pool, flow, interpolated IV
+   - **IB Gateway** — account state (positions / balances / orders / trades / margin); paid broker-feed real-time chain (mid / IV / greeks); `get_price_snapshot`
+   - **TradingView** — spot, OHLCV, technical indicators (SMA / EMA / RSI / MACD / BBANDS / ATR / volume bars), news, alerts, watchlists, charts
+
+   **Overlapping zones priority:**
+
+   | Data point | Primary | Fallback | Why |
+   |---|---|---|---|
+   | Spot | TV | IB `get_price_snapshot` | TV intra-minute fresh + chart-verifiable; IB broker-feed authoritative for live-trade gating |
+   | Option chain mid / IV / greeks | **IB** (live trade <60s decision) / **UW** (analytical context) | mutual fallback | IB seconds-fresh from broker feed; UW better for skew/term analytical context |
+   | OHLCV historical | TV (chart context) | IB `get_price_history` (backtest precision) | — |
+
+   **Forbidden:**
+   - UW `get_extended_technical_indicator` / `get_ticker_indicator_series` for analysis (series lagged by weeks)
+   - IB for IV rank / skew / GEX / max pain (IB doesn't compute these derivative metrics)
+
+   **Rule of thumb:** if any of the three serves it directly, never recompute. Verdict / analysis output must carry `data_provenance` for every quoted metric so the trader can audit the source.
 3. Every order shows the pre-flight (legs, mid price, net debit/credit, max loss, max gain, breakeven, margin, P/L matrix at expiry across spot −20 / −10 / −5 / 0 / +5 / +10 / +20 percent, account verification, UW regime check, liquidity check, catalyst clock) before submission. Exactly one YES/NO question. YES → submit via `ib_insync.placeOrder` (IB option orders) or `create_order_instruction` (IB stock drafts for tap-to-approve). Non-IB broker orders (any secondary broker configured in `private/trader-profile.md`) typically have no auto-submit path — flag "manual entry in the broker's trading app" in the preflight. Anything else → abort. Live-account preflight is the safety boundary — do **not** propose paper-account (IB TWS paper instance) tests, and do not treat paper-account criteria as a blocker.
 4. Any short-premium position at 21 DTE surfaces as an entry in the consolidated **Action items** section at the end of the book review (see §"Book-review output structure"). It is **not** a mid-flow blocking YES/NO prompt — the trader picks close / roll / hold-and-accept-gamma from the action-items menu, and only then does the full hard-rule-#3 preflight expand.
 5. FCN does not go through IB. FCN output is the 8-item PB checklist, a 70/75/80/85% strike ladder, a fair vs quoted verdict, and a bilingual counter-offer email (Chinese first, English second).
