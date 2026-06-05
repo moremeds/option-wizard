@@ -93,7 +93,15 @@ def _resolve_chain_context(
     # Convert horizon-days → tenor-months for nearest_expiry_to_tenor.
     # 30-day month is the shared convention with fair_aq_dq / fair_coupon.
     tenor_months = max(1, round(hedge_horizon_days / 30))
-    quote_start_iso = snapshot.get("spot_timestamp", "2026-06-05T00:00:00Z")
+    # Pass-1 fix (F2): no hardcoded date fallback. If snapshot doesn't
+    # carry spot_timestamp, default to today's UTC ISO so nearest-expiry
+    # resolution stays correct across days. Hardcoded 2026-06-05 was a
+    # silent staleness risk in prod.
+    quote_start_iso = snapshot.get("spot_timestamp")
+    if quote_start_iso is None:
+        from datetime import datetime, timezone
+
+        quote_start_iso = datetime.now(timezone.utc).isoformat()
     try:
         expiry = nearest_expiry_to_tenor(chain, tenor_months, quote_start_iso)
     except ValueError:

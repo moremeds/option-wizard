@@ -115,22 +115,24 @@ def _fair_coupon_from_chain_or_model(
     approximation."""
     chain = snapshot.get("chain")
     chain_source = snapshot.get("chain_source", "UW")
-    chain_timestamp = (
-        snapshot.get("chain_timestamps", {}).get(
-            _nearest_expiry_or_none(chain, tenor_months, quote_start_iso)
-        )
-        if chain
-        else None
-    )
 
+    # Pass-1 fix (F3): one expiry lookup, not two. The previous version
+    # walked the chain via _nearest_expiry_or_none to fetch the timestamp,
+    # then walked it again via nearest_expiry_to_tenor to read the mid.
+    expiry: str | None = None
     if chain:
         try:
             expiry = nearest_expiry_to_tenor(chain, tenor_months, quote_start_iso)
-            put_mid = read_chain_mid(chain, expiry, strike_pct, "put")
         except ValueError:
-            put_mid = None
             expiry = None
-        if put_mid is not None and expiry is not None:
+
+    chain_timestamp = (
+        snapshot.get("chain_timestamps", {}).get(expiry) if expiry else None
+    )
+
+    if expiry is not None:
+        put_mid = read_chain_mid(chain, expiry, strike_pct, "put")
+        if put_mid is not None:
             strike_dollar = spot * strike_pct
             fair = fair_coupon_chain(put_mid, strike_dollar, expected_alive_months)
             return fair, {
@@ -159,19 +161,6 @@ def _fair_coupon_from_chain_or_model(
             ),
         ),
     }
-
-
-def _nearest_expiry_or_none(
-    chain: dict | None, tenor_months: int, quote_start_iso: str
-) -> str | None:
-    """Wrap nearest_expiry_to_tenor in None-safety so the provenance call
-    doesn't have to repeat the try/except."""
-    if not chain:
-        return None
-    try:
-        return nearest_expiry_to_tenor(chain, tenor_months, quote_start_iso)
-    except ValueError:
-        return None
 
 
 def _tag_zone(strike_dollar: float, gex_levels: dict) -> str:
@@ -398,7 +387,7 @@ def analyze_fcn(
     lgd: float = LGD_BASE,
     lgd_stress: float = LGD_STRESS,
     discount_rate: float = DEFAULT_DISCOUNT_RATE,
-    quote_start_iso: str = "2026-06-05T00:00:00Z",
+    quote_start_iso: str | None = None,
 ) -> dict[str, Any]:
     """Compute FCN strike-ladder analysis from a market snapshot.
 
@@ -410,11 +399,23 @@ def analyze_fcn(
     (per hard rule #2 + aq-dq-framework §3 data discipline): listed put mids
     at the FCN strikes replace the BSM hazard-rate proxy. Each rung's output
     carries `fair_coupon_provenance` so the trader can see which method was
-    used (chain vs model) and which exact listed strike priced it. The
-    `quote_start_iso` parameter anchors the nearest-expiry lookup.
+    used (chain vs model) and which exact listed strike priced it.
+
+    `quote_start_iso` anchors the nearest-expiry lookup. Resolution order:
+    explicit parameter → `snapshot["spot_timestamp"]` → today's UTC ISO. The
+    last fallback exists so existing model-only callers don't need to plumb
+    a timestamp through; chain-aware callers SHOULD pass it explicitly so
+    expiry resolution is deterministic across days.
     """
     if snapshot is None:
         raise ValueError("snapshot is required; fetch UW data and pass it in")
+
+    if quote_start_iso is None:
+        from datetime import datetime, timezone
+
+        quote_start_iso = snapshot.get(
+            "spot_timestamp", datetime.now(timezone.utc).isoformat()
+        )
 
     tenor_years = tenor_months / 12.0
     tenor_days = int(round(tenor_months * 21))
