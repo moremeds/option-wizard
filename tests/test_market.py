@@ -161,3 +161,125 @@ def test_read_chain_mid_treats_negative_as_no_quote():
     """Defensive: negative mid is data corruption; treat as no quote."""
     chain = {"2027-06-18": {0.95: {"put": {"mid": -1.0, "iv": 0.38}}}}
     assert read_chain_mid(chain, "2027-06-18", 0.95, "put") is None
+
+
+# ─── Pass-5 live verification: UW row normalization ────────
+
+
+# These rows are a verbatim subset of a live UW get_options_chain response
+# for SPY pulled 2026-06-05 during the chain-mid sweep review-cycle.
+# Lock in the real-source shape so future UW API changes break the test
+# explicitly rather than silently rejecting rows in production.
+LIVE_UW_SPY_ROWS = [
+    {
+        "option_symbol": "SPY260604C00757000",
+        "implied_volatility": "0.0943661796566746",
+        "nbbo_ask": "0.03",
+        "nbbo_bid": "0.02",
+        "last_price": "0.02",
+        "open_interest": 11890,
+    },
+    {
+        "option_symbol": "SPY260604P00755000",
+        "implied_volatility": "0.2036794717660341",
+        "nbbo_ask": "0.02",
+        "nbbo_bid": "0.01",
+        "last_price": "0.01",
+        "open_interest": 6767,
+    },
+    {
+        "option_symbol": "SPY260604P00758000",
+        "implied_volatility": "0.3289664353277521",
+        "nbbo_ask": "1.58",
+        "nbbo_bid": "1.29",
+        "last_price": "1.42",
+        "open_interest": 3029,
+    },
+]
+
+
+def test_parse_occ_symbol_live_uw_shape():
+    from scripts._market import _parse_occ_symbol
+
+    ticker, expiry, right, strike = _parse_occ_symbol("SPY260604C00757000")
+    assert ticker == "SPY"
+    assert expiry == "2026-06-04"
+    assert right == "call"
+    assert strike == 757.0
+
+
+def test_parse_occ_symbol_put_strike_with_decimals():
+    """Some strikes are non-integer (e.g., $1.50). OCC encodes as 00001500."""
+    from scripts._market import _parse_occ_symbol
+
+    ticker, expiry, right, strike = _parse_occ_symbol("AAPL260117P00185500")
+    assert ticker == "AAPL"
+    assert expiry == "2026-01-17"
+    assert right == "put"
+    assert strike == 185.5
+
+
+def test_normalize_uw_chain_rows_produces_consumer_shape():
+    """Live UW rows → normalized chain shape that fair_coupon / macro_hedge
+    can consume. Verified end-to-end: the same shape my mock chains use."""
+    from scripts._market import normalize_uw_chain_rows
+
+    spot = 757.0  # spot ≈ ATM strike from the live pull
+    chain = normalize_uw_chain_rows(LIVE_UW_SPY_ROWS, spot=spot)
+
+    # Shape: chain[expiry][strike_pct][right] = {'mid': ..., 'iv': ...}
+    assert "2026-06-04" in chain
+    by_strike = chain["2026-06-04"]
+
+    # 757 / 757 = 1.0 — ATM call
+    assert 1.0 in by_strike
+    assert by_strike[1.0]["call"]["mid"] == 0.025  # (0.02 + 0.03) / 2
+    assert abs(by_strike[1.0]["call"]["iv"] - 0.0943661796566746) < 1e-12
+
+    # 755 / 757 ≈ 0.9974 (rounded to 4 decimals) — OTM put
+    assert 0.9974 in by_strike
+    assert by_strike[0.9974]["put"]["mid"] == 0.015  # (0.01 + 0.02) / 2
+
+    # 758 / 757 ≈ 1.0013 — OTM put
+    assert 1.0013 in by_strike
+    assert by_strike[1.0013]["put"]["mid"] == 1.435  # (1.29 + 1.58) / 2
+
+
+def test_normalize_uw_chain_rows_then_read_round_trip():
+    """End-to-end: live UW rows → normalized → read_chain_mid back out.
+    Proves the chain shape from normalization is consumable by the
+    chain-mid scripts without further massaging."""
+    from scripts._market import normalize_uw_chain_rows, read_chain_mid
+
+    chain = normalize_uw_chain_rows(LIVE_UW_SPY_ROWS, spot=757.0)
+    mid = read_chain_mid(chain, "2026-06-04", 1.0, "call")
+    assert mid == 0.025
+
+    # Missing strike returns None (cleanly falls back to BSM in callers)
+    assert read_chain_mid(chain, "2026-06-04", 0.50, "put") is None
+
+
+def test_normalize_uw_chain_rows_skips_unquoted_rows():
+    """Halted / unquoted strikes have non-numeric bid/ask. Skip them
+    silently so the chain has only real quotes."""
+    from scripts._market import normalize_uw_chain_rows
+
+    rows = LIVE_UW_SPY_ROWS + [
+        {
+            "option_symbol": "SPY260604C00800000",
+            "implied_volatility": "0.50",
+            "nbbo_bid": None,
+            "nbbo_ask": None,
+            "last_price": "0.0",
+        },
+        {
+            "option_symbol": "MALFORMED",
+            "implied_volatility": "0.50",
+            "nbbo_bid": "0.10",
+            "nbbo_ask": "0.20",
+        },
+    ]
+    chain = normalize_uw_chain_rows(rows, spot=757.0)
+    # The 3 live rows are present
+    assert "2026-06-04" in chain
+    assert len(chain["2026-06-04"]) == 3

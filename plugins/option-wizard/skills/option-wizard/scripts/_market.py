@@ -36,9 +36,14 @@ from typing import Any, Literal
 
 
 def read_chain_mid(
-    chain: dict, expiry: str, strike_pct: float, right: Literal["put", "call"]
+    chain: dict,
+    expiry: str,
+    strike_pct: float,
+    right: Literal["put", "call"],
+    *,
+    tolerance: float = 0.005,
 ) -> float | None:
-    """Read mid price from chain at exact (expiry, strike_pct, right).
+    """Read mid price from chain at (expiry, strike_pct ± tolerance, right).
 
     Returns None if missing OR if the mid is non-positive (Pass-3 A2:
     real UW chains return mid=0.0 for illiquid / no-bid strikes; if we
@@ -46,16 +51,40 @@ def read_chain_mid(
     silently pass the cost cap. Treat <= 0 as 'no quote' so the caller
     falls back to BSM and the provenance correctly flags it).
 
+    Tolerance (Pass-5 P5-CRITICAL, live UW verification): real chain keys
+    come from `strike_dollar / spot` rounded to 4 decimals. Caller asks
+    for round strike_pcts (0.75, 0.80, 0.85), but those rarely match
+    actual listed strikes exactly (SPY at $757: nearest 75%-strike is
+    $568 → key 0.7503, not 0.7500). Without tolerance, every chain lookup
+    silently misses and falls back to BSM model — defeating the whole
+    chain-mid sweep. Default 0.005 = 0.5% spot = half a strike-width on
+    most names. Set tolerance=0 for exact lookup (orchestrator-validated
+    chain keys).
+
     Caller decides whether to use a fallback pricing model — this function
     never fabricates a price. Returning None is the signal that the
     orchestrator must either pull a different strike or accept the
     BSM-fallback degradation (and record `fallback_used=True` in
     provenance).
     """
-    mid = chain.get(expiry, {}).get(strike_pct, {}).get(right, {}).get("mid")
-    if mid is None or mid <= 0:
-        return None
-    return mid
+    by_strike = chain.get(expiry, {})
+    # Fast path: exact key hit
+    mid = by_strike.get(strike_pct, {}).get(right, {}).get("mid")
+    if mid is not None and mid > 0:
+        return mid
+    # Tolerance path: nearest-strike-within-tolerance fuzzy match
+    if tolerance > 0 and by_strike:
+        candidates = [
+            (abs(k - strike_pct), k)
+            for k in by_strike.keys()
+            if abs(k - strike_pct) <= tolerance
+        ]
+        if candidates:
+            _, nearest_key = min(candidates)
+            mid = by_strike[nearest_key].get(right, {}).get("mid")
+            if mid is not None and mid > 0:
+                return mid
+    return None
 
 
 def read_chain_iv(
@@ -171,3 +200,90 @@ def fallback_provenance(
         timestamp=timestamp,
         detail=reason,
     )
+
+
+# ─── Real-source row normalization ─────────────────────────
+
+
+def _parse_occ_symbol(symbol: str) -> tuple[str, str, Literal["put", "call"], float]:
+    """Parse OCC option symbol → (ticker, expiry_iso, right, strike_dollar).
+
+    OCC format: TTTT[T...]YYMMDDR_PPPPPPPP where R is C or P, strike is
+    8 digits with implicit 3-decimal precision (00757000 = $757.000).
+
+    Live verified against UW `get_options_chain` response 2026-06-05:
+    'SPY260604C00757000' → ('SPY', '2026-06-04', 'call', 757.0).
+    """
+    # Find the date+right boundary. Walk from the right: 8 strike digits,
+    # then 1 right char (C/P), then 6 date digits.
+    if len(symbol) < 15:
+        raise ValueError(f"OCC symbol too short: {symbol!r}")
+    strike_str = symbol[-8:]
+    right_char = symbol[-9]
+    date_str = symbol[-15:-9]
+    ticker = symbol[:-15]
+
+    if right_char not in ("C", "P"):
+        raise ValueError(f"OCC symbol right char must be C or P: {symbol!r}")
+    strike_dollar = int(strike_str) / 1000.0
+    expiry_iso = f"20{date_str[0:2]}-{date_str[2:4]}-{date_str[4:6]}"
+    right: Literal["put", "call"] = "put" if right_char == "P" else "call"
+    return ticker, expiry_iso, right, strike_dollar
+
+
+def normalize_uw_chain_rows(
+    uw_rows: list[dict],
+    spot: float,
+    *,
+    strike_pct_decimals: int = 4,
+) -> dict:
+    """Normalize raw UW `get_options_chain` / `get_chains_for_expiry` rows
+    into the shape that scripts._market consumers expect.
+
+    UW returns rows like (live-verified shape):
+        {"option_symbol": "SPY260604C00757000",
+         "nbbo_bid": "0.02", "nbbo_ask": "0.03",
+         "implied_volatility": "0.0943...",
+         "last_price": "0.02", ...}
+
+    My consumer shape:
+        chain[expiry_iso][strike_pct][right]['mid' | 'iv']
+
+    Steps applied per row:
+      1. Parse OCC symbol → (expiry, right, strike_dollar)
+      2. strike_pct = round(strike_dollar / spot, decimals)  -- matches the
+         macro_hedge _price_put_leg lookup convention (Pass-2 P2-A)
+      3. mid = (float(nbbo_bid) + float(nbbo_ask)) / 2
+      4. iv = float(implied_volatility)
+      5. Skip rows where nbbo_bid or nbbo_ask are missing or non-numeric
+         (UW returns these for halted / unquoted strikes)
+
+    Rows with bid+ask both zero produce mid=0; read_chain_mid treats that
+    as 'no quote' (Pass-3 A2) so callers fall back to BSM cleanly. We
+    write the 0 mid here rather than filtering — keeps the IV field
+    available, lets read_chain_mid be the single decision point.
+    """
+    chain: dict[str, dict[float, dict[str, dict[str, float]]]] = {}
+    for row in uw_rows:
+        try:
+            sym = row["option_symbol"]
+            _, expiry, right, strike_dollar = _parse_occ_symbol(sym)
+        except (KeyError, ValueError):
+            continue
+        try:
+            bid = float(row.get("nbbo_bid"))
+            ask = float(row.get("nbbo_ask"))
+        except (TypeError, ValueError):
+            continue
+        mid = (bid + ask) / 2.0
+        try:
+            iv = float(row.get("implied_volatility"))
+        except (TypeError, ValueError):
+            iv = 0.0
+
+        strike_pct = round(strike_dollar / spot, strike_pct_decimals)
+        chain.setdefault(expiry, {}).setdefault(strike_pct, {})[right] = {
+            "mid": mid,
+            "iv": iv,
+        }
+    return chain
