@@ -276,3 +276,47 @@ def _ko_probability(
     d = -abs(log_ratio) / (iv * math.sqrt(tenor_yr))
     p_hit = 2.0 * norm.cdf(d)
     return max(0.0, min(1.0, p_hit))
+
+
+def _accumulation_pv(
+    direction: Literal["AQ", "DQ"],
+    spot: float,
+    strike_pct: float,
+    daily_notional: float,
+    ko_prob: float,
+    tenor_months: int,
+    obs_freq: str,
+    r: float = 0.04,
+) -> float:
+    """Expected accumulated cash flow PV, truncated by KO termination.
+
+    Each observation point t, if the structure has not yet been KO'd,
+    contributes `daily_notional` of expected cash flow. Number of expected
+    alive observations:
+
+        E[alive_obs] = (1 - (1 - p_per_obs)^n) / p_per_obs
+        where p_per_obs = 1 - (1 - ko_prob_total)^(1/n)
+
+    Discount at midpoint of expected alive period.
+
+    Pass-2 design note (Codex-5 + Gemini-6): NOT called by _fair_yield in
+    v1 — chain-priced legs in Task 13 replace it (chain mids embed the
+    forward + put-write cash flows). Retained as an internal helper for
+    v2 (Monte Carlo `expected_client_pnl` field) and sanity-check use.
+    """
+    n_obs = _num_observations(tenor_months, obs_freq)
+    if n_obs < 1:
+        return 0.0
+
+    ko_prob_clamped = max(0.0, min(0.9999, ko_prob))
+    if ko_prob_clamped == 0.0:
+        alive_obs = float(n_obs)
+    else:
+        p_per_obs = 1.0 - (1.0 - ko_prob_clamped) ** (1.0 / n_obs)
+        alive_obs = (1.0 - (1.0 - p_per_obs) ** n_obs) / p_per_obs
+
+    tenor_yr = tenor_months / 12.0
+    avg_time_yr = (alive_obs / n_obs) * tenor_yr / 2.0
+    discount = math.exp(-r * avg_time_yr)
+
+    return daily_notional * alive_obs * discount

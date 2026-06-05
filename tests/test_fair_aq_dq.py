@@ -12,6 +12,7 @@ import pytest
 from scripts.fair_aq_dq import (
     Quote,
     Snapshot,
+    _accumulation_pv,
     _check_refusal_red_lines,
     _ko_probability,
 )
@@ -135,26 +136,31 @@ def test_no_refusal_on_clean_quote():
 
 
 def test_ko_prob_zero_when_tenor_zero():
-    p = _ko_probability(spot=100.0, ko_barrier=103.0, iv=0.30,
-                        tenor_yr=0.0, obs_freq="daily")
+    p = _ko_probability(
+        spot=100.0, ko_barrier=103.0, iv=0.30, tenor_yr=0.0, obs_freq="daily"
+    )
     assert p == 0.0
 
 
 def test_ko_prob_increases_with_vol():
     """Higher vol → higher KO probability."""
-    p_low = _ko_probability(spot=100.0, ko_barrier=103.0, iv=0.10,
-                            tenor_yr=1.0, obs_freq="daily")
-    p_high = _ko_probability(spot=100.0, ko_barrier=103.0, iv=0.40,
-                             tenor_yr=1.0, obs_freq="daily")
+    p_low = _ko_probability(
+        spot=100.0, ko_barrier=103.0, iv=0.10, tenor_yr=1.0, obs_freq="daily"
+    )
+    p_high = _ko_probability(
+        spot=100.0, ko_barrier=103.0, iv=0.40, tenor_yr=1.0, obs_freq="daily"
+    )
     assert p_high > p_low
 
 
 def test_ko_prob_increases_when_ko_closer_to_spot():
     """KO at 102% spot → higher hit prob than KO at 110% spot."""
-    p_near = _ko_probability(spot=100.0, ko_barrier=102.0, iv=0.30,
-                             tenor_yr=1.0, obs_freq="daily")
-    p_far = _ko_probability(spot=100.0, ko_barrier=110.0, iv=0.30,
-                            tenor_yr=1.0, obs_freq="daily")
+    p_near = _ko_probability(
+        spot=100.0, ko_barrier=102.0, iv=0.30, tenor_yr=1.0, obs_freq="daily"
+    )
+    p_far = _ko_probability(
+        spot=100.0, ko_barrier=110.0, iv=0.30, tenor_yr=1.0, obs_freq="daily"
+    )
     assert p_near > p_far
 
 
@@ -162,10 +168,12 @@ def test_ko_prob_discrete_correction_lowers_prob():
     """Broadie-Glasserman discrete correction should yield a LOWER hit prob
     than naive continuous monitoring would imply, because effective barrier
     is shifted away from spot."""
-    p_daily = _ko_probability(spot=100.0, ko_barrier=103.0, iv=0.30,
-                              tenor_yr=1.0, obs_freq="daily")
-    p_monthly = _ko_probability(spot=100.0, ko_barrier=103.0, iv=0.30,
-                                tenor_yr=1.0, obs_freq="monthly")
+    p_daily = _ko_probability(
+        spot=100.0, ko_barrier=103.0, iv=0.30, tenor_yr=1.0, obs_freq="daily"
+    )
+    p_monthly = _ko_probability(
+        spot=100.0, ko_barrier=103.0, iv=0.30, tenor_yr=1.0, obs_freq="monthly"
+    )
     # Fewer obs per year → larger barrier shift → lower hit prob
     assert p_monthly < p_daily
 
@@ -173,6 +181,42 @@ def test_ko_prob_discrete_correction_lowers_prob():
 def test_ko_prob_in_unit_interval():
     """Output bounded in [0, 1]."""
     for iv in [0.05, 0.20, 0.50, 1.00, 2.00]:
-        p = _ko_probability(spot=100.0, ko_barrier=103.0, iv=iv,
-                            tenor_yr=1.0, obs_freq="daily")
+        p = _ko_probability(
+            spot=100.0, ko_barrier=103.0, iv=iv, tenor_yr=1.0, obs_freq="daily"
+        )
         assert 0.0 <= p <= 1.0
+
+
+# ─── Accumulation PV ───────────────────────────────────────
+
+
+def test_accumulation_pv_zero_ko_prob_uses_all_obs():
+    """With ko_prob=0, all observations contribute."""
+    pv = _accumulation_pv(
+        direction="AQ", spot=100.0, strike_pct=0.95,
+        daily_notional=10_000.0, ko_prob=0.0,
+        tenor_months=12, obs_freq="daily", r=0.04,
+    )
+    # 10000 × 252 × discount(0.5 yr @ 4%) ≈ 2,520,000 × 0.9802 ≈ 2,470,104
+    assert 2_400_000 < pv < 2_550_000
+
+
+def test_accumulation_pv_high_ko_prob_reduces_pv():
+    """Higher ko_prob → fewer alive observations → smaller accumulation PV."""
+    pv_no_ko = _accumulation_pv(
+        direction="AQ", spot=100.0, strike_pct=0.95,
+        daily_notional=10_000.0, ko_prob=0.0,
+        tenor_months=12, obs_freq="daily", r=0.04,
+    )
+    pv_high_ko = _accumulation_pv(
+        direction="AQ", spot=100.0, strike_pct=0.95,
+        daily_notional=10_000.0, ko_prob=0.999,
+        tenor_months=12, obs_freq="daily", r=0.04,
+    )
+    assert pv_high_ko < pv_no_ko * 0.25  # ratio expected ~14-16%
+
+
+def test_accumulation_pv_increases_with_tenor():
+    pv_6m = _accumulation_pv("AQ", 100.0, 0.95, 10_000.0, 0.0, 6, "daily", 0.04)
+    pv_12m = _accumulation_pv("AQ", 100.0, 0.95, 10_000.0, 0.0, 12, "daily", 0.04)
+    assert pv_12m > pv_6m
