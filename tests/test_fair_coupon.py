@@ -2,6 +2,7 @@ import pytest
 from scripts.fair_coupon import (
     analyze_fcn,
     build_counter_offer_email,
+    fair_coupon_chain,
     fair_coupon_proxy,
     single_name_ki_prob,
 )
@@ -306,3 +307,167 @@ def test_basket_analyze_returns_per_name_and_basket():
     assert "basket" in result
     assert result["basket"]["p_ki_either"] > 0
     assert "diversification_premium_pp" in result["basket"]
+
+
+# ─── Phase B: chain-aware fair coupon ──────────────────────
+
+
+def test_fair_coupon_chain_basic_arithmetic():
+    """put_mid $5.20 at strike $75, alive 3.5M → fair coupon ≈ 23.8% pa.
+
+    fair_coupon_pa = put_mid / (strike_dollar × alive_yr)
+                    = 5.20 / (75 × 3.5/12)
+                    = 5.20 / 21.875
+                    ≈ 0.2377
+    """
+    fc = fair_coupon_chain(
+        put_mid_per_share=5.20,
+        strike_dollar=75.0,
+        expected_alive_months=3.5,
+    )
+    assert 0.23 < fc < 0.24
+
+
+def test_fair_coupon_chain_zero_strike_returns_nan():
+    fc = fair_coupon_chain(
+        put_mid_per_share=5.20, strike_dollar=0.0, expected_alive_months=3.5
+    )
+    import math
+    assert math.isnan(fc)
+
+
+def test_fair_coupon_chain_none_mid_returns_nan():
+    fc = fair_coupon_chain(
+        put_mid_per_share=None, strike_dollar=75.0, expected_alive_months=3.5
+    )
+    import math
+    assert math.isnan(fc)
+
+
+def test_analyze_fcn_uses_chain_when_snapshot_includes_chain():
+    """Snapshot with `chain` triggers chain-priced fair_coupon and tags
+    provenance as 'chain'."""
+    snapshot = {
+        "spot": 100.0,
+        "iv": 0.40,
+        "rv": 0.30,
+        "iv_rank": 60,
+        "skew_25d": -0.10,
+        "max_drawdown_5y": -0.50,
+        "gex_levels": {"gamma_flip": 80.0, "put_wall": 90.0, "call_wall": 110.0},
+        "chain": {
+            "2026-12-18": {
+                0.75: {"put": {"mid": 4.10, "iv": 0.45}},
+                0.80: {"put": {"mid": 5.30, "iv": 0.42}},
+            }
+        },
+        "chain_source": "UW",
+        "chain_timestamps": {"2026-12-18": "2026-06-05T10:00:00Z"},
+    }
+    result = analyze_fcn(
+        ticker="ORCL",
+        strike_pcts=[0.75, 0.80],
+        tenor_months=6,
+        observation_months=3,
+        snapshot=snapshot,
+        quote_start_iso="2026-06-05T00:00:00Z",
+    )
+    for rung in result["ladder"]:
+        assert rung["fair_coupon_source"] == "chain", (
+            f"strike {rung['strike_pct']}: expected chain pricing, got "
+            f"{rung['fair_coupon_source']}"
+        )
+        # Provenance leg points back to UW chain
+        assert rung["fair_coupon_provenance"]["leg"]["source"] == "UW"
+        assert "put" in rung["fair_coupon_provenance"]["leg"]["detail"]
+
+
+def test_analyze_fcn_falls_back_to_model_when_chain_missing_strike():
+    """Chain present but no listed mid at 0.70 strike → model fallback for
+    that rung, chain pricing for the strike that IS listed."""
+    snapshot = {
+        "spot": 100.0,
+        "iv": 0.40,
+        "rv": 0.30,
+        "iv_rank": 60,
+        "skew_25d": -0.10,
+        "max_drawdown_5y": -0.50,
+        "gex_levels": {"gamma_flip": 80.0, "put_wall": 90.0, "call_wall": 110.0},
+        "chain": {
+            "2026-12-18": {
+                # 0.70 deliberately missing
+                0.80: {"put": {"mid": 5.30, "iv": 0.42}},
+            }
+        },
+        "chain_source": "UW",
+        "chain_timestamps": {"2026-12-18": "2026-06-05T10:00:00Z"},
+    }
+    result = analyze_fcn(
+        ticker="ORCL",
+        strike_pcts=[0.70, 0.80],
+        tenor_months=6,
+        observation_months=3,
+        snapshot=snapshot,
+        quote_start_iso="2026-06-05T00:00:00Z",
+    )
+    by_strike = {r["strike_pct"]: r for r in result["ladder"]}
+    assert by_strike[0.70]["fair_coupon_source"] == "model"
+    assert by_strike[0.70]["fair_coupon_provenance"]["leg"]["source"] == "fallback"
+    assert by_strike[0.80]["fair_coupon_source"] == "chain"
+
+
+def test_analyze_fcn_no_chain_keeps_model_path_unchanged():
+    """Snapshot without `chain` key continues to use the model proxy —
+    proves Phase B backward compatibility."""
+    snapshot = {
+        "spot": 244.58,
+        "iv": 0.804,
+        "rv": 0.610,
+        "iv_rank": 91,
+        "skew_25d": -0.20,
+        "max_drawdown_5y": -0.582,
+        "gex_levels": {"gamma_flip": 192.5, "put_wall": 240.0, "call_wall": 250.0},
+    }
+    result = analyze_fcn(
+        ticker="ORCL",
+        strike_pcts=[0.75],
+        tenor_months=6,
+        observation_months=3,
+        snapshot=snapshot,
+    )
+    rung = result["ladder"][0]
+    assert rung["fair_coupon_source"] == "model"
+    # Provenance still attached so trader can see the model assumption
+    assert rung["fair_coupon_provenance"]["leg"]["source"] == "fallback"
+    assert "BSM" in rung["fair_coupon_provenance"]["leg"]["detail"]
+
+
+def test_skill_md_fcn_chain_example_runs_end_to_end():
+    """P6-Pass-6: lock in the SKILL.md FCN chain-path example so doc rot
+    breaks the test. If someone edits the SKILL.md snippet, this test
+    catches a divergence from what the script actually accepts."""
+    snap = {
+        "spot": 200.0, "iv": 0.35, "rv": 0.30, "iv_rank": 55,
+        "skew_25d": 0.04, "max_drawdown_5y": -0.45,
+        "gex_levels": {"gamma_flip": 195.0, "put_wall": 180.0, "call_wall": 220.0},
+        "chain_source": "UW", "spot_timestamp": "2026-06-05T10:00:00Z",
+        "chain_timestamps": {"2026-12-18": "2026-06-05T10:00:00Z"},
+        "chain": {"2026-12-18": {
+            0.70: {"put": {"mid": 1.20, "iv": 0.42}},
+            0.75: {"put": {"mid": 2.40, "iv": 0.40}},
+            0.80: {"put": {"mid": 4.80, "iv": 0.38}},
+            0.85: {"put": {"mid": 9.10, "iv": 0.36}},
+        }}}
+    r = analyze_fcn("ORCL", strike_pcts=(0.70, 0.75, 0.80, 0.85),
+                    tenor_months=6, observation_months=3,
+                    pb_quoted_coupon=0.12, snapshot=snap,
+                    quote_start_iso="2026-06-05T00:00:00Z")
+    # All 4 rungs should price off chain (exact match: chain keys equal request)
+    assert len(r["ladder"]) == 4
+    for rung in r["ladder"]:
+        assert rung["fair_coupon_source"] == "chain", (
+            f"SKILL.md example rung {rung['strike_pct']} fell back to model — "
+            f"docs and code have diverged"
+        )
+        assert rung["fair_coupon_provenance"]["leg"]["source"] == "UW"
+    assert r["verdict"] in {"fair", "rich", "cheap"}

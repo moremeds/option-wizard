@@ -126,8 +126,11 @@ def compute_levels(
     gex_by_strike: Iterable[dict],
     spot: float,
     call_wall_definition: str = "net_neg_gex",
+    *,
+    chain_source: str = "UW",
+    chain_timestamp: str | None = None,
 ) -> dict:
-    """Return dict with keys gamma_flip, put_wall, call_wall.
+    """Return dict with keys gamma_flip, put_wall, call_wall, data_provenance.
 
     Each input row must have 'strike' plus either 'gex' (pre-aggregated net)
     or 'call_gex' + 'put_gex' (raw UW). Spot is the current underlying price.
@@ -137,12 +140,43 @@ def compute_levels(
       'net_neg_gex' (default) — strike above spot with most negative net GEX
       'oi_cluster'           — strike above spot with largest positive call_gex
                                 (requires call_gex in input rows)
+
+    data_provenance tags every level as 'computed' from the given
+    chain_source (default UW). Trader-visible audit trail consistent with
+    the chain-mid discipline in fair_aq_dq / fair_coupon / macro_hedge.
     """
     rows = _sorted_by_strike(list(gex_by_strike))
+    flip = _gamma_flip(rows, spot)
+    put_wall = _put_wall(rows, spot)
+    call_wall = _call_wall(rows, spot, definition=call_wall_definition)
+    provenance = {
+        "gamma_flip": {
+            "value": flip,
+            "source": "computed",
+            "detail": f"net-GEX sign change in {chain_source} GEX-by-strike",
+            "timestamp": chain_timestamp,
+        },
+        "put_wall": {
+            "value": put_wall,
+            "source": "computed",
+            "detail": f"max positive net GEX below spot ${spot:.2f} in {chain_source} GEX-by-strike",
+            "timestamp": chain_timestamp,
+        },
+        "call_wall": {
+            "value": call_wall,
+            "source": "computed",
+            "detail": (
+                f"call wall via {call_wall_definition} above spot ${spot:.2f} "
+                f"in {chain_source} GEX-by-strike"
+            ),
+            "timestamp": chain_timestamp,
+        },
+    }
     return {
-        "gamma_flip": _gamma_flip(rows, spot),
-        "put_wall": _put_wall(rows, spot),
-        "call_wall": _call_wall(rows, spot, definition=call_wall_definition),
+        "gamma_flip": flip,
+        "put_wall": put_wall,
+        "call_wall": call_wall,
+        "data_provenance": provenance,
     }
 
 
@@ -150,6 +184,9 @@ def compute_levels_per_expiry(
     uw_rows: Iterable[dict],
     spot: float,
     call_wall_definition: str = "net_neg_gex",
+    *,
+    chain_source: str = "UW",
+    chain_timestamps: dict[str, str] | None = None,
 ) -> dict[str, dict]:
     """Per-expiry gamma flip + walls from a flat UW per-strike-per-expiry list.
 
@@ -162,7 +199,13 @@ def compute_levels_per_expiry(
 
     Input: list of dicts from get_greek_exposure_by_strike_expiry. Each row
     must include 'expiry' plus the fields compute_levels expects.
-    Returns: {expiry: {gamma_flip, put_wall, call_wall}}
+    Returns: {expiry: {gamma_flip, put_wall, call_wall, data_provenance}}
+
+    Pass-2 (P2-B): chain_source + chain_timestamps propagate through to
+    each per-expiry compute_levels call so the data_provenance block
+    carries the right source + per-expiry timestamp. Without this, the
+    aggregated output had data_provenance with timestamp=None and a
+    hardcoded UW default for every expiry — useless for an audit trail.
     """
     by_expiry: dict[str, list[dict]] = {}
     for r in uw_rows:
@@ -172,7 +215,14 @@ def compute_levels_per_expiry(
             continue
         by_expiry.setdefault(exp, []).append(r)
 
+    timestamps = chain_timestamps or {}
     return {
-        exp: compute_levels(rows, spot, call_wall_definition=call_wall_definition)
+        exp: compute_levels(
+            rows,
+            spot,
+            call_wall_definition=call_wall_definition,
+            chain_source=chain_source,
+            chain_timestamp=timestamps.get(exp),
+        )
         for exp, rows in by_expiry.items()
     }

@@ -15,6 +15,13 @@ from typing import Any, Iterable
 import numpy as np
 from scipy.stats import norm
 
+from scripts._market import (
+    chain_leg_provenance,
+    fallback_provenance,
+    nearest_expiry_to_tenor,
+    read_chain_mid,
+)
+
 LGD_BASE = 0.50
 LGD_STRESS = 0.65
 DEFAULT_DISCOUNT_RATE = 0.045
@@ -44,6 +51,116 @@ def fair_coupon_proxy(
         p_ki * expected_loss_given_ki * math.exp(-discount_rate * tenor_years)
     )
     return pv_expected_loss / (expected_alive_months / 12.0)
+
+
+def fair_coupon_chain(
+    put_mid_per_share: float,
+    strike_dollar: float,
+    expected_alive_months: float,
+) -> float:
+    """Chain-priced fair coupon for the embedded short-put leg.
+
+    The FCN's economic content is "client receives coupon X% in exchange for
+    being short a put at the KI strike". Listed put mid at that strike IS
+    the market's price for that exact short-put exposure — including the
+    skew premium that the closed-form proxy (which uses ATM IV) misses.
+
+    Annualization: client pays `put_mid` per share once, receives coupon
+    monthly over the expected alive period. To make the cashflows
+    equivalent on an annual basis:
+
+        fair_coupon_pa = put_mid_per_share / (strike_dollar × alive_yr)
+
+    where strike_dollar is the per-share notional client is on the hook for
+    at the KI level. Discount factor omitted: alive period is short enough
+    (≤6M typical) that 4.5% × 0.5 ≈ 2% drift on the answer — well inside
+    the heuristic precision band.
+
+    This number is what an INSTITUTIONAL fair coupon would look like with
+    no markup. Retail PB quotes are 25-40% of model fair (per framework);
+    chain-priced is closer to 50-70% of model fair because it captures
+    skew correctly.
+    """
+    if put_mid_per_share is None or strike_dollar <= 0 or expected_alive_months <= 0:
+        return float("nan")
+    alive_yr = expected_alive_months / 12.0
+    return put_mid_per_share / (strike_dollar * alive_yr)
+
+
+def _fair_coupon_from_chain_or_model(
+    *,
+    snapshot: dict,
+    strike_pct: float,
+    spot: float,
+    tenor_months: int,
+    expected_alive_months: float,
+    quote_start_iso: str,
+    # model fallback inputs
+    p_ki: float,
+    lgd: float,
+    discount_rate: float,
+    tenor_years: float,
+) -> tuple[float, dict[str, Any]]:
+    """Return (fair_coupon, provenance_dict). Chain-priced if snapshot
+    carries a chain that covers the strike; BSM-proxy fallback otherwise.
+
+    The provenance dict has shape:
+        {
+            "fair_coupon_source": "chain" | "model",
+            "leg": {<chain_leg_provenance or fallback_provenance entry>},
+        }
+
+    Callers attach this dict to the rung output so the trader can see at a
+    glance whether a number came from a real listed mid or a closed-form
+    approximation."""
+    chain = snapshot.get("chain")
+    chain_source = snapshot.get("chain_source", "UW")
+
+    # Pass-1 fix (F3): one expiry lookup, not two. The previous version
+    # walked the chain via _nearest_expiry_or_none to fetch the timestamp,
+    # then walked it again via nearest_expiry_to_tenor to read the mid.
+    expiry: str | None = None
+    if chain:
+        try:
+            expiry = nearest_expiry_to_tenor(chain, tenor_months, quote_start_iso)
+        except ValueError:
+            expiry = None
+
+    chain_timestamp = (
+        snapshot.get("chain_timestamps", {}).get(expiry) if expiry else None
+    )
+
+    if expiry is not None:
+        put_mid = read_chain_mid(chain, expiry, strike_pct, "put")
+        if put_mid is not None:
+            strike_dollar = spot * strike_pct
+            fair = fair_coupon_chain(put_mid, strike_dollar, expected_alive_months)
+            return fair, {
+                "fair_coupon_source": "chain",
+                "leg": chain_leg_provenance(
+                    value=put_mid,
+                    chain_source=chain_source,
+                    expiry=expiry,
+                    strike_pct=strike_pct,
+                    right="put",
+                    field="mid",
+                    timestamp=chain_timestamp,
+                ),
+            }
+
+    fair_model = fair_coupon_proxy(
+        p_ki, lgd, expected_alive_months, discount_rate, tenor_years
+    )
+    return fair_model, {
+        "fair_coupon_source": "model",
+        "leg": fallback_provenance(
+            value=fair_model,
+            reason=(
+                "BSM hazard-rate proxy — chain not provided or strike not listed; "
+                "answer carries hardcoded LGD 0.50 and ATM IV (no skew premium)."
+            ),
+        ),
+    }
 
 
 def _tag_zone(strike_dollar: float, gex_levels: dict) -> str:
@@ -270,15 +387,35 @@ def analyze_fcn(
     lgd: float = LGD_BASE,
     lgd_stress: float = LGD_STRESS,
     discount_rate: float = DEFAULT_DISCOUNT_RATE,
+    quote_start_iso: str | None = None,
 ) -> dict[str, Any]:
     """Compute FCN strike-ladder analysis from a market snapshot.
 
     `snapshot` must include: spot, iv, rv, iv_rank, skew_25d, max_drawdown_5y,
     gex_levels (with gamma_flip, put_wall, call_wall). Caller is responsible
     for fetching that data from UW (see scripts._clients.uw).
+
+    Optional `snapshot["chain"]` activates the chain-priced fair-coupon path
+    (per hard rule #2 + aq-dq-framework §3 data discipline): listed put mids
+    at the FCN strikes replace the BSM hazard-rate proxy. Each rung's output
+    carries `fair_coupon_provenance` so the trader can see which method was
+    used (chain vs model) and which exact listed strike priced it.
+
+    `quote_start_iso` anchors the nearest-expiry lookup. Resolution order:
+    explicit parameter → `snapshot["spot_timestamp"]` → today's UTC ISO. The
+    last fallback exists so existing model-only callers don't need to plumb
+    a timestamp through; chain-aware callers SHOULD pass it explicitly so
+    expiry resolution is deterministic across days.
     """
     if snapshot is None:
         raise ValueError("snapshot is required; fetch UW data and pass it in")
+
+    if quote_start_iso is None:
+        from datetime import datetime, timezone
+
+        quote_start_iso = snapshot.get(
+            "spot_timestamp", datetime.now(timezone.utc).isoformat()
+        )
 
     tenor_years = tenor_months / 12.0
     tenor_days = int(round(tenor_months * 21))
@@ -289,9 +426,22 @@ def analyze_fcn(
     for strike_pct in strike_pcts:
         strike_dollar = spot * strike_pct
         p_ki = single_name_ki_prob(vol, barrier=strike_pct, days=tenor_days)
-        fair_base = fair_coupon_proxy(
-            p_ki, lgd, expected_alive_months, discount_rate, tenor_years
+        # Chain-aware fair coupon (Phase B); falls back to model proxy when
+        # the snapshot has no chain or the chain lacks this strike.
+        fair_base, fair_base_provenance = _fair_coupon_from_chain_or_model(
+            snapshot=snapshot,
+            strike_pct=strike_pct,
+            spot=spot,
+            tenor_months=tenor_months,
+            expected_alive_months=expected_alive_months,
+            quote_start_iso=quote_start_iso,
+            p_ki=p_ki,
+            lgd=lgd,
+            discount_rate=discount_rate,
+            tenor_years=tenor_years,
         )
+        # Stress remains model-derived: chain doesn't price LGD-stress
+        # scenarios, only the realised loss distribution.
         fair_stress = fair_coupon_proxy(
             p_ki, lgd_stress, expected_alive_months, discount_rate, tenor_years
         )
@@ -305,6 +455,8 @@ def analyze_fcn(
             "p_ki_6m": round(p_ki, 4),
             "fair_coupon_base": round(fair_base, 4),
             "fair_coupon_stress": round(fair_stress, 4),
+            "fair_coupon_source": fair_base_provenance["fair_coupon_source"],
+            "fair_coupon_provenance": fair_base_provenance,
             "dealer_zone": zone,
             "checklist": checklist,
         }

@@ -129,3 +129,58 @@ def test_gamma_flip_prefers_crossing_nearest_to_spot():
     assert 200.0 < result["gamma_flip"] < 425.0, (
         f"expected near-spot crossing, got {result['gamma_flip']}"
     )
+
+
+# ─── Phase D: data_provenance ───────────────────────────────
+
+
+def test_compute_levels_includes_data_provenance():
+    rows = [
+        {"strike": 90.0, "call_gex": 100, "put_gex": -500},
+        {"strike": 95.0, "call_gex": 200, "put_gex": -300},
+        {"strike": 100.0, "call_gex": 800, "put_gex": -200},
+        {"strike": 105.0, "call_gex": 1500, "put_gex": -100},
+    ]
+    from scripts.gex_levels import compute_levels
+
+    result = compute_levels(rows, spot=100.0, chain_source="UW",
+                            chain_timestamp="2026-06-05T10:00:00Z")
+    assert "data_provenance" in result
+    for key in ("gamma_flip", "put_wall", "call_wall"):
+        entry = result["data_provenance"][key]
+        assert entry["source"] == "computed"
+        assert "UW" in entry["detail"]
+        assert entry["timestamp"] == "2026-06-05T10:00:00Z"
+        # Value mirrors the level (might be None if unidentifiable)
+        assert entry["value"] == result[key]
+
+
+def test_compute_levels_per_expiry_propagates_chain_source_and_timestamps():
+    """P2-B regression-lock: chain_source kwarg + chain_timestamps map flow
+    through to each per-expiry compute_levels call so data_provenance
+    carries the right source + per-expiry timestamp (not None default)."""
+    from scripts.gex_levels import compute_levels_per_expiry
+
+    uw_rows = [
+        {"expiry": "2026-09-19", "strike": 100.0, "call_gex": 800, "put_gex": -200},
+        {"expiry": "2026-09-19", "strike": 105.0, "call_gex": 1500, "put_gex": -100},
+        {"expiry": "2026-12-19", "strike": 100.0, "call_gex": 500, "put_gex": -300},
+        {"expiry": "2026-12-19", "strike": 105.0, "call_gex": 1200, "put_gex": -150},
+    ]
+    timestamps = {
+        "2026-09-19": "2026-06-05T10:00:00Z",
+        "2026-12-19": "2026-06-05T10:00:01Z",
+    }
+    result = compute_levels_per_expiry(
+        uw_rows, spot=100.0,
+        chain_source="IB",
+        chain_timestamps=timestamps,
+    )
+    for exp in ("2026-09-19", "2026-12-19"):
+        assert exp in result
+        for level_key in ("gamma_flip", "put_wall", "call_wall"):
+            entry = result[exp]["data_provenance"][level_key]
+            assert entry["source"] == "computed"
+            assert entry["timestamp"] == timestamps[exp]
+            # Per-expiry detail mentions IB (the chain_source override)
+            assert "IB" in entry["detail"]
