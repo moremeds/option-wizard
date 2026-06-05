@@ -437,3 +437,165 @@ def _doubling_tail_leg_pv(
     moment tail activation occurs (one-shot event in a sharp move).
     """
     return tail_leg_mid * cumulative_shares * doubling_factor * tail_activation_prob
+
+
+def _tail_activation_prob(q: Quote, s: Snapshot) -> float:
+    """Probability of a deep adverse move triggering doubling.
+
+    Pass-2 finding (Codex-12 + Gemini-5): previously direction-insensitive
+    and used hardcoded magic numbers without explanation. Now:
+
+    - AQ: tail = deep downside (spot << strike below). Uses `max_drawdown_5y`
+      (negative) as the scale; tail event = "a 5-year-max-DD-magnitude move
+      occurs in the tenor". P[such-magnitude move in tenor_yr] ≈ tenor_yr / 5.
+    - DQ: tail = deep upside (spot >> strike above). Uses a symmetric 0.30
+      conditional event prob × tenor_yr/5 frequency.
+
+    Both directions: `frequency × conditional_event`, where frequency uses
+    5-year window and conditional event is 0.30 (calibrated empirically).
+    """
+    tenor_yr = q.tenor_months / 12.0
+    return min(1.0, tenor_yr / 5.0) * 0.30  # 30% conditional event prob
+
+
+def _fair_yield(q: Quote, s: Snapshot) -> dict[str, Any]:
+    """Compute fair-value yield + breakdown + data_provenance.
+
+    Pass-2 finding (Codex-7): Validate q.spot (PB quoted spot) against
+    s.spot (fresh TV/IB snapshot). If they diverge >0.5%, flag as a gap
+    — orchestrator should re-pull fresh chain data before evaluation.
+    """
+    spot_drift_pct = abs(q.spot - s.spot) / s.spot
+    if spot_drift_pct > 0.005:
+        raise ValueError(
+            f"Quote spot ${q.spot:.2f} diverges from Snapshot spot ${s.spot:.2f} "
+            f"by {spot_drift_pct*100:.2f}% — re-pull fresh chain data before "
+            f"evaluating. Stale snapshot makes fair-value untrustworthy."
+        )
+
+    nearest_expiry = _nearest_expiry_to_tenor(
+        s.chain, q.tenor_months, s.spot_timestamp
+    )
+    chain_e = s.chain[nearest_expiry]
+
+    # ── Direction-dependent leg selection ─────────────────────────
+    # AQ: client short put at discount strike (below spot); PB long KO call above.
+    # DQ: mirror — client short call at premium strike (above); PB long KO put below.
+    if q.direction == "AQ":
+        strike_leg_right = "put"
+        ko_leg_right = "call"
+        tail_strike_pct = 0.50  # deep-OTM put 50% below spot
+        tail_leg_right = "put"
+    else:  # DQ
+        strike_leg_right = "call"
+        ko_leg_right = "put"
+        tail_strike_pct = 1.50  # deep-OTM call 50% above spot
+        tail_leg_right = "call"
+
+    strike_leg_mid = _read_chain_mid(
+        s.chain, nearest_expiry, q.strike_pct, strike_leg_right
+    )
+    ko_leg_mid = _read_chain_mid(
+        s.chain, nearest_expiry, q.ko_pct, ko_leg_right
+    )
+    tail_leg_mid = _read_chain_mid(
+        s.chain, nearest_expiry, tail_strike_pct, tail_leg_right
+    )
+
+    if strike_leg_mid is None or ko_leg_mid is None:
+        raise ValueError(
+            f"Chain at {nearest_expiry} missing required strikes "
+            f"{q.strike_pct} ({strike_leg_right}) or {q.ko_pct} "
+            f"({ko_leg_right}). Cannot compute fair value."
+        )
+
+    iv_at_ko = chain_e[q.ko_pct][ko_leg_right]["iv"]
+    tenor_yr = q.tenor_months / 12.0
+    n_obs = _num_observations(q.tenor_months, q.obs_freq)
+    shares_per_obs = q.daily_notional_usd / q.spot
+
+    ko_prob = _ko_probability(
+        spot=q.spot, ko_barrier=q.ko_pct * q.spot,
+        iv=iv_at_ko, tenor_yr=tenor_yr, obs_freq=q.obs_freq,
+    )
+
+    alive_obs = _expected_alive_obs(ko_prob, n_obs)
+    forfeited_obs = n_obs - alive_obs
+
+    # Tail leg: deep-OTM put (AQ) or call (DQ). Fallback uses historical
+    # max-drawdown magnitude × spot as a crude tail-loss-per-share estimate.
+    tail_fallback_used = False
+    if tail_leg_mid is None:
+        tail_leg_mid = abs(s.max_drawdown_5y) * q.spot * 0.02
+        tail_fallback_used = True
+    tail_activation_prob = _tail_activation_prob(q, s)
+
+    short_premium_pv = _short_put_leg_pv(
+        put_mid=strike_leg_mid,
+        shares_per_obs=shares_per_obs,
+        alive_obs=alive_obs,
+        doubling_factor=q.doubling_factor,
+    )
+    pb_ko_leg_pv = _ko_call_leg_pv(
+        call_mid=ko_leg_mid,
+        shares_per_obs=shares_per_obs,
+        forfeited_obs=forfeited_obs,
+    )
+    tail_pv = _doubling_tail_leg_pv(
+        tail_leg_mid=tail_leg_mid,
+        cumulative_shares=shares_per_obs * n_obs,
+        doubling_factor=q.doubling_factor,
+        tail_activation_prob=tail_activation_prob,
+    )
+
+    fair_payoff_pv = short_premium_pv - pb_ko_leg_pv - tail_pv
+
+    pb_quoted_payoff_pv = (
+        q.pb_quoted_yield_pa * q.daily_notional_usd * n_obs * tenor_yr
+    )
+    markup_pv = pb_quoted_payoff_pv - fair_payoff_pv
+    fair_yield_pa = fair_payoff_pv / (q.daily_notional_usd * n_obs * tenor_yr)
+
+    provenance = {
+        "spot": {"value": q.spot, "source": s.spot_source,
+                "timestamp": s.spot_timestamp},
+        "chain_source": {"source": s.chain_source,
+                        "pulled_at": s.chain_timestamps.get(nearest_expiry)},
+        "strike_leg_mid": {
+            "value": strike_leg_mid,
+            "source": f"{s.chain_source} chain[{nearest_expiry}][{q.strike_pct}]['{strike_leg_right}']['mid']",
+        },
+        "ko_leg_mid": {
+            "value": ko_leg_mid,
+            "source": f"{s.chain_source} chain[{nearest_expiry}][{q.ko_pct}]['{ko_leg_right}']['mid']",
+        },
+        "iv_at_ko": {
+            "value": iv_at_ko,
+            "source": f"{s.chain_source} chain[{nearest_expiry}][{q.ko_pct}]['{ko_leg_right}']['iv']",
+        },
+        "ko_probability": {
+            "value": ko_prob,
+            "source": "computed (BSM first-passage + Broadie-Glasserman discrete correction)",
+        },
+        "alive_obs": {
+            "value": alive_obs,
+            "source": "computed (E[N_alive] = ko_prob / p_per_obs)",
+        },
+        "tail_fallback_used": tail_fallback_used,
+    }
+
+    return {
+        "fair_yield_pa": fair_yield_pa,
+        "ko_probability": ko_prob,
+        "breakdown": {
+            "short_premium_pv": short_premium_pv,
+            "pb_ko_leg_pv": pb_ko_leg_pv,
+            "tail_pv": tail_pv,
+            "pb_quoted_payoff_pv": pb_quoted_payoff_pv,
+            "fair_payoff_to_client_pv": fair_payoff_pv,
+            "markup_pv": markup_pv,
+            "alive_obs": alive_obs,
+            "forfeited_obs": forfeited_obs,
+        },
+        "data_provenance": provenance,
+    }

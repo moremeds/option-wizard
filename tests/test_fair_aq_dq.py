@@ -16,6 +16,7 @@ from scripts.fair_aq_dq import (
     _check_refusal_red_lines,
     _doubling_tail_leg_pv,
     _expected_alive_obs,
+    _fair_yield,
     _ko_call_leg_pv,
     _ko_probability,
     _nearest_expiry_to_tenor,
@@ -252,9 +253,15 @@ def _mock_chain():
         "2027-06-18": {
             0.50: {"put": {"mid": 0.50, "iv": 0.55}},
             0.80: {"put": {"mid": 1.80, "iv": 0.42}},
-            0.95: {"put": {"mid": 5.20, "iv": 0.38}, "call": {"mid": 15.10, "iv": 0.30}},
+            0.95: {
+                "put": {"mid": 5.20, "iv": 0.38},
+                "call": {"mid": 15.10, "iv": 0.30},
+            },
             1.00: {"put": {"mid": 8.10, "iv": 0.36}, "call": {"mid": 8.20, "iv": 0.31}},
-            1.03: {"put": {"mid": 10.40, "iv": 0.35}, "call": {"mid": 4.10, "iv": 0.34}},
+            1.03: {
+                "put": {"mid": 10.40, "iv": 0.35},
+                "call": {"mid": 4.10, "iv": 0.34},
+            },
             1.05: {"call": {"mid": 2.85, "iv": 0.34}},
             1.10: {"call": {"mid": 1.10, "iv": 0.33}},
         }
@@ -264,22 +271,21 @@ def _mock_chain():
 def test_nearest_expiry_to_tenor():
     chain = {"2026-12-18": {}, "2027-06-18": {}, "2027-12-17": {}}
     # 12M from 2026-06-05 → ~2027-06-18 is closest
-    nearest = _nearest_expiry_to_tenor(chain, tenor_months=12,
-                                       quote_start_iso="2026-06-05T00:00:00Z")
+    nearest = _nearest_expiry_to_tenor(
+        chain, tenor_months=12, quote_start_iso="2026-06-05T00:00:00Z"
+    )
     assert nearest == "2027-06-18"
 
 
 def test_read_chain_mid_direct_hit():
     chain = _mock_chain()
-    mid = _read_chain_mid(chain, expiry="2027-06-18",
-                         strike_pct=0.95, right="put")
+    mid = _read_chain_mid(chain, expiry="2027-06-18", strike_pct=0.95, right="put")
     assert mid == 5.20
 
 
 def test_read_chain_mid_missing_returns_none():
     chain = _mock_chain()
-    mid = _read_chain_mid(chain, expiry="2027-06-18",
-                         strike_pct=0.30, right="put")
+    mid = _read_chain_mid(chain, expiry="2027-06-18", strike_pct=0.30, right="put")
     assert mid is None
 
 
@@ -291,10 +297,12 @@ def test_short_put_leg_pv_doubling_adds_adverse_bonus():
       pv_1x = base_premium  (no doubling bonus)
       pv_2x = base_premium × (1 + 1 × 0.40) = 1.40 × pv_1x  (not 2× pv_1x)
     """
-    pv_1x = _short_put_leg_pv(put_mid=5.20, shares_per_obs=50.0,
-                              alive_obs=180.0, doubling_factor=1.0)
-    pv_2x = _short_put_leg_pv(put_mid=5.20, shares_per_obs=50.0,
-                              alive_obs=180.0, doubling_factor=2.0)
+    pv_1x = _short_put_leg_pv(
+        put_mid=5.20, shares_per_obs=50.0, alive_obs=180.0, doubling_factor=1.0
+    )
+    pv_2x = _short_put_leg_pv(
+        put_mid=5.20, shares_per_obs=50.0, alive_obs=180.0, doubling_factor=2.0
+    )
     assert pv_2x == pytest.approx(1.40 * pv_1x, rel=1e-3)
     # And not 2× (the previously-broken behavior)
     assert pv_2x < 1.6 * pv_1x
@@ -302,22 +310,26 @@ def test_short_put_leg_pv_doubling_adds_adverse_bonus():
 
 def test_short_put_leg_pv_no_doubling_unchanged():
     """At doubling=1.0 the leg PV is purely base premium."""
-    pv = _short_put_leg_pv(put_mid=5.20, shares_per_obs=50.0,
-                           alive_obs=180.0, doubling_factor=1.0)
+    pv = _short_put_leg_pv(
+        put_mid=5.20, shares_per_obs=50.0, alive_obs=180.0, doubling_factor=1.0
+    )
     expected_base = 5.20 * 50.0 * 180.0
     assert pv == pytest.approx(expected_base, rel=1e-6)
 
 
 def test_ko_call_leg_pv_zero_when_forfeited_zero():
     """No KO → no forfeited observations → PB call leg value zero."""
-    pv = _ko_call_leg_pv(call_mid=4.10, shares_per_obs=50.0,
-                        forfeited_obs=0.0)
+    pv = _ko_call_leg_pv(call_mid=4.10, shares_per_obs=50.0, forfeited_obs=0.0)
     assert pv == 0.0
 
 
 def test_doubling_tail_leg_pv_zero_when_tail_prob_zero():
-    pv = _doubling_tail_leg_pv(tail_leg_mid=0.50, cumulative_shares=12600.0,
-                              doubling_factor=2.0, tail_activation_prob=0.0)
+    pv = _doubling_tail_leg_pv(
+        tail_leg_mid=0.50,
+        cumulative_shares=12600.0,
+        doubling_factor=2.0,
+        tail_activation_prob=0.0,
+    )
     assert pv == 0.0
 
 
@@ -337,4 +349,37 @@ def test_expected_alive_obs_edge_cases():
     alive_half = _expected_alive_obs(0.5, 252)
     assert 170.0 <= alive_half <= 200.0
     assert alive_half > 252 * 0.5  # exact > simple "n × (1-ko_prob)" approximation
-    assert alive_half < 252        # bounded above by n
+    assert alive_half < 252  # bounded above by n
+
+
+# ─── _fair_yield (Task 13) ─────────────────────────────────
+
+
+def test_fair_yield_returns_breakdown_dict():
+    q = _mock_quote(tenor_months=12, doubling_factor=2.0,
+                   pb_quoted_yield_pa=0.09, daily_notional_usd=10_000.0)
+    s = _mock_snapshot(iv_rank=60.0)
+    s.chain = _mock_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+
+    out = _fair_yield(q, s)
+    assert "fair_yield_pa" in out
+    assert "breakdown" in out
+    assert "data_provenance" in out
+    assert "short_premium_pv" in out["breakdown"]
+    assert "pb_ko_leg_pv" in out["breakdown"]
+    assert "tail_pv" in out["breakdown"]
+    assert "alive_obs" in out["breakdown"]
+    assert "forfeited_obs" in out["breakdown"]
+
+
+def test_fair_yield_markup_positive_when_pb_overcharges():
+    """Sanity check: typical PB quote yields markup > 0 (PB takes a cut)."""
+    q = _mock_quote(pb_quoted_yield_pa=0.09)  # PB quotes 9%
+    s = _mock_snapshot()
+    s.chain = _mock_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+
+    out = _fair_yield(q, s)
+    markup = q.pb_quoted_yield_pa - out["fair_yield_pa"]
+    assert markup > 0  # fair_yield should be lower than PB quote
