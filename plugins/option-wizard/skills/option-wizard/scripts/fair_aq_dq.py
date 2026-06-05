@@ -320,3 +320,120 @@ def _accumulation_pv(
     discount = math.exp(-r * avg_time_yr)
 
     return daily_notional * alive_obs * discount
+
+
+def _nearest_expiry_to_tenor(
+    chain: dict[str, Any], tenor_months: int, quote_start_iso: str
+) -> str:
+    """Pick the listed expiry closest to (quote_start + tenor_months).
+
+    Pass-3 finding (A4): filter past expiries before picking nearest. A stale
+    snapshot with only expired chain dates would otherwise pick a dead option.
+    """
+    from datetime import datetime
+
+    target = datetime.fromisoformat(quote_start_iso.replace("Z", "+00:00"))
+    target_days = tenor_months * 30
+
+    best = None
+    best_diff = None
+    for exp in chain.keys():
+        exp_dt = datetime.fromisoformat(exp + "T00:00:00+00:00")
+        days_to_exp = (exp_dt - target).days
+        if days_to_exp < 0:
+            continue  # expired — skip
+        diff = abs(days_to_exp - target_days)
+        if best_diff is None or diff < best_diff:
+            best = exp
+            best_diff = diff
+    if best is None:
+        raise ValueError(
+            "No future-dated expiries in chain — orchestrator must refresh"
+        )
+    return best
+
+
+def _read_chain_mid(
+    chain: dict, expiry: str, strike_pct: float, right: Literal["put", "call"]
+) -> float | None:
+    """Read mid price from chain at exact (expiry, strike_pct, right).
+    Returns None if not present. Caller decides whether to use fallback."""
+    return (
+        chain.get(expiry, {})
+        .get(strike_pct, {})
+        .get(right, {})
+        .get("mid")
+    )
+
+
+def _expected_alive_obs(ko_prob_total: float, n_obs: int) -> float:
+    """Expected number of observations that occur before KO truncates.
+
+    If KO probability per observation is iid p, then survival per obs q = 1 − p,
+    and E[alive_obs] = (1 − q^n) / p = (1 − (1 − p)^n) / p.
+
+    Given cumulative ko_prob_total (= 1 − q^n), invert:
+        p = 1 − (1 − ko_prob_total)^(1/n)
+        E[alive_obs] = ko_prob_total / p
+    """
+    if n_obs < 1:
+        return 0.0
+    p_clamped = max(0.0, min(0.9999, ko_prob_total))
+    if p_clamped == 0.0:
+        return float(n_obs)
+    p_per_obs = 1.0 - (1.0 - p_clamped) ** (1.0 / n_obs)
+    return p_clamped / p_per_obs
+
+
+def _short_put_leg_pv(
+    put_mid: float,
+    shares_per_obs: float,
+    alive_obs: float,
+    doubling_factor: float,
+    adverse_region_prob: float = 0.40,
+) -> float:
+    """PV of the short put leg client is implicitly selling.
+
+    Doubling activates ONLY when spot is in the adverse region (below strike
+    for AQ, above strike for DQ) at observation time. Blanket-multiplying the
+    entire leg by `doubling_factor` would double-credit the BASE notional
+    that is NOT subject to doubling. The correct decomposition:
+
+        base_premium       = put_mid × shares_per_obs × alive_obs
+        doubling_bonus_pv  = base_premium × (doubling_factor − 1) × adverse_region_prob
+        leg_pv             = base_premium + doubling_bonus_pv
+
+    `adverse_region_prob` defaults to 0.40 — heuristic for "probability of
+    being below strike at any given observation given no-KO survival".
+
+    Reference: Codex Pass-2 finding #4 — without this split, the leg PV was
+    over-credited by ~30-50% for 2× doubling AQ structures.
+    """
+    base_pv = put_mid * shares_per_obs * alive_obs
+    doubling_bonus = base_pv * (doubling_factor - 1.0) * adverse_region_prob
+    return base_pv + doubling_bonus
+
+
+def _ko_call_leg_pv(
+    call_mid: float, shares_per_obs: float, forfeited_obs: float
+) -> float:
+    """PV of the call leg PB pockets when KO triggers (negative for client).
+
+    forfeited_obs = n_obs − alive_obs = expected observations lost to KO.
+    """
+    return call_mid * shares_per_obs * forfeited_obs
+
+
+def _doubling_tail_leg_pv(
+    tail_leg_mid: float,
+    cumulative_shares: float,
+    doubling_factor: float,
+    tail_activation_prob: float,
+) -> float:
+    """PV of the deep-OTM tail loss client absorbs when doubling activates
+    in a sharp move (negative for client).
+
+    cumulative_shares = shares_per_obs × n_obs — the position size at the
+    moment tail activation occurs (one-shot event in a sharp move).
+    """
+    return tail_leg_mid * cumulative_shares * doubling_factor * tail_activation_prob

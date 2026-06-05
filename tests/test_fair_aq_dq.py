@@ -14,7 +14,13 @@ from scripts.fair_aq_dq import (
     Snapshot,
     _accumulation_pv,
     _check_refusal_red_lines,
+    _doubling_tail_leg_pv,
+    _expected_alive_obs,
+    _ko_call_leg_pv,
     _ko_probability,
+    _nearest_expiry_to_tenor,
+    _read_chain_mid,
+    _short_put_leg_pv,
 )
 
 # ─── Mock snapshot fixtures ────────────────────────────────
@@ -193,9 +199,14 @@ def test_ko_prob_in_unit_interval():
 def test_accumulation_pv_zero_ko_prob_uses_all_obs():
     """With ko_prob=0, all observations contribute."""
     pv = _accumulation_pv(
-        direction="AQ", spot=100.0, strike_pct=0.95,
-        daily_notional=10_000.0, ko_prob=0.0,
-        tenor_months=12, obs_freq="daily", r=0.04,
+        direction="AQ",
+        spot=100.0,
+        strike_pct=0.95,
+        daily_notional=10_000.0,
+        ko_prob=0.0,
+        tenor_months=12,
+        obs_freq="daily",
+        r=0.04,
     )
     # 10000 × 252 × discount(0.5 yr @ 4%) ≈ 2,520,000 × 0.9802 ≈ 2,470,104
     assert 2_400_000 < pv < 2_550_000
@@ -204,14 +215,24 @@ def test_accumulation_pv_zero_ko_prob_uses_all_obs():
 def test_accumulation_pv_high_ko_prob_reduces_pv():
     """Higher ko_prob → fewer alive observations → smaller accumulation PV."""
     pv_no_ko = _accumulation_pv(
-        direction="AQ", spot=100.0, strike_pct=0.95,
-        daily_notional=10_000.0, ko_prob=0.0,
-        tenor_months=12, obs_freq="daily", r=0.04,
+        direction="AQ",
+        spot=100.0,
+        strike_pct=0.95,
+        daily_notional=10_000.0,
+        ko_prob=0.0,
+        tenor_months=12,
+        obs_freq="daily",
+        r=0.04,
     )
     pv_high_ko = _accumulation_pv(
-        direction="AQ", spot=100.0, strike_pct=0.95,
-        daily_notional=10_000.0, ko_prob=0.999,
-        tenor_months=12, obs_freq="daily", r=0.04,
+        direction="AQ",
+        spot=100.0,
+        strike_pct=0.95,
+        daily_notional=10_000.0,
+        ko_prob=0.999,
+        tenor_months=12,
+        obs_freq="daily",
+        r=0.04,
     )
     assert pv_high_ko < pv_no_ko * 0.25  # ratio expected ~14-16%
 
@@ -220,3 +241,100 @@ def test_accumulation_pv_increases_with_tenor():
     pv_6m = _accumulation_pv("AQ", 100.0, 0.95, 10_000.0, 0.0, 6, "daily", 0.04)
     pv_12m = _accumulation_pv("AQ", 100.0, 0.95, 10_000.0, 0.0, 12, "daily", 0.04)
     assert pv_12m > pv_6m
+
+
+# ─── Chain leg helpers (Task 12) ───────────────────────────
+
+
+def _mock_chain():
+    """Mock chain at 1 expiry (12M from today)."""
+    return {
+        "2027-06-18": {
+            0.50: {"put": {"mid": 0.50, "iv": 0.55}},
+            0.80: {"put": {"mid": 1.80, "iv": 0.42}},
+            0.95: {"put": {"mid": 5.20, "iv": 0.38}, "call": {"mid": 15.10, "iv": 0.30}},
+            1.00: {"put": {"mid": 8.10, "iv": 0.36}, "call": {"mid": 8.20, "iv": 0.31}},
+            1.03: {"put": {"mid": 10.40, "iv": 0.35}, "call": {"mid": 4.10, "iv": 0.34}},
+            1.05: {"call": {"mid": 2.85, "iv": 0.34}},
+            1.10: {"call": {"mid": 1.10, "iv": 0.33}},
+        }
+    }
+
+
+def test_nearest_expiry_to_tenor():
+    chain = {"2026-12-18": {}, "2027-06-18": {}, "2027-12-17": {}}
+    # 12M from 2026-06-05 → ~2027-06-18 is closest
+    nearest = _nearest_expiry_to_tenor(chain, tenor_months=12,
+                                       quote_start_iso="2026-06-05T00:00:00Z")
+    assert nearest == "2027-06-18"
+
+
+def test_read_chain_mid_direct_hit():
+    chain = _mock_chain()
+    mid = _read_chain_mid(chain, expiry="2027-06-18",
+                         strike_pct=0.95, right="put")
+    assert mid == 5.20
+
+
+def test_read_chain_mid_missing_returns_none():
+    chain = _mock_chain()
+    mid = _read_chain_mid(chain, expiry="2027-06-18",
+                         strike_pct=0.30, right="put")
+    assert mid is None
+
+
+def test_short_put_leg_pv_doubling_adds_adverse_bonus():
+    """Doubling scales the ADVERSE-region bonus, not the entire base premium.
+
+    Pass-2 finding (Codex-4 + Gemini-1): blanket × doubling_factor over-credits
+    the base notional. With adverse_region_prob=0.40, expect:
+      pv_1x = base_premium  (no doubling bonus)
+      pv_2x = base_premium × (1 + 1 × 0.40) = 1.40 × pv_1x  (not 2× pv_1x)
+    """
+    pv_1x = _short_put_leg_pv(put_mid=5.20, shares_per_obs=50.0,
+                              alive_obs=180.0, doubling_factor=1.0)
+    pv_2x = _short_put_leg_pv(put_mid=5.20, shares_per_obs=50.0,
+                              alive_obs=180.0, doubling_factor=2.0)
+    assert pv_2x == pytest.approx(1.40 * pv_1x, rel=1e-3)
+    # And not 2× (the previously-broken behavior)
+    assert pv_2x < 1.6 * pv_1x
+
+
+def test_short_put_leg_pv_no_doubling_unchanged():
+    """At doubling=1.0 the leg PV is purely base premium."""
+    pv = _short_put_leg_pv(put_mid=5.20, shares_per_obs=50.0,
+                           alive_obs=180.0, doubling_factor=1.0)
+    expected_base = 5.20 * 50.0 * 180.0
+    assert pv == pytest.approx(expected_base, rel=1e-6)
+
+
+def test_ko_call_leg_pv_zero_when_forfeited_zero():
+    """No KO → no forfeited observations → PB call leg value zero."""
+    pv = _ko_call_leg_pv(call_mid=4.10, shares_per_obs=50.0,
+                        forfeited_obs=0.0)
+    assert pv == 0.0
+
+
+def test_doubling_tail_leg_pv_zero_when_tail_prob_zero():
+    pv = _doubling_tail_leg_pv(tail_leg_mid=0.50, cumulative_shares=12600.0,
+                              doubling_factor=2.0, tail_activation_prob=0.0)
+    assert pv == 0.0
+
+
+def test_expected_alive_obs_edge_cases():
+    """Verify the iid-survival expectation formula.
+
+    Note on semantics: cumulative ko_prob_total = 1 − q^n where q is per-obs
+    survival. A cumulative ko_prob = 0.9999 means "KO is near-certain
+    *during the tenor*" but the iid model still admits ~28 alive observations
+    in expectation (KO triggers on average around obs 28, not obs 1).
+    """
+    assert _expected_alive_obs(0.0, 252) == 252.0
+    # ko_prob=0.9999 with n=252 → p_per_obs ≈ 0.0359, E[N_alive] ≈ 27.85
+    alive_near_certain = _expected_alive_obs(0.9999, 252)
+    assert 20.0 <= alive_near_certain <= 35.0
+    # ko_prob=0.5, n=252 → E[N_alive] ≈ 182
+    alive_half = _expected_alive_obs(0.5, 252)
+    assert 170.0 <= alive_half <= 200.0
+    assert alive_half > 252 * 0.5  # exact > simple "n × (1-ko_prob)" approximation
+    assert alive_half < 252        # bounded above by n
