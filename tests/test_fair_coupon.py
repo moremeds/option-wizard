@@ -440,3 +440,34 @@ def test_analyze_fcn_no_chain_keeps_model_path_unchanged():
     # Provenance still attached so trader can see the model assumption
     assert rung["fair_coupon_provenance"]["leg"]["source"] == "fallback"
     assert "BSM" in rung["fair_coupon_provenance"]["leg"]["detail"]
+
+
+def test_skill_md_fcn_chain_example_runs_end_to_end():
+    """P6-Pass-6: lock in the SKILL.md FCN chain-path example so doc rot
+    breaks the test. If someone edits the SKILL.md snippet, this test
+    catches a divergence from what the script actually accepts."""
+    snap = {
+        "spot": 200.0, "iv": 0.35, "rv": 0.30, "iv_rank": 55,
+        "skew_25d": 0.04, "max_drawdown_5y": -0.45,
+        "gex_levels": {"gamma_flip": 195.0, "put_wall": 180.0, "call_wall": 220.0},
+        "chain_source": "UW", "spot_timestamp": "2026-06-05T10:00:00Z",
+        "chain_timestamps": {"2026-12-18": "2026-06-05T10:00:00Z"},
+        "chain": {"2026-12-18": {
+            0.70: {"put": {"mid": 1.20, "iv": 0.42}},
+            0.75: {"put": {"mid": 2.40, "iv": 0.40}},
+            0.80: {"put": {"mid": 4.80, "iv": 0.38}},
+            0.85: {"put": {"mid": 9.10, "iv": 0.36}},
+        }}}
+    r = analyze_fcn("ORCL", strike_pcts=(0.70, 0.75, 0.80, 0.85),
+                    tenor_months=6, observation_months=3,
+                    pb_quoted_coupon=0.12, snapshot=snap,
+                    quote_start_iso="2026-06-05T00:00:00Z")
+    # All 4 rungs should price off chain (exact match: chain keys equal request)
+    assert len(r["ladder"]) == 4
+    for rung in r["ladder"]:
+        assert rung["fair_coupon_source"] == "chain", (
+            f"SKILL.md example rung {rung['strike_pct']} fell back to model — "
+            f"docs and code have diverged"
+        )
+        assert rung["fair_coupon_provenance"]["leg"]["source"] == "UW"
+    assert r["verdict"] in {"fair", "rich", "cheap"}
