@@ -94,6 +94,28 @@ into the linked deep-reference file for the per-step detail.
 
 ---
 
+## Workflow 5: AQ / DQ quote evaluation
+
+**Trigger phrases:**
+- Chinese: `"PB 给我报了 <TICKER> 的 AQ, X% strike, Y% KO"`, `"PB 给我报了 DQ"`, `"评估这个 accumulator 报价"`, `"decumulator 怎么 counter"`
+- English: `"evaluate aq quote"`, `"evaluate dq quote"`, `"negotiate accumulator"`
+
+**Pipeline (6 steps):**
+
+1. **Refusal red-line check** — `aq-dq-framework.md` §6. Six hard refusals (doubling ≥ 3×, IV rank < 30 + AQ, KO < 1 ATR, single notional > 10% NLV, tenor > 18M, ER in tenor midpoint). If ANY triggers, output `decision='REFUSE'` + reasons + stop. No chain pull.
+2. **Chain pull mode selection** — live-trade mode (trader says "PB just quoted me", "30 min decision") → IB Gateway chain. Analytical mode (default) → UW chain. Both modes additionally pull UW IV rank, RV, skew, GEX, max pain.
+3. **Fair-value breakdown** — `fair_aq_dq.analyze_quote`. Decomposes into chain-priced legs (put at strike, call at KO, deep-OTM tail put) + barrier-adjusted contributions. Returns `markup_pp` + `breakdown` + `data_provenance` (every numeric field tagged).
+4. **Term Pareto optimizer** — `fair_aq_dq.optimize_terms`. Sweeps 4 parameters (tenor, KO%, doubling, obs_freq); returns variants sorted by `markup_reduction / pb_concession_difficulty`.
+5. **Bilingual counter-offer email** — `fair_aq_dq.build_counter_offer_email`. Chinese first, English second, concrete concession asks (target markup 1.5pp).
+6. **Present + verdict** — 8-item PB checklist → breakdown → Pareto → email → final `decision` in `{REFUSE, COUNTER, ACCEPT_IF_MUST}`. Do NOT route through IB (hard rule #5).
+
+**Routes to:**
+- `references/aq-dq-framework.md` — domain knowledge (8 sections)
+- `scripts/fair_aq_dq.py` — pure-function math
+- `references/ticker/aq-example-case.md` — synthetic public case study walking through all 6 steps with concrete numbers
+
+---
+
 ## Routing decision flowchart
 
 ```
@@ -106,6 +128,8 @@ Trader request
 ├─ "持仓 review" / "我账户里这些仓位有没有问题" / "review positions" → Workflow 3
 │
 ├─ "PB 给我报了 ... FCN" / "negotiate fcn quote" → Workflow 4
+│
+├─ "PB 给我报了 ... AQ / DQ" / "evaluate aq quote" / "evaluate dq quote" → Workflow 5
 │
 ├─ "SPX 大盘对冲" / "size spx hedge" → Workflow 2 (L0 trigger + L7 macro hedge)
 │
