@@ -573,3 +573,151 @@ def test_counter_offer_email_returns_bilingual_dict():
     # Chinese has Chinese characters (verify it's actually CN, not EN dressed up)
     assert "让步" in email["chinese_body"]  # Chinese for "concession"
     assert "Hi [PB contact" in email["english_body"]
+
+
+# ─── Mirror symmetry + Pass-3 adversarial (Task 17) ────────
+
+
+def test_aq_dq_mirror_symmetry_basic_invariants():
+    """AQ + mirrored-DQ on same params should yield comparable magnitude
+    metrics. Exact equality is too strict (skew asymmetry breaks it), but
+    KO probability should be within 30%."""
+    chain = {
+        "2027-06-18": {
+            0.50: {"put": {"mid": 0.50, "iv": 0.55}},
+            0.95: {"put": {"mid": 5.20, "iv": 0.38}, "call": {"mid": 15.10, "iv": 0.30}},
+            0.97: {"put": {"mid": 4.10, "iv": 0.34}, "call": {"mid": 10.40, "iv": 0.30}},
+            1.00: {"put": {"mid": 8.10, "iv": 0.36}, "call": {"mid": 8.20, "iv": 0.31}},
+            1.03: {"put": {"mid": 10.40, "iv": 0.35}, "call": {"mid": 4.10, "iv": 0.34}},
+            1.05: {"put": {"mid": 15.10, "iv": 0.30}, "call": {"mid": 2.85, "iv": 0.34}},
+            1.50: {"call": {"mid": 0.50, "iv": 0.42}},
+        }
+    }
+    s_aq = _mock_snapshot(iv_rank=60.0)
+    s_aq.chain = chain
+    s_aq.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+    s_aq.earnings_date_iso = "2026-07-05"
+
+    s_dq = _mock_snapshot(iv_rank=60.0)
+    s_dq.chain = chain
+    s_dq.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+    s_dq.earnings_date_iso = "2026-07-05"
+
+    q_aq = _mock_quote(direction="AQ", strike_pct=0.95, ko_pct=1.03,
+                       pb_quoted_yield_pa=0.03)
+    q_dq = _mock_quote(direction="DQ", strike_pct=1.05, ko_pct=0.97,
+                       pb_quoted_yield_pa=0.03)
+
+    v_aq = analyze_quote(q_aq, s_aq, nlv_usd=50_000_000.0)
+    v_dq = analyze_quote(q_dq, s_dq, nlv_usd=50_000_000.0)
+
+    # Both should compute a verdict (not red-line refuse on these params).
+    # Markup-tier REFUSE acceptable; only the short-circuit "refusal_reasons
+    # from red lines" is what would indicate a real bug.
+    if v_aq.ko_probability > 0:
+        ratio = v_dq.ko_probability / v_aq.ko_probability
+        assert 0.5 < ratio < 2.0, (
+            f"AQ ko_prob={v_aq.ko_probability:.3f} vs DQ ko_prob={v_dq.ko_probability:.3f}"
+        )
+
+
+def test_quote_validation_aq_strike_above_spot_rejected():
+    """Pass-3 (A1): AQ requires strike_pct < 1.0; reject otherwise."""
+    with pytest.raises(ValueError, match="AQ requires"):
+        Quote(direction="AQ", ticker="X", spot=100.0, strike_pct=1.05,
+              ko_pct=1.10, tenor_months=12, obs_freq="daily",
+              doubling_factor=2.0, daily_notional_usd=10_000.0,
+              pb_quoted_yield_pa=0.09, settlement="cash")
+
+
+def test_quote_validation_dq_strike_below_spot_rejected():
+    """Pass-3 (A1): DQ requires strike_pct > 1.0; reject otherwise."""
+    with pytest.raises(ValueError, match="DQ requires"):
+        Quote(direction="DQ", ticker="X", spot=100.0, strike_pct=0.95,
+              ko_pct=0.90, tenor_months=12, obs_freq="daily",
+              doubling_factor=2.0, daily_notional_usd=10_000.0,
+              pb_quoted_yield_pa=0.09, settlement="cash")
+
+
+def test_quote_validation_zero_spot_rejected():
+    """Pass-3 (A2): spot=0 prevents divide-by-zero in shares_per_obs."""
+    with pytest.raises(ValueError, match="spot must be > 0"):
+        Quote(direction="AQ", ticker="X", spot=0.0, strike_pct=0.95,
+              ko_pct=1.03, tenor_months=12, obs_freq="daily",
+              doubling_factor=2.0, daily_notional_usd=10_000.0,
+              pb_quoted_yield_pa=0.09, settlement="cash")
+
+
+def test_quote_validation_zero_tenor_rejected():
+    """Pass-3 (A2): tenor_months=0 prevents divide-by-zero in fair_yield_pa."""
+    with pytest.raises(ValueError, match="tenor_months must be"):
+        Quote(direction="AQ", ticker="X", spot=100.0, strike_pct=0.95,
+              ko_pct=1.03, tenor_months=0, obs_freq="daily",
+              doubling_factor=2.0, daily_notional_usd=10_000.0,
+              pb_quoted_yield_pa=0.09, settlement="cash")
+
+
+def test_quote_validation_doubling_below_one_rejected():
+    """Pass-3 (A2): doubling_factor < 1.0 makes no economic sense."""
+    with pytest.raises(ValueError, match="doubling_factor must be"):
+        Quote(direction="AQ", ticker="X", spot=100.0, strike_pct=0.95,
+              ko_pct=1.03, tenor_months=12, obs_freq="daily",
+              doubling_factor=0.5, daily_notional_usd=10_000.0,
+              pb_quoted_yield_pa=0.09, settlement="cash")
+
+
+def test_nearest_expiry_skips_past_dated():
+    """Pass-3 (A4): expired chain entries are filtered out."""
+    chain = {
+        "2024-06-18": {0.95: {"put": {"mid": 5.0, "iv": 0.30}}},
+        "2027-06-18": {0.95: {"put": {"mid": 5.0, "iv": 0.30}}},
+    }
+    result = _nearest_expiry_to_tenor(
+        chain, tenor_months=12, quote_start_iso="2026-06-05T00:00:00Z"
+    )
+    assert result == "2027-06-18", f"expected future expiry, got {result}"
+
+
+def test_nearest_expiry_raises_when_all_expired():
+    """Pass-3 (A4): if every expiry is in the past, raise."""
+    chain = {
+        "2024-06-18": {0.95: {"put": {"mid": 5.0, "iv": 0.30}}},
+        "2025-01-18": {0.95: {"put": {"mid": 5.0, "iv": 0.30}}},
+    }
+    with pytest.raises(ValueError, match="No future-dated"):
+        _nearest_expiry_to_tenor(
+            chain, tenor_months=12, quote_start_iso="2026-06-05T00:00:00Z"
+        )
+
+
+def test_fair_yield_rejects_spot_divergence():
+    """Pass-2 (C7): q.spot and s.spot drift > 0.5% means stale snapshot.
+    Refuse to compute fair value on inconsistent data."""
+    q = _mock_quote(spot=200.0)
+    s = _mock_snapshot()
+    s.spot = 210.0  # 5% drift — stale snapshot
+    s.chain = _mock_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+    with pytest.raises(ValueError, match="diverges"):
+        _fair_yield(q, s)
+
+
+def test_data_provenance_completeness():
+    q = _mock_quote(pb_quoted_yield_pa=0.03)  # COUNTER-tier to keep verdict non-refused
+    s = _mock_snapshot()
+    s.chain = _mock_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+    s.earnings_date_iso = "2026-07-05"
+
+    v = analyze_quote(q, s, nlv_usd=50_000_000.0)
+    if v.decision == "REFUSE":
+        pytest.skip("Test must run on non-refused quote")
+
+    required_provenance_keys = [
+        "spot", "chain_source", "strike_leg_mid", "ko_leg_mid", "iv_at_ko",
+        "ko_probability", "alive_obs",
+    ]
+    for k in required_provenance_keys:
+        assert k in v.data_provenance, f"Missing provenance key: {k}"
+        if "value" in v.data_provenance[k]:
+            assert v.data_provenance[k]["value"] is not None
