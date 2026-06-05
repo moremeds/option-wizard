@@ -48,7 +48,13 @@ incantations.
    **Rule of thumb:** if any of the three serves it directly, never recompute. Verdict / analysis output must carry `data_provenance` for every quoted metric so the trader can audit the source.
 3. Every order shows the pre-flight (legs, mid price, net debit/credit, max loss, max gain, breakeven, margin, P/L matrix at expiry across spot −20 / −10 / −5 / 0 / +5 / +10 / +20 percent, account verification, UW regime check, liquidity check, catalyst clock) before submission. Exactly one YES/NO question. YES → submit via `ib_insync.placeOrder` (IB option orders) or `create_order_instruction` (IB stock drafts for tap-to-approve). Non-IB broker orders (any secondary broker configured in `private/trader-profile.md`) typically have no auto-submit path — flag "manual entry in the broker's trading app" in the preflight. Anything else → abort. Live-account preflight is the safety boundary — do **not** propose paper-account (IB TWS paper instance) tests, and do not treat paper-account criteria as a blocker.
 4. Any short-premium position at 21 DTE surfaces as an entry in the consolidated **Action items** section at the end of the book review (see §"Book-review output structure"). It is **not** a mid-flow blocking YES/NO prompt — the trader picks close / roll / hold-and-accept-gamma from the action-items menu, and only then does the full hard-rule-#3 preflight expand.
-5. FCN does not go through IB. FCN output is the 8-item PB checklist, a 70/75/80/85% strike ladder, a fair vs quoted verdict, and a bilingual counter-offer email (Chinese first, English second).
+5. **PB structured products (FCN / AQ / DQ): no IB ORDER ROUTING; IB MARKET DATA is allowed.** This is two separate concerns:
+   - **Order routing (forbidden):** Never submit / structure / book a PB product via IB. PB products are OTC bilateral; IB execution doesn't apply.
+   - **Market data (allowed):** IB Gateway broker-feed chain (mid / IV / greeks) is a valid `Snapshot.chain` source when in live-trade mode (per hard rule #2 overlap-zone priority).
+
+   Output is product-specific:
+   - **FCN**: 8-item PB checklist + 70/75/80/85% strike ladder + fair vs quoted verdict + bilingual counter-offer email (Chinese first, English second)
+   - **AQ / DQ**: 6 refusal red-line check FIRST (may short-circuit to REFUSE before any chain pull) → 8-item PB checklist + fair-value breakdown with `data_provenance` per number + term-optimizer Pareto frontier (4-param sweep) + bilingual counter-offer email
 6. Bracket order defaults: take-profit at 50% of max gain, stop-loss at 2× credit received (100% of max loss for spreads). Per-order override allowed.
 7. **Freshness gate.** Every data point quoted in an analysis must be **≤ 1 trading day stale** (live or T-1 close). Older = **gap**, not signal — list under "What this analysis is missing" and do **not** extrapolate forward. Always check UW response timestamps (`price_data.date`, indicator series last date, chain `last_price.date`) before quoting any number; if stale, treat as gap and either re-pull from a fresh source or flag explicitly.
 8. **Ticker analysis structure is non-negotiable.** Every "分析 <TICKER>" / "evaluate <ticker>" response opens with a **Layer Coverage table** (template in `references/analysis-runbook.md`) declaring per-layer source + freshness + ✓/skipped status. Skipping is allowed only when the layer's data is unreachable; it must appear as `skipped` in the table AND under "What this analysis is missing" — never silently dropped. Following the full 8-layer runbook end-to-end is the structural baseline; the trader has explicitly flagged "miss or skip" as a recurring problem and the Layer Coverage table is the structural counter.
@@ -63,6 +69,10 @@ skip a layer silently — report any data-source gap explicitly.
 Chinese:
 - "分析 <TICKER>"
 - "PB 给我报了 <TICKER> 的 FCN, X% coupon"
+- "PB 给我报了 <TICKER> 的 AQ, X% strike, Y% KO"
+- "PB 给我报了 DQ"
+- "评估这个 accumulator 报价"
+- "decumulator 怎么 counter"
 - "<TICKER> 怎么做 sell put / covered call / jade lizard"
 - "我账户里这些仓位有没有问题"
 - "SPX 大盘对冲"
@@ -70,6 +80,9 @@ Chinese:
 
 English:
 - "negotiate fcn quote"
+- "evaluate aq quote"
+- "evaluate dq quote"
+- "negotiate accumulator"
 - "evaluate <ticker> for <structure>"
 - "size spx hedge"
 - "review positions"
@@ -92,6 +105,7 @@ points into specific layers without re-reading the whole runbook.
 | Labelling vol regime (RICH / NEUTRAL / CHEAP) | `scripts.vrp::compute_vrp` — IV − RV with ±5pp thresholds |
 | Reading TV chart, tape, news, catalyst-clock validation | `references/price-action-framework.md`; `references/data-sources.md` for TV setup gotchas (opencli ≥ 1.8.0, port 9222 collision with chrome-devtools-mcp, stale TV process recovery) |
 | FCN / ELN quote evaluation ("PB 给我报了 X% coupon on Y") | `references/fcn-framework.md`; `scripts.fair_coupon::analyze_fcn`. Output is the 8-item PB checklist + 70/75/80/85% strike ladder + bilingual counter-offer email — do NOT route through IB (hard rule #5) |
+| AQ/DQ quote evaluation ("PB 给我报了 AQ", "evaluate aq quote") | `references/aq-dq-framework.md`; `scripts.fair_aq_dq::analyze_quote` + `optimize_terms` + `build_counter_offer_email`. Output: 6-refusal-check → 8-item PB checklist → fair-value breakdown w/ provenance → Pareto frontier → bilingual email. Do NOT route through IB (hard rule #5). |
 | SPX macro hedge sizing | `scripts.macro_hedge::build_macro_hedge`. Respect the 1.5% NLV annualized cost cap (hard rule #5). Trigger heuristics in `references/strategies.md` §"Macro hedge trigger heuristics" |
 | Position book review ("我账户里这些仓位有没有问题") | Pull **every configured broker** — IB MCP primary (`get_account_summary` + `get_account_positions` + `get_account_orders`), plus any secondary brokers documented in `private/trader-profile.md` using the pull command(s) specified there (e.g., a CLI script, MCP server, or Python wrapper the user provides). Translate non-IB positions into the IB-shape dict (`contract_description` / `position` / `market_price`) before feeding into `scripts.defined_risk_audit::audit_book` and `scripts.manage_positions` (orchestrator CLI: `.venv/bin/python -m scripts.manage_positions --audit-only --no-email`). Report which broker(s) succeeded and any pull-time data gaps. Output follows §"Book-review output structure" — action items consolidated at the END of the report, not drilled into mid-flow. |
 | 21 DTE review on short-premium positions | `scripts.evaluate_position`; hard rule #4 — surfaces in the Action items section at the end of the book review (close / roll / hold-and-accept-gamma). Trader picks from the menu; only then expand into hard-rule-#3 preflight. |
@@ -126,7 +140,7 @@ Reports that the trader typically wants saved (but still requires explicit ask):
 
 - Full ticker analysis (`分析 <TICKER>`)
 - Position book review / `持仓 review`
-- FCN/ELN evaluation with concrete deal numbers
+- FCN/ELN/AQ/DQ evaluation with concrete deal numbers
 - Macro / SPX hedge decision
 - Pre-flight + YES/NO order trace (regardless of YES, NO, or abort)
 - Roll / close decision on existing positions
@@ -190,6 +204,19 @@ r = analyze_fcn("ORCL", strike_pcts=(0.70, 0.75, 0.80, 0.85),
                 tenor_months=6, observation_months=3,
                 pb_quoted_coupon=0.12, snapshot=snap)
 print(r["verdict"], "at", r["anchor_strike_pct"])
+'
+
+# AQ / DQ quote evaluation
+.venv/bin/python -c '
+from scripts.fair_aq_dq import analyze_quote, optimize_terms, Quote, Snapshot
+q = Quote(direction="AQ", ticker="ORCL", spot=234.91, strike_pct=0.95,
+          ko_pct=1.03, tenor_months=12, obs_freq="daily",
+          doubling_factor=2.0, daily_notional_usd=10000,
+          pb_quoted_yield_pa=0.08, settlement="cash")
+# snapshot = Snapshot(...)  # orchestrator builds from IB or UW chains + UW metrics
+v = analyze_quote(q, snapshot, nlv_usd=1_000_000)
+print(v.markup_pp, v.decision, v.refusal_reasons)
+print(optimize_terms(q, snapshot)[:5])
 '
 
 # SPX macro hedge sizing
