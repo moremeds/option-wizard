@@ -137,9 +137,90 @@ def build_counter_offer_email(
     raise NotImplementedError("Implemented in Task 16")
 
 
-# ─── Internal math (implemented in subsequent tasks) ────────
+# ─── Internal math ──────────────────────────────────────────
+
+
+# Calendar conventions for observation counts.
+_OBS_PER_YEAR = {
+    "daily": 252,  # trading days
+    "weekly": 52,
+    "monthly": 12,
+}
 
 
 def _num_observations(tenor_months: int, obs_freq: str) -> int:
-    """Number of observation points over tenor."""
-    raise NotImplementedError("Implemented in Task 10")
+    """Number of observation points over the tenor."""
+    per_year = _OBS_PER_YEAR[obs_freq]
+    return max(1, int(round(per_year * tenor_months / 12.0)))
+
+
+def _check_refusal_red_lines(q: Quote, s: Snapshot, nlv_usd: float | None) -> list[str]:
+    """6 hard refusals per framework §6. Returns list of triggered reason strings.
+    Empty list = no red line triggered.
+    """
+    reasons: list[str] = []
+
+    # 1. doubling >= 3x
+    if q.doubling_factor >= 3.0:
+        reasons.append(
+            f"Doubling factor {q.doubling_factor:.1f}× ≥ 3× — institutional-only territory"
+        )
+
+    # 2. AQ + low IV rank
+    if q.direction == "AQ" and s.iv_rank < 30.0:
+        reasons.append(
+            f"AQ with IV rank {s.iv_rank:.0f} < 30 — selling vol when vol is cheap"
+        )
+
+    # 3. KO within 1 ATR(14) of spot
+    if s.atr_14_pct_of_spot is not None:
+        ko_dist_pct = abs(q.ko_pct - 1.0)
+        if ko_dist_pct < s.atr_14_pct_of_spot:
+            reasons.append(
+                f"KO distance {ko_dist_pct * 100:.1f}% < 1×ATR(14) "
+                f"{s.atr_14_pct_of_spot * 100:.1f}% — KO virtually guaranteed to trigger"
+            )
+
+    # 4. notional > 10% NLV
+    if nlv_usd is not None and nlv_usd > 0:
+        n_obs = _num_observations(q.tenor_months, q.obs_freq)
+        total_notional = q.daily_notional_usd * n_obs
+        if total_notional > 0.10 * nlv_usd:
+            reasons.append(
+                f"Single-name notional ${total_notional:,.0f} > 10% NLV ${nlv_usd:,.0f}"
+            )
+
+    # 5. tenor > 18M
+    if q.tenor_months > 18:
+        reasons.append(
+            f"Tenor {q.tenor_months}M > 18M — PB markup grows super-linearly"
+        )
+
+    # 6. ER in middle 50% of tenor
+    if s.earnings_date_iso is not None:
+        er_in_mid = _earnings_in_middle_50pct(
+            s.earnings_date_iso, s.spot_timestamp, q.tenor_months
+        )
+        if er_in_mid:
+            reasons.append(
+                f"Earnings date {s.earnings_date_iso} in middle 50% of tenor — "
+                f"binary event + doubling + KO unmanageable"
+            )
+
+    return reasons
+
+
+def _earnings_in_middle_50pct(
+    earnings_iso: str, quote_start_iso: str, tenor_months: int
+) -> bool:
+    """True if earnings date falls in [25%, 75%] of tenor window."""
+    from datetime import datetime
+
+    quote_start = datetime.fromisoformat(quote_start_iso.replace("Z", "+00:00"))
+    er = datetime.fromisoformat(earnings_iso + "T00:00:00+00:00")
+    tenor_days = tenor_months * 30  # approximate
+    days_from_start = (er - quote_start).days
+    if days_from_start < 0 or days_from_start > tenor_days:
+        return False
+    pct = days_from_start / tenor_days
+    return 0.25 <= pct <= 0.75
