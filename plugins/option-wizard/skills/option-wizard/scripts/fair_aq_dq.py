@@ -283,7 +283,86 @@ def optimize_terms(
 def build_counter_offer_email(
     v: Verdict, q: Quote, target_markup_pp: float = 1.5
 ) -> dict[str, str]:
-    raise NotImplementedError("Implemented in Task 16")
+    """Bilingual counter-offer email. Chinese first, English second.
+    Pull top 3 levers from `v.levers_to_negotiate` (caller should populate
+    via `optimize_terms` before calling this).
+    """
+    levers = v.levers_to_negotiate[:3] if v.levers_to_negotiate else []
+
+    def _describe_lever(lever: dict) -> tuple[str, str]:
+        param = lever["param_changed"]
+        old, new = lever["old_value"], lever["new_value"]
+        delta_pp = lever["delta_pp"]
+        if param == "tenor_months":
+            cn = f"Tenor 从 {old}M 缩短到 {new}M"
+            en = f"Cut tenor from {old}M to {new}M"
+        elif param == "ko_pct":
+            cn = f"KO 从 {old * 100:.0f}% 推到 {new * 100:.0f}%"
+            en = f"Push KO from {old * 100:.0f}% to {new * 100:.0f}%"
+        elif param == "doubling_factor":
+            cn = f"Doubling 从 {old}× 降到 {new}×"
+            en = f"Reduce doubling from {old}× to {new}×"
+        elif param == "obs_freq":
+            cn = f"观察频率从 {old} 改为 {new}"
+            en = f"Change observation freq from {old} to {new}"
+        else:
+            cn = f"{param}: {old} → {new}"
+            en = f"{param}: {old} → {new}"
+        cn += f" (markup 降约 {delta_pp:.2f} pp)"
+        en += f" (markup ↓ ~{delta_pp:.2f} pp)"
+        return cn, en
+
+    lever_lines_cn = "\n".join(
+        f"  {i + 1}. {_describe_lever(l)[0]}" for i, l in enumerate(levers)
+    )
+    lever_lines_en = "\n".join(
+        f"  {i + 1}. {_describe_lever(l)[1]}" for i, l in enumerate(levers)
+    )
+
+    chinese_body = f"""[PB 联系人姓名]，你好，
+
+谢谢你报的 {q.ticker} {q.direction} quote。我做了详细的 fair-value 分析,
+对比 listed-chain mid 价格和 barrier-adjusted 现金流贴现:
+
+  PB 报价 yield:     {q.pb_quoted_yield_pa * 100:.2f}% p.a.
+  Fair-value yield:  {v.fair_yield_pa * 100:.2f}% p.a.
+  Markup:           {v.markup_pp:.2f} pp ≈ ${v.pb_annual_profit_usd:,.0f}/年 抽成
+
+要进一步推进, 我需要以下让步:
+
+{lever_lines_cn}
+
+调整后目标 markup ≤ {target_markup_pp} pp = 接近机构定价。如能配合, 请重新报价;
+否则我们 pass 这单。
+
+Best,
+[trader]
+"""
+
+    english_body = f"""Hi [PB contact name],
+
+Thanks for the {q.ticker} {q.direction} quote. I ran a fair-value breakdown
+against listed-chain mids with barrier-adjusted cash flows:
+
+  PB quoted yield:   {q.pb_quoted_yield_pa * 100:.2f}% p.a.
+  Fair-value yield:  {v.fair_yield_pa * 100:.2f}% p.a.
+  Markup:           {v.markup_pp:.2f} pp ≈ ${v.pb_annual_profit_usd:,.0f}/yr take
+
+To proceed, I'd need the following concessions:
+
+{lever_lines_en}
+
+Target post-concession markup ≤ {target_markup_pp} pp (institutional-pricing level).
+If you can re-quote on these terms, happy to discuss; otherwise we'll pass on this one.
+
+Best,
+[trader]
+"""
+
+    return {
+        "chinese_body": chinese_body,
+        "english_body": english_body,
+    }
 
 
 # ─── Internal math ──────────────────────────────────────────

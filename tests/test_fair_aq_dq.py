@@ -23,6 +23,7 @@ from scripts.fair_aq_dq import (
     _read_chain_mid,
     _short_put_leg_pv,
     analyze_quote,
+    build_counter_offer_email,
     optimize_terms,
 )
 
@@ -545,3 +546,30 @@ def test_optimize_terms_refused_base_returns_sentinel():
     assert len(variants) == 1
     assert variants[0].get("refused_base") is True
     assert variants[0]["refusal_reasons"]  # populated
+
+
+# ─── build_counter_offer_email (Task 16) ───────────────────
+
+
+def test_counter_offer_email_returns_bilingual_dict():
+    # Use COUNTER-tier base so verdict is not REFUSE
+    q = _mock_quote(pb_quoted_yield_pa=0.03)
+    s = _mock_snapshot()
+    s.chain = _mock_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+    s.earnings_date_iso = "2026-07-05"
+    v = analyze_quote(q, s, nlv_usd=50_000_000.0)
+    if v.decision == "REFUSE":
+        pytest.skip("Mock data triggers refusal — test the COUNTER path instead")
+
+    # Need levers populated → call optimize first
+    v.levers_to_negotiate = optimize_terms(q, s, nlv_usd=50_000_000.0)[:3]
+
+    email = build_counter_offer_email(v, q, target_markup_pp=1.5)
+    assert "chinese_body" in email
+    assert "english_body" in email
+    assert q.ticker in email["chinese_body"]
+    assert q.ticker in email["english_body"]
+    # Chinese has Chinese characters (verify it's actually CN, not EN dressed up)
+    assert "让步" in email["chinese_body"]  # Chinese for "concession"
+    assert "Hi [PB contact" in email["english_body"]
