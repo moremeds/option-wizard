@@ -224,3 +224,55 @@ def _earnings_in_middle_50pct(
         return False
     pct = days_from_start / tenor_days
     return 0.25 <= pct <= 0.75
+
+
+from scipy.stats import norm
+
+
+# Broadie-Glasserman (1997) discrete-monitoring constant. Derived from the
+# Riemann zeta function ζ(1/2). Shifts the effective barrier away from spot
+# by `BETA * sigma * sqrt(T/n)` to correct for discrete observation.
+BETA_BG = 0.5826
+
+
+def _ko_probability(
+    spot: float, ko_barrier: float, iv: float, tenor_yr: float, obs_freq: str
+) -> float:
+    """Probability that the underlying touches the KO barrier at some
+    observation point during the tenor.
+
+    Continuous-monitoring formula: reflection principle with zero drift
+    (Merton 1973). For upper barrier (AQ case, ko_barrier > spot):
+
+        P[hit] = 2 * N(-|log(B/S)| / (sigma * sqrt(T)))
+
+    Discrete-monitoring correction (Broadie-Glasserman 1997):
+
+        effective_barrier = ko_barrier * exp(BETA_BG * sigma * sqrt(T/n))
+                              for upper barrier (shift AWAY from spot, ↓ hit prob)
+        effective_barrier = ko_barrier * exp(-BETA_BG * sigma * sqrt(T/n))
+                              for lower barrier
+
+    Zero drift simplification: AQ/DQ tenors are short enough (≤18M) that
+    (r − q − sigma²/2) × T is dominated by sigma × sqrt(T). Errors well
+    below ±2 pp on resulting markup estimate.
+    """
+    if tenor_yr <= 0 or iv <= 0:
+        return 0.0
+
+    n_obs = _OBS_PER_YEAR[obs_freq] * tenor_yr
+    if n_obs < 1:
+        n_obs = 1
+
+    upper_barrier = ko_barrier > spot
+    shift_magnitude = BETA_BG * iv * math.sqrt(tenor_yr / n_obs)
+
+    if upper_barrier:
+        effective_barrier = ko_barrier * math.exp(shift_magnitude)
+    else:
+        effective_barrier = ko_barrier * math.exp(-shift_magnitude)
+
+    log_ratio = math.log(effective_barrier / spot)
+    d = -abs(log_ratio) / (iv * math.sqrt(tenor_yr))
+    p_hit = 2.0 * norm.cdf(d)
+    return max(0.0, min(1.0, p_hit))

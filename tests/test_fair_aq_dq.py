@@ -13,6 +13,7 @@ from scripts.fair_aq_dq import (
     Quote,
     Snapshot,
     _check_refusal_red_lines,
+    _ko_probability,
 )
 
 # ─── Mock snapshot fixtures ────────────────────────────────
@@ -128,3 +129,50 @@ def test_no_refusal_on_clean_quote():
         nlv_usd=50_000_000.0,  # huge NLV so notional is small %
     )
     assert reasons == []
+
+
+# ─── KO probability ────────────────────────────────────────
+
+
+def test_ko_prob_zero_when_tenor_zero():
+    p = _ko_probability(spot=100.0, ko_barrier=103.0, iv=0.30,
+                        tenor_yr=0.0, obs_freq="daily")
+    assert p == 0.0
+
+
+def test_ko_prob_increases_with_vol():
+    """Higher vol → higher KO probability."""
+    p_low = _ko_probability(spot=100.0, ko_barrier=103.0, iv=0.10,
+                            tenor_yr=1.0, obs_freq="daily")
+    p_high = _ko_probability(spot=100.0, ko_barrier=103.0, iv=0.40,
+                             tenor_yr=1.0, obs_freq="daily")
+    assert p_high > p_low
+
+
+def test_ko_prob_increases_when_ko_closer_to_spot():
+    """KO at 102% spot → higher hit prob than KO at 110% spot."""
+    p_near = _ko_probability(spot=100.0, ko_barrier=102.0, iv=0.30,
+                             tenor_yr=1.0, obs_freq="daily")
+    p_far = _ko_probability(spot=100.0, ko_barrier=110.0, iv=0.30,
+                            tenor_yr=1.0, obs_freq="daily")
+    assert p_near > p_far
+
+
+def test_ko_prob_discrete_correction_lowers_prob():
+    """Broadie-Glasserman discrete correction should yield a LOWER hit prob
+    than naive continuous monitoring would imply, because effective barrier
+    is shifted away from spot."""
+    p_daily = _ko_probability(spot=100.0, ko_barrier=103.0, iv=0.30,
+                              tenor_yr=1.0, obs_freq="daily")
+    p_monthly = _ko_probability(spot=100.0, ko_barrier=103.0, iv=0.30,
+                                tenor_yr=1.0, obs_freq="monthly")
+    # Fewer obs per year → larger barrier shift → lower hit prob
+    assert p_monthly < p_daily
+
+
+def test_ko_prob_in_unit_interval():
+    """Output bounded in [0, 1]."""
+    for iv in [0.05, 0.20, 0.50, 1.00, 2.00]:
+        p = _ko_probability(spot=100.0, ko_barrier=103.0, iv=iv,
+                            tenor_yr=1.0, obs_freq="daily")
+        assert 0.0 <= p <= 1.0
