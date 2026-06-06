@@ -4,7 +4,8 @@ Accumulated trading mistakes and the rules they generated. Each pitfall is a sho
 
 | # | Slug | One-line |
 |---|------|----------|
-| _empty for now — fill as you trade_ | | |
+| 01 | [vix-options-track-futures-not-spot](01-vix-options-track-futures-not-spot.md) | Far-dated VIX call spreads track the VX future for that expiry, not spot VIX — use front-week VIX or SPX put spread for short-term hedges |
+| 02 | [aq-pb-yield-is-implicit](02-aq-pb-yield-is-implicit.md) | PB AQ quotes have no explicit yield — it's encoded in the strike discount × accumulation; use `pb_quoted_yield_pa=None` and implicit-yield mode |
 
 ## Adding a pitfall
 

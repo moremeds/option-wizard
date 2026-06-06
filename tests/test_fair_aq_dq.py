@@ -13,7 +13,9 @@ from scripts.fair_aq_dq import (
     Quote,
     Snapshot,
     _accumulation_pv,
+    _all_earnings_dates_in_tenor,
     _check_refusal_red_lines,
+    _compute_scenarios,
     _doubling_tail_leg_pv,
     _expected_alive_obs,
     _fair_yield,
@@ -24,6 +26,7 @@ from scripts.fair_aq_dq import (
     _short_put_leg_pv,
     analyze_quote,
     build_counter_offer_email,
+    evaluate_placed_aq,
     optimize_terms,
 )
 
@@ -133,7 +136,11 @@ def test_no_refusal_on_clean_quote():
     """
     q = _mock_quote(doubling_factor=2.0, tenor_months=12)
     s = _mock_snapshot(iv_rank=60.0, atr_14_pct=0.02)
-    s.earnings_date_iso = "2026-07-05"  # 30 days in → 8% of tenor, outside middle 50%
+    # Opt out of ER iteration: explicit empty list disables quarterly
+    # extrapolation. Without this, _all_earnings_dates_in_tenor finds
+    # 2026-10-03 (Q3 ER, ~33% into 12M tenor) and correctly REFUSES.
+    s.earnings_dates_iso = []
+    s.earnings_date_iso = "2026-07-05"
     reasons = _check_refusal_red_lines(
         q,
         s,
@@ -412,7 +419,8 @@ def test_analyze_quote_returns_full_verdict_on_clean_quote():
     s = _mock_snapshot(iv_rank=60.0)
     s.chain = _mock_chain()
     s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
-    s.earnings_date_iso = "2026-07-05"  # outside mid 50%
+    s.earnings_date_iso = "2026-07-05"
+    s.earnings_dates_iso = []  # opt out of quarterly ER iteration (see test_no_refusal note)
 
     v = analyze_quote(q, s, nlv_usd=50_000_000.0)
     # Markup-tier REFUSE is also valid (no refusal red lines triggered, but
@@ -441,12 +449,16 @@ def test_analyze_quote_decision_tiers(monkeypatch):
     s.chain = _mock_chain()
     s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
     s.earnings_date_iso = "2026-07-05"
+    s.earnings_dates_iso = []  # opt out of quarterly ER iteration
 
     def fake_fair_yield_factory(fair_yield_pa):
-        def fake(q_arg, s_arg):
+        def fake(q_arg, s_arg, strict_mode=False):
             return {
                 "fair_yield_pa": fair_yield_pa,
                 "ko_probability": 0.30,
+                "notional_per_obs": q_arg.shares_per_obs * q_arg.reference_spot,
+                "n_obs": 252,
+                "tenor_yr": 1.0,
                 "breakdown": {
                     "short_premium_pv": 100.0,
                     "pb_ko_leg_pv": 50.0,
@@ -504,6 +516,7 @@ def test_optimize_terms_returns_sorted_pareto():
     s.chain = _mock_chain()
     s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
     s.earnings_date_iso = "2026-07-05"
+    s.earnings_dates_iso = []  # opt out of quarterly ER iteration
 
     variants = optimize_terms(q, s, nlv_usd=50_000_000.0)
     assert len(variants) > 0
@@ -528,6 +541,7 @@ def test_optimize_terms_respects_sweep_param():
     s.chain = _mock_chain()
     s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
     s.earnings_date_iso = "2026-07-05"
+    s.earnings_dates_iso = []  # opt out of quarterly ER iteration
 
     variants = optimize_terms(q, s, sweep=["tenor_months"], nlv_usd=50_000_000.0)
     assert variants  # not empty / not the refused_base sentinel
@@ -585,11 +599,23 @@ def test_aq_dq_mirror_symmetry_basic_invariants():
     chain = {
         "2027-06-18": {
             0.50: {"put": {"mid": 0.50, "iv": 0.55}},
-            0.95: {"put": {"mid": 5.20, "iv": 0.38}, "call": {"mid": 15.10, "iv": 0.30}},
-            0.97: {"put": {"mid": 4.10, "iv": 0.34}, "call": {"mid": 10.40, "iv": 0.30}},
+            0.95: {
+                "put": {"mid": 5.20, "iv": 0.38},
+                "call": {"mid": 15.10, "iv": 0.30},
+            },
+            0.97: {
+                "put": {"mid": 4.10, "iv": 0.34},
+                "call": {"mid": 10.40, "iv": 0.30},
+            },
             1.00: {"put": {"mid": 8.10, "iv": 0.36}, "call": {"mid": 8.20, "iv": 0.31}},
-            1.03: {"put": {"mid": 10.40, "iv": 0.35}, "call": {"mid": 4.10, "iv": 0.34}},
-            1.05: {"put": {"mid": 15.10, "iv": 0.30}, "call": {"mid": 2.85, "iv": 0.34}},
+            1.03: {
+                "put": {"mid": 10.40, "iv": 0.35},
+                "call": {"mid": 4.10, "iv": 0.34},
+            },
+            1.05: {
+                "put": {"mid": 15.10, "iv": 0.30},
+                "call": {"mid": 2.85, "iv": 0.34},
+            },
             1.50: {"call": {"mid": 0.50, "iv": 0.42}},
         }
     }
@@ -603,10 +629,12 @@ def test_aq_dq_mirror_symmetry_basic_invariants():
     s_dq.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
     s_dq.earnings_date_iso = "2026-07-05"
 
-    q_aq = _mock_quote(direction="AQ", strike_pct=0.95, ko_pct=1.03,
-                       pb_quoted_yield_pa=0.03)
-    q_dq = _mock_quote(direction="DQ", strike_pct=1.05, ko_pct=0.97,
-                       pb_quoted_yield_pa=0.03)
+    q_aq = _mock_quote(
+        direction="AQ", strike_pct=0.95, ko_pct=1.03, pb_quoted_yield_pa=0.03
+    )
+    q_dq = _mock_quote(
+        direction="DQ", strike_pct=1.05, ko_pct=0.97, pb_quoted_yield_pa=0.03
+    )
 
     v_aq = analyze_quote(q_aq, s_aq, nlv_usd=50_000_000.0)
     v_dq = analyze_quote(q_dq, s_dq, nlv_usd=50_000_000.0)
@@ -624,46 +652,91 @@ def test_aq_dq_mirror_symmetry_basic_invariants():
 def test_quote_validation_aq_strike_above_spot_rejected():
     """Pass-3 (A1): AQ requires strike_pct < 1.0; reject otherwise."""
     with pytest.raises(ValueError, match="AQ requires"):
-        Quote(direction="AQ", ticker="X", spot=100.0, strike_pct=1.05,
-              ko_pct=1.10, tenor_months=12, obs_freq="daily",
-              doubling_factor=2.0, daily_notional_usd=10_000.0,
-              pb_quoted_yield_pa=0.09, settlement="cash")
+        Quote(
+            direction="AQ",
+            ticker="X",
+            spot=100.0,
+            strike_pct=1.05,
+            ko_pct=1.10,
+            tenor_months=12,
+            obs_freq="daily",
+            doubling_factor=2.0,
+            daily_notional_usd=10_000.0,
+            pb_quoted_yield_pa=0.09,
+            settlement="cash",
+        )
 
 
 def test_quote_validation_dq_strike_below_spot_rejected():
     """Pass-3 (A1): DQ requires strike_pct > 1.0; reject otherwise."""
     with pytest.raises(ValueError, match="DQ requires"):
-        Quote(direction="DQ", ticker="X", spot=100.0, strike_pct=0.95,
-              ko_pct=0.90, tenor_months=12, obs_freq="daily",
-              doubling_factor=2.0, daily_notional_usd=10_000.0,
-              pb_quoted_yield_pa=0.09, settlement="cash")
+        Quote(
+            direction="DQ",
+            ticker="X",
+            spot=100.0,
+            strike_pct=0.95,
+            ko_pct=0.90,
+            tenor_months=12,
+            obs_freq="daily",
+            doubling_factor=2.0,
+            daily_notional_usd=10_000.0,
+            pb_quoted_yield_pa=0.09,
+            settlement="cash",
+        )
 
 
 def test_quote_validation_zero_spot_rejected():
     """Pass-3 (A2): spot=0 prevents divide-by-zero in shares_per_obs."""
     with pytest.raises(ValueError, match="spot must be > 0"):
-        Quote(direction="AQ", ticker="X", spot=0.0, strike_pct=0.95,
-              ko_pct=1.03, tenor_months=12, obs_freq="daily",
-              doubling_factor=2.0, daily_notional_usd=10_000.0,
-              pb_quoted_yield_pa=0.09, settlement="cash")
+        Quote(
+            direction="AQ",
+            ticker="X",
+            spot=0.0,
+            strike_pct=0.95,
+            ko_pct=1.03,
+            tenor_months=12,
+            obs_freq="daily",
+            doubling_factor=2.0,
+            daily_notional_usd=10_000.0,
+            pb_quoted_yield_pa=0.09,
+            settlement="cash",
+        )
 
 
 def test_quote_validation_zero_tenor_rejected():
     """Pass-3 (A2): tenor_months=0 prevents divide-by-zero in fair_yield_pa."""
     with pytest.raises(ValueError, match="tenor_months must be"):
-        Quote(direction="AQ", ticker="X", spot=100.0, strike_pct=0.95,
-              ko_pct=1.03, tenor_months=0, obs_freq="daily",
-              doubling_factor=2.0, daily_notional_usd=10_000.0,
-              pb_quoted_yield_pa=0.09, settlement="cash")
+        Quote(
+            direction="AQ",
+            ticker="X",
+            spot=100.0,
+            strike_pct=0.95,
+            ko_pct=1.03,
+            tenor_months=0,
+            obs_freq="daily",
+            doubling_factor=2.0,
+            daily_notional_usd=10_000.0,
+            pb_quoted_yield_pa=0.09,
+            settlement="cash",
+        )
 
 
 def test_quote_validation_doubling_below_one_rejected():
     """Pass-3 (A2): doubling_factor < 1.0 makes no economic sense."""
     with pytest.raises(ValueError, match="doubling_factor must be"):
-        Quote(direction="AQ", ticker="X", spot=100.0, strike_pct=0.95,
-              ko_pct=1.03, tenor_months=12, obs_freq="daily",
-              doubling_factor=0.5, daily_notional_usd=10_000.0,
-              pb_quoted_yield_pa=0.09, settlement="cash")
+        Quote(
+            direction="AQ",
+            ticker="X",
+            spot=100.0,
+            strike_pct=0.95,
+            ko_pct=1.03,
+            tenor_months=12,
+            obs_freq="daily",
+            doubling_factor=0.5,
+            daily_notional_usd=10_000.0,
+            pb_quoted_yield_pa=0.09,
+            settlement="cash",
+        )
 
 
 def test_nearest_expiry_skips_past_dated():
@@ -690,16 +763,26 @@ def test_nearest_expiry_raises_when_all_expired():
         )
 
 
-def test_fair_yield_rejects_spot_divergence():
-    """Pass-2 (C7): q.spot and s.spot drift > 0.5% means stale snapshot.
-    Refuse to compute fair value on inconsistent data."""
+def test_fair_yield_rejects_spot_divergence_in_strict_mode():
+    """Drift > 0.5% in strict_mode raises. Default mode emits a warning
+    instead so post-trade `evaluate_placed_aq` can still produce numbers
+    when spot has moved since deal placement (see framework §9)."""
+    import warnings
+
     q = _mock_quote(spot=200.0)
     s = _mock_snapshot()
     s.spot = 210.0  # 5% drift — stale snapshot
     s.chain = _mock_chain()
     s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+    # Strict mode: raise
     with pytest.raises(ValueError, match="diverges"):
-        _fair_yield(q, s)
+        _fair_yield(q, s, strict_mode=True)
+    # Default (non-strict): warn but continue. Provenance carries drift_pct.
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        out = _fair_yield(q, s)
+        assert any("diverges" in str(warning.message) for warning in w)
+    assert out["data_provenance"]["spot_drift_pct"] > 0.005
 
 
 def test_data_provenance_completeness():
@@ -714,10 +797,387 @@ def test_data_provenance_completeness():
         pytest.skip("Test must run on non-refused quote")
 
     required_provenance_keys = [
-        "spot", "chain_source", "strike_leg_mid", "ko_leg_mid", "iv_at_ko",
-        "ko_probability", "alive_obs",
+        "spot",
+        "chain_source",
+        "strike_leg_mid",
+        "ko_leg_mid",
+        "iv_at_ko",
+        "ko_probability",
+        "alive_obs",
     ]
     for k in required_provenance_keys:
         assert k in v.data_provenance, f"Missing provenance key: {k}"
         if "value" in v.data_provenance[k]:
             assert v.data_provenance[k]["value"] is not None
+
+
+# ─── PB-quote-template tests (PR-A/PR-B) ────────────────────
+#
+# Tests below validate the new fields + behaviors driven by decoding real PB
+# AQ quote screenshots into the framework (see references/aq-dq-framework.md
+# §7.5). Anchored to the GOOGL 2026-06-03 AQ (private/trader-profile.md
+# privatized): 12M, 4 shares/day, entry $361.85, strike 85.79% ($310.43),
+# KO 105% ($379.94), 4-week guarantee, 2× doubling.
+
+
+def _googl_aq_quote(**overrides) -> Quote:
+    """Real PB AQ quote (GOOGL 2026-06-03) decoded into a Quote."""
+    defaults = dict(
+        direction="AQ",
+        ticker="GOOGL",
+        spot=368.53,  # current spot (Fri close 2026-06-05)
+        strike_pct=0.8579,
+        ko_pct=1.05,
+        tenor_months=12,
+        obs_freq="daily",
+        doubling_factor=2.0,
+        pb_quoted_yield_pa=None,  # PB AQ doesn't quote a yield
+        settlement="physical",
+        daily_shares=4,
+        entry_spot=361.85,  # PB's reference spot at quote time
+        guarantee_period_weeks=4,
+    )
+    defaults.update(overrides)
+    return Quote(**defaults)
+
+
+def _googl_chain() -> dict:
+    """Synthetic 12M-out chain at the GOOGL strikes used by the AQ."""
+    return {
+        "2027-06-18": {
+            0.50: {"put": {"mid": 1.20, "iv": 0.55}},
+            0.8579: {
+                "put": {"mid": 22.50, "iv": 0.36},
+                "call": {"mid": 75.10, "iv": 0.32},
+            },
+            1.00: {
+                "put": {"mid": 48.20, "iv": 0.32},
+                "call": {"mid": 51.40, "iv": 0.30},
+            },
+            1.05: {
+                "put": {"mid": 62.30, "iv": 0.33},
+                "call": {"mid": 38.40, "iv": 0.30},
+            },
+        }
+    }
+
+
+# ─── Quote dataclass widening ──────────────────────────────
+
+
+def test_quote_accepts_daily_shares_without_daily_notional():
+    q = _googl_aq_quote()
+    assert q.daily_shares == 4
+    assert q.daily_notional_usd is None
+    assert q.shares_per_obs == 4.0
+
+
+def test_quote_rejects_both_shares_and_notional():
+    with pytest.raises(ValueError, match="exactly one"):
+        Quote(
+            direction="AQ",
+            ticker="X",
+            spot=100.0,
+            strike_pct=0.95,
+            ko_pct=1.03,
+            tenor_months=6,
+            obs_freq="daily",
+            doubling_factor=2.0,
+            daily_shares=4,
+            daily_notional_usd=10_000.0,
+        )
+
+
+def test_quote_rejects_neither_shares_nor_notional():
+    with pytest.raises(ValueError, match="exactly one"):
+        Quote(
+            direction="AQ",
+            ticker="X",
+            spot=100.0,
+            strike_pct=0.95,
+            ko_pct=1.03,
+            tenor_months=6,
+            obs_freq="daily",
+            doubling_factor=2.0,
+        )
+
+
+def test_reference_spot_defaults_to_spot_when_entry_spot_unset():
+    q = _mock_quote()
+    assert q.entry_spot is None
+    assert q.reference_spot == q.spot
+
+
+def test_reference_spot_uses_entry_spot_when_set():
+    q = _googl_aq_quote()
+    assert q.reference_spot == 361.85  # entry_spot, NOT current 368.53
+
+
+def test_shares_per_obs_via_notional_uses_reference_spot():
+    """When daily_notional_usd path is used (not daily_shares), the share
+    count divides by reference_spot (the strike anchor), not current spot."""
+    q = _mock_quote(daily_notional_usd=10_000.0, entry_spot=190.0)
+    # 10000 / 190 = 52.63, not 10000 / 200 (= 50.0, current spot)
+    assert q.shares_per_obs == pytest.approx(10_000.0 / 190.0)
+
+
+def test_total_notional_uses_strike_not_spot():
+    """Refusal #4 concentration formula uses strike_abs (the price PB
+    will buy the trader in at), not spot."""
+    q = _mock_quote()
+    n_obs = 252  # 12M daily
+    expected = q.shares_per_obs * (q.strike_pct * q.reference_spot) * n_obs
+    assert q.total_notional_usd == pytest.approx(expected)
+
+
+def test_quote_rejects_negative_guarantee_period():
+    with pytest.raises(ValueError, match="guarantee_period_weeks"):
+        _mock_quote(guarantee_period_weeks=-1)
+
+
+# ─── KO probability with guarantee period ─────────────────────
+
+
+def test_ko_prob_drops_with_guarantee_period():
+    """4-week guarantee on a 12M tenor should reduce KO probability
+    (because KO can't trigger during the first 4 weeks)."""
+    p_no_guarantee = _ko_probability(
+        spot=100.0,
+        ko_barrier=105.0,
+        iv=0.30,
+        tenor_yr=1.0,
+        obs_freq="daily",
+        guarantee_period_yr=0.0,
+    )
+    p_with_guarantee = _ko_probability(
+        spot=100.0,
+        ko_barrier=105.0,
+        iv=0.30,
+        tenor_yr=1.0,
+        obs_freq="daily",
+        guarantee_period_yr=28 / 365.0,  # 4 weeks
+    )
+    assert p_with_guarantee < p_no_guarantee
+
+
+# ─── ER iteration ─────────────────────────────────────────────
+
+
+def test_er_iteration_catches_quarterly_ers_in_12m_tenor():
+    """A 12M AQ starting 2026-06-05 with next ER 2026-07-22 (Q2) sees
+    Q3 (2026-10-20) and Q4 (2027-01-18) — both should fall in middle 50%."""
+    s = _mock_snapshot()
+    s.spot_timestamp = "2026-06-05T10:00:00Z"
+    s.earnings_date_iso = "2026-07-22"
+    s.earnings_dates_iso = None  # let iterator extrapolate quarterly
+    dates = _all_earnings_dates_in_tenor(s, tenor_months=12)
+    # Expect 4-5 quarterly ER dates anchored on 2026-07-22 within
+    # [2026-06-05, 2027-06-05].
+    assert len(dates) >= 4
+    assert "2026-07-22" in dates
+    # Q3 ≈ 2026-10-20, Q4 ≈ 2027-01-18 — within middle 50%
+    assert any("2026-10" in d for d in dates)
+    assert any("2027-01" in d for d in dates)
+
+
+def test_explicit_empty_er_list_disables_iteration():
+    """Empty list = "orchestrator confirmed no ERs in window" — don't
+    extrapolate from earnings_date_iso."""
+    s = _mock_snapshot()
+    s.earnings_date_iso = "2026-07-22"
+    s.earnings_dates_iso = []
+    dates = _all_earnings_dates_in_tenor(s, tenor_months=12)
+    assert dates == []
+
+
+def test_refusal_iterates_to_catch_q3_er():
+    q = _mock_quote(tenor_months=12)
+    s = _mock_snapshot(iv_rank=60.0, atr_14_pct=0.02)
+    s.spot_timestamp = "2026-06-05T10:00:00Z"
+    s.earnings_date_iso = "2026-07-22"  # Q2 outside middle 50%
+    reasons = _check_refusal_red_lines(q, s, nlv_usd=1_000_000_000.0)
+    # Q3 ER (~2026-10-20) falls in middle 50% → refusal should fire
+    assert any("earning" in r.lower() for r in reasons)
+
+
+# ─── Concentration formula (refusal #4 fix) ────────────────────
+
+
+def test_concentration_uses_strike_and_doubling():
+    """Old formula: daily_notional × n_obs (ignored doubling and strike vs spot).
+    New: shares × strike × n_obs × doubling — captures true max exposure."""
+    q = _mock_quote(daily_notional_usd=10_000.0, doubling_factor=2.0)
+    s = _mock_snapshot()
+    s.earnings_dates_iso = []  # disable ER refusal
+    # 50 shares × $190 strike × 252 obs × 2 doubling = $4.788M
+    # vs $40M NLV → 11.97% > 10% → REFUSE
+    reasons = _check_refusal_red_lines(q, s, nlv_usd=40_000_000.0)
+    assert any("max-exposure" in r.lower() for r in reasons)
+
+
+# ─── 3-scenario output ─────────────────────────────────────────
+
+
+def test_compute_scenarios_for_googl_quote():
+    """3-scenario projection should match the PB report layout:
+    Scenario 1 (KO during guarantee): 80 shares × $310.43 = $24,834
+    Scenario 2 (no KO, no doubling): 1000-1008 shares (252 × 4) × $310.43
+    Scenario 3 (max exposure all doubled): 2000-2016 shares × $310.43
+    """
+    q = _googl_aq_quote()
+    scenarios = _compute_scenarios(q, nlv_usd=None)
+    strike_abs = q.strike_pct * q.entry_spot  # ≈ 310.43
+
+    # Scenario 1: 4 weeks × 5 obs/wk × 4 shares = 80 shares (matches PB)
+    s1 = scenarios["ko_during_guarantee"]
+    assert s1["shares"] == pytest.approx(80.0)
+    assert s1["usd_notional"] == pytest.approx(80.0 * strike_abs, rel=1e-3)
+
+    # Scenario 2: 252 trading days × 4 shares = 1008 shares (PB rounds to 1000)
+    s2 = scenarios["full_term_no_doubling"]
+    assert s2["shares"] == pytest.approx(1008.0)
+    assert s2["usd_notional"] == pytest.approx(1008.0 * strike_abs, rel=1e-3)
+
+    # Scenario 3: 252 × 4 × 2 = 2016 shares (PB rounds to 2000)
+    s3 = scenarios["max_exposure_all_doubled"]
+    assert s3["shares"] == pytest.approx(2016.0)
+
+
+def test_compute_scenarios_with_nlv_computes_pct():
+    q = _googl_aq_quote()
+    scenarios = _compute_scenarios(q, nlv_usd=500_000.0)
+    # Scenario 3 ≈ $625K → ~125% of $500K NLV
+    s3 = scenarios["max_exposure_all_doubled"]
+    assert s3["pct_of_nlv"] > 1.0
+
+
+# ─── analyze_quote implicit-yield mode ─────────────────────────
+
+
+def test_analyze_quote_implicit_yield_mode_when_pb_yield_none():
+    """When pb_quoted_yield_pa is None, Verdict.mode='implicit_yield_aq'
+    and discount_implied_yield_pa is populated."""
+    q = _mock_quote(
+        pb_quoted_yield_pa=None,
+        # provide ATR + IV rank that don't trip refusals 1-5
+        strike_pct=0.95,
+        ko_pct=1.05,
+    )
+    s = _mock_snapshot(iv_rank=60.0, atr_14_pct=0.02)
+    s.chain = _mock_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+    s.earnings_dates_iso = []  # don't trip ER refusal
+    v = analyze_quote(q, s, nlv_usd=1_000_000_000.0)  # large NLV
+
+    assert v.mode == "implicit_yield_aq"
+    assert v.pb_quoted_yield_pa is None
+    assert not (v.discount_implied_yield_pa != v.discount_implied_yield_pa)  # not NaN
+
+
+# ─── evaluate_placed_aq (post-trade audit) ─────────────────────
+
+
+def test_evaluate_placed_aq_returns_expected_shape():
+    q = _googl_aq_quote()
+    s = _mock_snapshot()
+    s.spot = q.spot  # avoid drift warning noise
+    s.chain = _googl_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+
+    audit = evaluate_placed_aq(
+        q,
+        s,
+        current_spot=q.spot,
+        observations_elapsed=3,  # 6/3 quote → 6/5 close = 3 trading days
+        shares_accumulated=12.0,  # 4 shares/day × 3 days
+        nlv_usd=2_000_000.0,
+    )
+
+    assert set(audit.keys()) == {
+        "current_state",
+        "barriers",
+        "forward",
+        "crash_scenario",
+        "monitor_level",
+    }
+    cs = audit["current_state"]
+    # cost basis at strike $310.43, 12 shares = $3,725
+    assert cs["cost_basis_total"] == pytest.approx(12.0 * 0.8579 * 361.85, rel=1e-3)
+    # unrealized P/L positive since current $368.53 > strike $310.43
+    assert cs["unrealized_pnl_usd"] > 0
+    # In guarantee period (3 obs elapsed < 20 obs in guarantee window)
+    assert audit["barriers"]["in_guarantee_period"] is True
+
+
+def test_evaluate_placed_aq_near_ko_monitor_level():
+    """When current spot is within 2% of KO barrier, monitor_level='near_ko'."""
+    q = _googl_aq_quote()
+    s = _mock_snapshot()
+    ko_abs = q.ko_pct * q.entry_spot  # $379.94
+    near_ko_spot = ko_abs * 0.995  # 0.5% below KO
+    s.spot = near_ko_spot
+    s.chain = _googl_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+
+    audit = evaluate_placed_aq(
+        q,
+        s,
+        current_spot=near_ko_spot,
+        observations_elapsed=20,
+        shares_accumulated=80.0,
+    )
+    assert audit["monitor_level"] == "near_ko"
+
+
+def test_evaluate_placed_aq_crash_scenario_quantifies_loss():
+    """A -20% crash from current spot should turn unrealized P/L sharply
+    negative and double the remaining accumulation rate."""
+    q = _googl_aq_quote()
+    s = _mock_snapshot()
+    s.spot = q.spot
+    s.chain = _googl_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+
+    audit = evaluate_placed_aq(
+        q,
+        s,
+        current_spot=q.spot,
+        observations_elapsed=3,
+        shares_accumulated=12.0,
+        nlv_usd=2_000_000.0,
+        crash_scenario_pct=-0.20,
+    )
+    crash = audit["crash_scenario"]
+    # Crash P/L is negative
+    assert crash["pnl_usd"] < 0
+    # Doubling fires → additional shares = remaining_obs × 4 × 2
+    assert crash["additional_shares_doubled"] == pytest.approx(
+        (252 - 3) * 4 * 2, rel=1e-3
+    )
+
+
+# ─── GOOGL integration test ────────────────────────────────────
+
+
+def test_googl_aq_end_to_end_refuses_on_concentration_or_ers():
+    """Real GOOGL 2026-06-03 AQ run through analyze_quote against a small
+    PB-equivalent NLV. The trade SHOULD trigger at least one refusal
+    (either concentration with small NLV, or ER iteration catching
+    Q3/Q4 ERs in middle 50% of the 12M tenor)."""
+    q = _googl_aq_quote()
+    s = _mock_snapshot(iv_rank=45.0, atr_14_pct=0.025)
+    s.spot = q.spot
+    s.chain = _googl_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+    s.spot_timestamp = "2026-06-03T20:00:00Z"  # PB quote placement time
+    s.earnings_date_iso = "2026-07-22"
+    s.earnings_dates_iso = None  # let iterator extrapolate Q3 + Q4
+
+    # Use a $200K PB account (plausible private-bank-retail size). Max
+    # exposure $625K × 1.0 = $625K > 10% × $200K = $20K → refuse on #4.
+    v = analyze_quote(q, s, nlv_usd=200_000.0)
+    assert v.decision == "REFUSE"
+    # Scenarios should still be populated even on refusal short-circuit
+    assert "ko_during_guarantee" in v.scenarios
+    assert v.scenarios["ko_during_guarantee"]["shares"] == pytest.approx(80.0)
+    assert v.mode == "implicit_yield_aq"  # AQ without quoted yield

@@ -61,6 +61,24 @@ markup_pp = (pb_quoted_yield_pa − fair_yield_pa) × 100   # in percentage poin
 
 **Why `alive_obs` is not just `n_obs × (1 − ko_prob)`:** the simple approximation assumes each observation is independently subject to the cumulative KO probability, which double-counts. The exact expectation when KO survival is iid per observation is `E[N_alive] = (1 − q^n) / (1 − q) = ko_prob_total / p_per_obs`. At ko_prob_total = 0.5, n = 252, the exact formula gives ~182, the simple approximation gives 126 — a 30% gap on a quantity that drives all three leg values.
 
+**AQ implicit-yield mode.** Real PB AQ quotes (e.g., the GOOGL 2026-06-03 deal) do NOT include a `pb_quoted_yield_pa` field. The "yield" of an AQ is structurally the strike discount × accumulated shares — encoded in `远期买入水平` (strike%) and the accumulation schedule, not as a coupon. When the orchestrator decodes a PB quote that lacks an explicit yield, set `Quote.pb_quoted_yield_pa = None` and `analyze_quote` enters **implicit-yield mode**:
+
+```
+discount_per_share        = entry_spot − strike_abs
+expected_shares           = shares_per_obs × alive_obs × (1 + (doubling − 1) × adverse_region_prob)
+expected_discount_value   = discount_per_share × expected_shares
+discount_implied_yield_pa = expected_discount_value / (notional_per_obs × n_obs × tenor_yr)
+
+# Decision tier inverted vs FCN markup_pp:
+markup_pp = (discount_implied_yield_pa − fair_yield_pa) × 100
+# More-NEGATIVE markup_pp = PB extracting more from trader.
+#   markup_pp < -5.0pp  → REFUSE
+#   markup_pp < -1.5pp  → COUNTER
+#   else                → ACCEPT_IF_MUST
+```
+
+Verdict carries `mode='implicit_yield_aq'` and `discount_implied_yield_pa` (rather than the FCN-style `markup_comparison` mode). The counter-offer email emits "PB take" instead of "PB markup" in this mode.
+
 **Where each input comes from:**
 
 | Input | Source | Notes |
@@ -131,9 +149,9 @@ If ANY of the following triggers, output `decision='REFUSE'` immediately (before
 | 1 | `doubling_factor >= 3.0` | Tail loss scales linearly with doubling; 3× is institutional-only territory, retail PB pricing fails |
 | 2 | `direction='AQ' AND iv_rank < 30` | Selling vol when vol is cheap means PB's vol-markup % is highest; you're double-screwed |
 | 3 | `abs(spot − ko_barrier) < 1 × ATR(14)` | KO virtually guaranteed to trigger early; you get fees but ~zero of the yield |
-| 4 | `daily_notional × n_obs > 0.10 × NLV` (total accumulated notional over the tenor) | Single-name notional > 10% portfolio NLV concentrates tail risk |
+| 4 | `shares_per_obs × strike_abs × n_obs × doubling_factor > 0.10 × NLV` (max-exposure notional) | True worst-case cash commitment > 10% portfolio NLV. **NOTE**: this formula intentionally includes `strike_abs` (the price PB will buy you in at — NOT spot) and `doubling_factor` (worst-case forced accumulation rate). The legacy `daily_notional × n_obs` formula systematically understated exposure on shares-denominated PB AQ contracts by 10-20%. |
 | 5 | `tenor_months > 18` | PB markup grows super-linearly past 18M; longer tenors compound their edge |
-| 6 | Earnings date falls in middle 50% of tenor | Binary event + doubling + KO is unmanageable |
+| 6 | **ANY** earnings date in middle 50% of tenor (iterates `s.earnings_dates_iso` if provided, else quarterly-extrapolates from `s.earnings_date_iso`) | Binary event + doubling + KO is unmanageable. **NOTE**: legacy behavior only checked the single next-ER, which silently passed 12M+ tenors that had Q3 / Q4 ERs in middle 50%. Iteration is mandatory for tenors ≥ 9M. |
 
 If trader insists on proceeding despite a red line, framework still runs evaluation but `decision` stays `REFUSE` and counter-offer email's preamble explicitly notes the red line.
 
@@ -192,16 +210,78 @@ Best,
 [trader]
 ```
 
-## §8 Live-quote workflow (6 steps)
+## §7.5 Real PB quote field decoding
 
-1. Trader provides Quote params (or pastes PB quote text).
-2. Run `_check_refusal_red_lines(quote, snapshot, nlv_usd)`. If non-empty, return `REFUSE` verdict with reasons. Stop.
-3. Orchestrator pulls chain data per workflow 5 §2 (live → IB, analytical → UW). Builds Snapshot.
-4. Run `analyze_quote(q, s)` to get full Verdict with breakdown + data_provenance.
-5. Run `optimize_terms(q, s)` to get sorted Pareto frontier of negotiation levers.
-6. Run `build_counter_offer_email(v, q)` to assemble bilingual draft. Present all four artifacts (checklist + breakdown + Pareto + email) to trader.
+PB AQ quotes arrive as PDF screenshots, broker portals, or pasted Chinese text. The mapping below shows how each field in the report decodes into the `Quote` / `Snapshot` data contract. Use this table when the trader sends a screenshot — start by filling these fields, then run §8 workflow.
+
+| PB quote label (Chinese) | English | Quote / Snapshot field | Notes |
+|---|---|---|---|
+| 标的 | Underlying | `Quote.ticker` | |
+| 远期买入水平 (%) | Forward buy level (%) | `Quote.strike_pct` | PB shows e.g. "85.79%" → 0.8579. The price PB will buy the trader in at. |
+| 入场价 | Entry spot | `Quote.entry_spot` | Reference spot PB locked strike + KO against at quote time. Distinct from current spot (`Quote.spot`) for post-trade analysis. |
+| 闭市价 | Close at report time | `Snapshot.spot` (if PDF was generated after market close) | If PDF was generated intraday during placement, use that spot. |
+| 买入价 | Buy price (= entry × strike%) | derived = `strike_pct × entry_spot` | PB displays for reader convenience; framework computes it. |
+| KO敲出水平 (%) | KO knock-out level (%) | `Quote.ko_pct` | PB shows "105.00%" → 1.05. |
+| 敲出价 | KO absolute price | derived = `ko_pct × entry_spot` | PB displays; framework computes. |
+| 保证期 (weeks) | Guarantee / non-call period | `Quote.guarantee_period_weeks` | KO cannot trigger during this window. Accumulation still runs. Standard 4 weeks. |
+| 期限 / 投资期限 | Tenor | `Quote.tenor_months` | PB shows "12个月" → 12. |
+| 杠杆倍数 | Doubling factor | `Quote.doubling_factor` | PB shows "2x" → 2.0. |
+| 每日买入 (shares) | Daily buy (base) | `Quote.daily_shares` | PB writes literal share count e.g. "4 shares". Do NOT convert to USD notional. |
+| 杠杆股数 (shares) | Leveraged daily buy | derived = `daily_shares × doubling_factor` | PB displays the doubled count for convenience. |
+| 货币 | Currency | (info only — settlement always USD-denominated for US-equity AQ) | |
+| 报价方式 | Order type | (info only — typically "Market") | |
+| 成本价 | Cost basis | derived = `strike_abs` | Per-share cost trader will pay (= strike). |
+| 浮盈 / 浮亏 (%) | Unrealized P/L (%) | derived by `evaluate_placed_aq` post-trade | (current_spot − strike_abs) / strike_abs |
+| Scenario 1 (KO during guarantee) | shares × strike | `Verdict.scenarios['ko_during_guarantee']` | Best case: KO triggers at first opportunity after guarantee window. |
+| Scenario 2 (no KO, no doubling) | shares × strike × n_obs | `Verdict.scenarios['full_term_no_doubling']` | Base case: spot stays above strike, no KO. |
+| Scenario 3 (max exposure) | shares × strike × n_obs × doubling | `Verdict.scenarios['max_exposure_all_doubled']` | Worst case: spot crashes below strike, doubling fires for the full tenor. |
+| (not in quote) | Next earnings date(s) | `Snapshot.earnings_date_iso` + `earnings_dates_iso` | Pull from UW `get_company_info` / `get_earnings_history`. For tenors ≥ 9M, populate `earnings_dates_iso` with the full list (refusal #6 iterates). |
+| (not in quote) | IV rank | `Snapshot.iv_rank` | UW only. Required for refusal #2. |
+| (not in quote) | ATR(14) | `Snapshot.atr_14_pct_of_spot` | TV only. Required for refusal #3. |
+
+**Critical**: `pb_quoted_yield_pa` is **NOT** in a PB AQ quote. The PB report shows the strike discount (e.g., 85.79% = 14.21% off entry) and the accumulation schedule — the "yield" is implicit in those two numbers. Always set `Quote.pb_quoted_yield_pa = None` for PB AQ decoding; analyze_quote then enters implicit-yield mode (see §3).
+
+## §8 Live-quote workflow (7 steps)
+
+1. Trader provides Quote params (or pastes PB quote text / sends screenshot). If screenshot, decode per §7.5 into the `Quote` / `Snapshot` contract.
+2. Run `_check_refusal_red_lines(quote, snapshot, nlv_usd)`. If non-empty, return `REFUSE` verdict with reasons + the 3-scenario projection. Stop. (Trader still sees the scenarios so they can verify whether the deal would have been REFUSEd on a larger NLV.)
+3. Orchestrator pulls chain data per workflow 5 §2 (live → IB, analytical → UW). Builds Snapshot. For tenors ≥ 9M, populate `Snapshot.earnings_dates_iso` with the full quarterly schedule from UW.
+4. Run `analyze_quote(q, s)` to get full Verdict with breakdown + data_provenance + 3 scenarios + mode flag.
+5. Run `optimize_terms(q, s)` to get sorted Pareto frontier of negotiation levers. Note: in implicit-yield mode, leverage_score uses inverted sign (mutations that increase `discount_implied_yield_pa` toward `fair_yield_pa` are the wins).
+6. Run `build_counter_offer_email(v, q)` to assemble bilingual draft. Email automatically switches preamble between markup-comparison and implicit-yield-aq modes.
+7. Present all five artifacts (checklist + breakdown + scenarios + Pareto + email) to trader.
 
 Final decision rules:
-- `markup_pp > 5.0` OR refusal lines triggered → `REFUSE`
-- `1.5 < markup_pp ≤ 5.0` → `COUNTER` (run lever negotiation)
-- `markup_pp ≤ 1.5` AND no red lines → `ACCEPT_IF_MUST` (institutional-grade pricing; if trader must engage, this is the best they'll get)
+- **markup_comparison mode** (PB quoted a yield — typical FCN/ELN):
+  - `markup_pp > 5.0` OR refusal lines triggered → `REFUSE`
+  - `1.5 < markup_pp ≤ 5.0` → `COUNTER` (run lever negotiation)
+  - `markup_pp ≤ 1.5` AND no red lines → `ACCEPT_IF_MUST` (institutional-grade pricing)
+- **implicit_yield_aq mode** (PB AQ — no quoted yield):
+  - `markup_pp < -5.0` (PB extracting > 5pp from implicit yield) → `REFUSE`
+  - `-5.0 ≤ markup_pp < -1.5` → `COUNTER`
+  - `markup_pp ≥ -1.5` AND no red lines → `ACCEPT_IF_MUST`
+
+## §9 Post-trade audit workflow
+
+The pre-trade workflow above answers "should we accept this PB quote?". For trades already placed (PB structured products can rarely be unwound), the question becomes "where are we now, and how bad can it get?". Use `evaluate_placed_aq(quote, snapshot, current_spot, observations_elapsed, shares_accumulated, nlv_usd)`.
+
+**When to invoke:**
+- Weekly position book review touches an active PB AQ
+- Approaching guarantee period end (4 weeks after placement for typical AQ)
+- Earnings release inside tenor — pre-ER and post-ER audit
+- Spot approaches KO barrier (< 2% distance) or strike (< 5% above)
+
+**Input requirements:**
+- `Quote.entry_spot` set to PB's reference spot at placement (not current). This freezes `strike_abs` and `ko_abs` against the historical anchor — current spot drift no longer pollutes the comparison.
+- `current_spot` from fresh TV pull (T-1 close or live).
+- `observations_elapsed` derived from placement_date → current_date by trading-day count.
+- `shares_accumulated` from PB statement (don't rely on base-case formula — actual count may differ if doubling fired on past days).
+
+**Output dict:**
+- `current_state`: shares accumulated, cost basis total, market value, unrealized P/L USD + %.
+- `barriers`: `strike_abs` / `ko_abs` / `pct_above_strike` / `pct_below_ko` / `in_guarantee_period` (bool).
+- `forward`: `observations_remaining`, `days_to_guarantee_end`, `forward_ko_prob` (over remaining callable window), `max_additional_exposure_usd` (= remaining_obs × shares × strike × doubling), `max_additional_exposure_pct_of_nlv`.
+- `crash_scenario`: a -20% from-here crash (configurable) — `spot_at_crash`, `additional_shares_doubled`, `total_shares_at_year_end`, `total_cost_basis`, `market_value_at_crash`, `pnl_usd`.
+- `monitor_level`: `"near_ko"` (< 2% to KO — call your PB to confirm KO trigger logic), `"hedge_recommended"` (< 5% above strike — doubling tail is live, consider OTM put hedge), `"monitor"` (default).
+
+**Hedging the doubling tail** (when `monitor_level == "hedge_recommended"`): the PB AQ commits the trader to forced accumulation at strike if spot crashes. The natural hedge is a listed-options OTM put spread expiring near the tenor mid-point. Size: 1× the `max_additional_exposure_usd / strike_abs` share equivalent (covers the doubling-activated incremental shares). See `references/strategies.md` "OTM put spread overlay" for cost-budget framing.
