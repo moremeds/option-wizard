@@ -75,6 +75,31 @@ Project setup (one-time): copy `.env.example` → `.env` and fill in `MASSIVE_AP
 - SIC code is the SEC industry taxonomy, not GICS. Cross-check sector classification against UW `get_company_info` if the sector matters for peer comparison.
 - The financials endpoint's `source_filing_url` returns `api.polygon.io` URLs in the response body (artifact of the rebrand) — these still resolve and are valid SEC EDGAR redirects.
 - News `insights[*].sentiment` is one of `positive / neutral / negative`; treat `neutral` as no signal, not "mildly bullish".
+- **ADR weakness (observed on NVO 2026-06-06 run):** Three endpoints behave poorly on ADRs:
+  - `/v1/related-companies/<ADR>` returns an empty `results` array (no peer suggestions). Fallback: manual peer selection per GICS sub-industry, or ask trader.
+  - `/v3/snapshot/locale/us/markets/stocks/tickers/<ADR>` returns 404 for some ADRs. Fallback: use `UW get_company_info`'s `price` field; flag as deviation from hard rule #2 (TV is canonical for spot, but TV reader skill is not invokable from Bash-tool sessions).
+  - `weighted_shares_outstanding` in `/v3/reference/tickers/<ADR>` is the right denominator for market cap; UW `get_company_info` `outstanding` may report only one share class (e.g. NVO B-shares = 1.07B vs Massive's 4.43B total weighted). Use Massive's number; cross-check against the 20-F if material to the thesis.
+
+## Spot price fallback chain
+
+CLAUDE.md hard rule #2 says spot is TV-only. But the `finance-data-providers:tradingview-reader` is a skill, not a Bash-callable tool — it isn't invokable from inside the fundamental-analysis skill's data-pull pipeline. The practical fallback chain in deep mode:
+
+1. **TV reader (canonical)** — only available when the analysis is being driven from the main option-wizard SKILL flow (which can invoke the TV skill). If you're in a standalone fundamental-analysis call, this is likely unreachable.
+2. **Massive snapshot** — `GET /v3/snapshot/locale/us/markets/stocks/tickers/<TICKER>` returns last-trade price. **Works for most US common stocks; fails (404) on some ADRs.**
+3. **UW `get_company_info` `price` field** — last resort. UW is forbidden as primary for spot per hard rule #2; using it here is an acknowledged deviation under a documented gap. Flag in the report's Sources/Gaps section.
+
+When using fallback 2 or 3, the report MUST list the deviation under "Gaps" so the trader knows the spot wasn't TV-verified before acting.
+
+## ADR-specific handling (deep mode)
+
+ADRs (`issue_type=ADR` in UW `get_company_info`, or `type=ADRC` in Massive `/v3/reference/tickers`) need extra care. Symptoms:
+
+- Currency mismatch: financials reported in home currency (DKK for NVO, EUR for SNY, CHF for some Roche tickers) while spot is in USD. The conversion ratio must be derived (often the cleanest source is to take Massive `fundamental_breakdown.share_price` and back-compute from EPS, or use a recent FX query via WebSearch).
+- Share class disambiguation: ADR ratio ≠ 1:1 for all names. Massive's `weighted_shares_outstanding` is the right total; UW's `outstanding` may report only B-shares or only ADR-issued shares.
+- Related-companies often empty (see Massive gotchas above).
+- `get_earnings_history` may show EPS in home currency AND mix pre- and post-split quarters when the ADR has done a split (NVO did a 2-for-1 in 2023). Confirm continuity before computing TTM EPS — the safest approach is to take `fundamental_breakdown` EPS (already standardized) rather than summing 4 quarters of `earnings_history`.
+
+When the analysis target is an ADR, **announce this fact in the report's Section 1** so the trader can apply mental adjustments (Danish withholding tax, lower secondary-market liquidity vs. ordinary shares, FX exposure on dividends).
 
 ## Quick mode — minimum pull (5 tools)
 

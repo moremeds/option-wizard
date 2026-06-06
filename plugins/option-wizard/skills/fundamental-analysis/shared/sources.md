@@ -58,6 +58,15 @@ Example:
 >
 > Q1 FY26 same-store-sales decline: [UNVERIFIED — pulled from press summary, not 10-Q].
 
+## ADR / dual-share disambiguation
+
+When the analysis target is an ADR or has multiple share classes, citing "market cap" naively often disagrees by 2-4x across sources. Rule (from NVO 2026-06-06 run, where UW said $46.2B and Massive said $193.8B):
+
+- **Use Massive `weighted_shares_outstanding` × current spot as the canonical market cap** for ADRs and dual-class companies. The "weighted" field aggregates all share classes per Massive's methodology.
+- **Cross-check with the 20-F / 10-K share count.** If the discrepancy with Massive exceeds 5%, surface it in the report's Section 1 + Gaps section. Do not silently pick the smaller / friendlier number to make a PE look attractive.
+- **UW `get_company_info.outstanding` may report only a single share class** (B-shares for NVO, A-shares for some others) — never use it directly as the market cap denominator for an ADR without confirming.
+- **Cite the source explicitly:** in the Snapshot section table, write "$193.8B [Massive `/v3/reference/tickers/<T>` `weighted_shares_outstanding` × spot]" rather than just "$193.8B".
+
 ## What you may NOT do
 
 - **Hand-construct SEC EDGAR URLs.** Either use the `source_filing_url` field returned by Massive `/vX/reference/financials` (the canonical source) or WebFetch the actual filing page; never assemble an EDGAR path from an accession number guess. EDGAR URLs follow a stable pattern but the accession numbers must be real.

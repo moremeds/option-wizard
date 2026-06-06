@@ -121,4 +121,22 @@ When in doubt, ask the trader: "quick brief 还是 deep dive?"
   lives in `aq-dq-framework.md` / `fcn-framework.md`; IB order flow
   lives in `execution.md`.
 - **Does not cover crypto, futures, or non-US equities.** UW
-  fundamentals coverage is US-listed only.
+  fundamentals coverage is US-listed only. **ADRs are US-listed and
+  covered, but with documented data caveats — see Known limitations.**
+
+## Known limitations (observed in production runs)
+
+These are real gaps surfaced when the skill was dogfooded end-to-end. Acknowledge them in the report's Sources/Gaps section rather than papering over.
+
+- **TV reader skill is not invokable from Bash-tool sessions.** CLAUDE.md hard rule #2 names TradingView as the canonical spot source, but `finance-data-providers:tradingview-reader` is a Claude Code skill — it can only be invoked when the main option-wizard SKILL flow drives it. When fundamental-analysis runs standalone (`深度研究 X` triggers it directly), spot must come from Massive `/v3/snapshot/...` (preferred) or UW `get_company_info.price` (fallback). Flag the deviation in Gaps.
+
+- **ADR data quality is uneven.** Surfaced on NVO 2026-06-06 run:
+  - Massive `/v1/related-companies/<ADR>` often returns empty — go straight to manual peer selection by GICS sub-industry.
+  - Massive `/v3/snapshot/.../<ADR>` returns 404 for some ADRs — fall back to UW spot.
+  - UW `get_company_info.outstanding` may report a single share class (e.g., NVO B-shares only) — use Massive `weighted_shares_outstanding` for market cap.
+  - Financials report in home currency (DKK for NVO, EUR for SNY); derive FX rate from `fundamental_breakdown.share_price` ÷ EPS or via WebSearch.
+  - `get_earnings_history` may mix pre- and post-split quarters — prefer `fundamental_breakdown` EPS over summing quarters.
+
+- **Historical PE percentile requires self-computation.** Neither UW nor Massive ships a pre-built PE series. See `deep/template.md` Section 4 for the three-tier fallback (self-compute via aggs + EPS / cite secondary source with CONSENSUS / skip with UNVERIFIED).
+
+- **Massive endpoints are not fully documented for cross-asset behavior.** When a path that works for US common stocks returns 404 or empty for an ADR / OTC / preferred share, the first hypothesis should be "this endpoint may not cover this asset class" — don't retry the same path 3x.

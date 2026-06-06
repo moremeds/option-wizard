@@ -12,7 +12,8 @@ citations clutter).
 
 Before writing a single section:
 
-1. **Confirm peer set.** Default source: Massive `/v1/related-companies/<TICKER>` returns ~10 ranked tickers — take the top 5-7. Only ask the trader if (a) related-companies returned fewer than 4 names, (b) the trader already named a specific cohort, or (c) the top 5-7 are obviously wrong (e.g. wildly different revenue scale or sector). Fallback heuristic when Massive is unavailable: same GICS sub-industry + similar revenue scale (within 5x). Aim for 4-7 peers.
+1. **Confirm peer set.** Default source: Massive `/v1/related-companies/<TICKER>` returns ~10 ranked tickers — take the top 5-7. Only ask the trader if (a) related-companies returned fewer than 4 names, (b) the trader already named a specific cohort, or (c) the top 5-7 are obviously wrong (e.g. wildly different revenue scale or sector). Fallback heuristic when Massive is unavailable: same GICS sub-industry + similar revenue scale (within 5x). Aim for 4-7 peers. **ADR caveat:** Massive related-companies often returns empty on ADRs (observed on NVO) — go straight to manual peer selection by GICS sub-industry without retrying.
+1a. **Detect ADR / dual-share class.** Check Massive `/v3/reference/tickers/<TICKER>` `type` field: if `ADRC` (American Depositary Receipt — Common), flag in the report's Section 1 narrative. ADR-specific cautions per `shared/data-fetch.md` "ADR-specific handling": (i) financials in home currency, derive FX rate; (ii) market cap from `weighted_shares_outstanding`, not UW `outstanding`; (iii) TTM EPS from `fundamental_breakdown` not summed quarters (split risk); (iv) related-companies likely empty.
 2. **Define a "closest peer"** for the head-to-head (Section 6). This is the name whose business model most closely mirrors the target — usually the highest-revenue overlap competitor.
 3. **Identify 1-2 turnaround comparables** for Section 5. These are NOT necessarily current peers — they're historical analogues where a similar name went through PE compression and re-rated (up or down). E.g., for LULU you used ANF + AEO (specialty retail PE-floor analogues), not Nike.
 4. **Verify save path exists:** `mkdir -p /Users/chenxi/projects/option-wizard/references/ticker/<TICKER>/`.
@@ -88,6 +89,14 @@ Did the multiple expand or contract from here?
 
 If you don't have 10-year history (newer IPO), say so explicitly — do
 not extrapolate.
+
+**Data source guidance:** Neither UW nor Massive ship a pre-computed historical PE percentile series. Three ways to populate this section, in priority order:
+
+1. **Self-computed PE series** (highest quality, expensive in tokens): pull Massive `/v2/aggs/ticker/<T>/range/1/month/<5-or-10-yr-ago>/<today>?adjusted=true` for monthly close, then align against UW `get_earnings_history` quarterly EPS to derive TTM PE per month. Compute percentile by sorting and taking position of today's value. Worth it for a deep report where the PE thesis matters; skip if PE history is tangential.
+
+2. **Cite a credible secondary source** with `CONSENSUS` tag — e.g., a Massive news article that quotes "trading at 10x P/E, well below 27x five-year average". This is what the NVO 2026-06-06 run did. Acceptable but less rigorous; flag the source explicitly.
+
+3. **Flag as `UNVERIFIED` and skip the table** — if neither path is feasible, write "Historical PE percentile — UNVERIFIED, data series not pulled this session" and remove the table rather than fill it with placeholders. Don't fake the numbers.
 
 ## Section 5 — Turnaround case studies
 
