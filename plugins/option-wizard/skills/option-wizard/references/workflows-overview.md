@@ -1,6 +1,6 @@
 # Workflows Overview
 
-Routing index for the 4 distinct workflows. Read this **first** when a
+Routing index for the 6 distinct workflows. Read this **first** when a
 trader request comes in — match the request to a workflow, then drill
 into the linked deep-reference file for the per-step detail.
 
@@ -14,7 +14,7 @@ into the linked deep-reference file for the per-step detail.
 - **Defined-risk only** (hard rule #1): refuse naked short calls /
   margin-leveraged short puts.
 - **Archive is opt-in** (SKILL.md §Reporting & archive): only write to
-  `references/ticker/private/` when the trader says "save / 存档".
+  `references/private/{ticker|market|review}/` when the trader says "save / 存档".
 
 ---
 
@@ -34,7 +34,7 @@ into the linked deep-reference file for the per-step detail.
 | 6 | L5 Catalyst | Next ER, OPEX, quad witching, sector binaries | UW company info + TV news | Trade expiry must precede ER by ≥7 days (12+ preferred) |
 | 7 | L6 Structure pick | (inputs above → regime × structure matrix) | computed | Run **4-signal bullish veto** (`strategies.md`); strikes anchored to put/call wall; 30-45 DTE; size = min(2-5% NLV, 25% available) |
 | 8 | L7 Preflight + YES/NO | Legs, mid, max loss/gain, BE, margin, P/L matrix ±5/10/20%, account check, UW regime check, liquidity, catalyst clock, bracket (TP 50% / SL 2×) | `scripts.ib_order::build_preflight` | Exactly one YES/NO; YES → submit + brackets |
-| 9 | L8 Archive (opt-in only) | All of above + decision + gaps | gitignored `references/ticker/private/` | Outcome/Lesson section left empty for audit |
+| 9 | L8 Archive (opt-in only) | All of above + decision + gaps | gitignored `references/private/ticker/{date}-{ticker}-{long|short|mixed}-{highlight}.md` | Outcome/Lesson section left empty for audit |
 
 ---
 
@@ -88,7 +88,7 @@ into the linked deep-reference file for the per-step detail.
 | 6 | **Worst-of basket** (if 2-name): `analyze_fcn_basket` runs MC for `p_ki_either`. Basket coupon must ≥ worst-single coupon × (1 + diversification premium); premium ≥ (1−ρ)·0.30·fair_worst_single. Below = PB pocketing diversification | `scripts.fair_coupon::joint_ki_prob_mc` |
 | 7 | **Verdict + counter-offer email**: any rung with FAIL → `build_counter_offer_email` auto-attaches (Chinese first, English second). WARN-only rung does not (trader chooses) | — |
 | 8 | **Decision tree**: (a) coupon ≥ 30% model fair **AND** first 5 checklist items all PASS/WARN (no FAIL) → take; (b) else **walk**, switch to 30-45 DTE listed short put / bull put spread where pricing is transparent | — |
-| 9 | Archive (opt-in only): `references/ticker/private/<slug>-YYYY-MM-DD-fcn-counter-offer.md` with PB original quote + ladder + verdict + sent email | gitignored |
+| 9 | Archive (opt-in only): `references/private/ticker/{date}-{ticker}-long-fcn-counter-offer.md` with PB original quote + ladder + verdict + sent email | gitignored |
 
 **FCN hard-ban conditions** (use listed options instead): IV rank <50, in-tenor ER / FDA / regulatory binary, need roll flexibility, want gamma scalp.
 
@@ -116,6 +116,82 @@ into the linked deep-reference file for the per-step detail.
 
 ---
 
+## Workflow 6 — 复盘 (weekly / monthly review of past calls + trades)
+
+**Trigger phrases:**
+- Chinese: `"复盘"`, `"本周复盘"`, `"本月复盘"`
+- English: `"weekly review"`, `"monthly review"`, `"review my recent calls"`
+
+**Scope (intentional narrow):** directional calls + vol regime calls +
+listed-options structure recommendations + actual stock/listed-option
+trades. **FCN / AQ / DQ are explicitly out of scope** — PB structured
+products audit separately through their own counter-offer / refusal
+workflows. Archive files tagged `structures: [fcn|aq|dq|accumulator|
+decumulator|eln]` are filtered at the extraction stage.
+
+**Cadence:** two separate workflow invocations.
+
+| Cadence | Window | Use case | Output emphasis |
+|---|---|---|---|
+| Weekly review | 7 calendar days back | Micro-feedback: did this week's calls hold up? What position changes happened? | Layer A per-call scorecard + Layer B trade log + Layer C advisory observations |
+| Monthly review | 30 calendar days back | Pattern detection: systematic miss on a call type / ticker / regime? | Everything above + Layer A pattern analysis (hit rate by call type / ticker / regime) + skill rule suggestions |
+
+**SKILL.md hard rule #9 — source separation (every 复盘 run):**
+
+| Layer | Source | Output |
+|---|---|---|
+| A | `references/private/{ticker,market,review}/**/*.md` (archive only, recursive) | Directional verdict, hit rate. Never inferred to imply a trade. |
+| B | **IB MCP + Futu CLI** (both brokers required) | Trade flow, execution markout, realized P&L. Only legit source. |
+| C | Trader / LLM judgment | Advisory observations linking A ↔ B. No algorithmic scorecard. |
+
+**Pipeline (5 steps):**
+
+1. **Archive scan (Layer A)** — recursively walk `references/private/{ticker,market,review}/**/*.md` for files
+   with `date` in window; skip PB-product files; classify each as
+   directional / vol_regime / structure call.
+2. **Call markout (Layer A)** — for each call, compute markout at fixed
+   horizons **T+1d / T+5d / T+10d / T+21d / T+45d**. Directional uses
+   `signed_dir × (spot_T / spot_0 − 1)`; vol regime uses `signed_dir ×
+   (iv_rank_T − iv_rank_0)`; structure uses delta-1 spot proxy (Phase
+   1) or BSM mark (Phase 2+). Aggregate via `aggregate_call_markout`.
+3. **Trade flow (Layer B) — BOTH brokers required.** Pull IB
+   (`get_account_trades`) + Futu (`portfolio-analyser` CLI), feed into
+   `parse_ib_trades` + `parse_futu_trades`. Compute `compute_trade_markout`
+   per fill (D1 excludes closes via `realized_pnl != 0`).
+   Aggregate via `aggregate_trade_markout`.
+4. **Cross-cut advisory (Layer C) — opt-in.** Trader (or LLM) supplies
+   judgment-only observations linking specific Layer A calls to Layer B
+   trades. **No automatic `followed × correct` quadrant.** Each
+   observation carries `layer_a_refs` + `layer_b_refs` + optional
+   `propose_action_item=True` flag.
+5. **Auto-emit action items + writebacks** — verdict block appended to
+   each source file's empty `## Outcome / Lesson` section
+   (idempotent). WRONG calls generate pitfall drafts in
+   `references/pitfalls/_drafts/` for trader review. Action items
+   (S/P/T/D groups) at END only, never mid-flow.
+
+**Verdict thresholds** (qualitative for now — quantify later when
+N ≥ 50 calls):
+
+- Directional: ±2% noise band at T+21d → CORRECT / NEUTRAL / WRONG
+- Vol regime: ±5 IV rank pts at T+10d
+- Structure: P/L sign at T+21d (no noise band — already normalized)
+
+**Routes to:**
+- `references/review-framework.md` — full design (3-layer architecture, v0.3)
+- `scripts/retrospective.py` — pure functions + CLI orchestrator
+  (`.venv/bin/python -m scripts.retrospective --window weekly|monthly`)
+  + `parse_ib_trades` / `parse_futu_trades` broker adapters
+- `tests/test_retrospective.py` — markout sign convention, scope filter,
+  broker parsers, writeback idempotency, source-separation regression guard
+
+**Out of scope (explicit):** FCN / AQ / DQ. These products' P/L
+decomposition (path-truncation on KO, doubling tail, observation
+cadence) doesn't fit the horizon-markout shape and their refusal
+verdicts have their own checklist accountability via Workflows 4 and 5.
+
+---
+
 ## Routing decision flowchart
 
 ```
@@ -132,6 +208,8 @@ Trader request
 ├─ "PB 给我报了 ... AQ / DQ" / "evaluate aq quote" / "evaluate dq quote" → Workflow 5
 │
 ├─ "SPX 大盘对冲" / "size spx hedge" → Workflow 2 (L0 trigger + L7 macro hedge)
+│
+├─ "复盘" / "weekly review" / "monthly review" → Workflow 6
 │
 └─ "<TICKER> close 还是 roll" / 21 DTE blocking → Workflow 3 stage 4 (Action items menu)
 ```

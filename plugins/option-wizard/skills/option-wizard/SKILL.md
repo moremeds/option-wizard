@@ -60,6 +60,19 @@ incantations.
 6. Bracket order defaults: take-profit at 50% of max gain, stop-loss at 2× credit received (100% of max loss for spreads). Per-order override allowed.
 7. **Freshness gate.** Every data point quoted in an analysis must be **≤ 1 trading day stale** (live or T-1 close). Older = **gap**, not signal — list under "What this analysis is missing" and do **not** extrapolate forward. Always check UW response timestamps (`price_data.date`, indicator series last date, chain `last_price.date`) before quoting any number; if stale, treat as gap and either re-pull from a fresh source or flag explicitly.
 8. **Ticker analysis structure is non-negotiable.** Every "分析 <TICKER>" / "evaluate <ticker>" response opens with a **Layer Coverage table** (template in `references/analysis-runbook.md`) declaring per-layer source + freshness + ✓/skipped status. Skipping is allowed only when the layer's data is unreachable; it must appear as `skipped` in the table AND under "What this analysis is missing" — never silently dropped. Following the full 8-layer runbook end-to-end is the structural baseline; the trader has explicitly flagged "miss or skip" as a recurring problem and the Layer Coverage table is the structural counter.
+9. **复盘 source separation (archive ≠ broker).** Every weekly / monthly review (`复盘` / `weekly review` / `monthly review` / `review my recent calls`) outputs **three independent layers**, sourced strictly:
+
+   - **Layer A — Analysis quality (archive only).** Source: `references/private/{ticker,market,review}/**/*.md` (recursively). Use: directional verdict (right / wrong / unknown) via markout, hit-rate aggregates, lessons for improving future analyses. Archive documents describe **proposed trades or analysis-only theses** — they are NOT trade records. Never infer "a trade happened" from archive presence.
+   - **Layer B — Trade flow (broker only, BOTH brokers required).** Sources: **IB MCP `get_account_trades` + Futu via `portfolio-analyser` CLI** (per `private/trader-profile.md`). Use: actual fills, execution markout, realized P&L, roll patterns, position deltas. **Only legitimate source for "what was actually done"** — never substitute archive titles (e.g., `qqq-...-short-put-tp-close.md`) as evidence of execution.
+   - **Layer C — Cross-cut (advisory, judgment-only).** Manual observations relating Layer A to Layer B (e.g., "6/04 bearish call → 6/05 才 hedge,lag 1 day"). Must be labeled **"judgment-only, not algorithmic"**. No automated `followed × correct` quadrant; no scorecard joining the two streams.
+
+   **Forbidden:**
+   - `reconcile_calls_with_trades` / `discipline_quadrant` style auto-join between archive and broker streams
+   - Inferring trade execution from archive frontmatter status field
+   - Using `qqq-...-tp-close.md`-style filenames as trade evidence
+   - Running 复盘 with only one broker pulled — both IB and Futu must be hit each time
+
+   See `references/review-framework.md` §"3-layer architecture" for the full pipeline and `scripts/retrospective.py` orchestrator.
 
 ## Triggers
 
@@ -79,6 +92,7 @@ Chinese:
 - "我账户里这些仓位有没有问题"
 - "SPX 大盘对冲"
 - "<TICKER> 现在该 close 还是 roll"
+- "复盘" / "本周复盘" / "本月复盘"
 
 English:
 - "negotiate fcn quote"
@@ -88,6 +102,7 @@ English:
 - "evaluate <ticker> for <structure>"
 - "size spx hedge"
 - "review positions"
+- "weekly review" / "monthly review" / "review my recent calls"
 
 ## When to read which file
 
@@ -114,8 +129,9 @@ points into specific layers without re-reading the whole runbook.
 | Pre-submission preflight + YES/NO gate | `references/execution.md`; `scripts.ib_order::build_preflight`. Hard rule #3 — must show legs + mid + max loss + max gain + breakeven + margin + P/L matrix (spot ±5/10/20%) + account verification + UW regime check + liquidity + catalyst clock before exactly one YES/NO question |
 | Honest gap reporting when a data source is unreachable | `references/analysis-runbook.md` §"Honest reporting of gaps" — list every missing layer under "What this analysis is missing" rather than fabricating signals |
 | Pattern match against a prior FCN deal | `references/ticker/orcl-2026-06-fcn.md` (public, anonymized) |
-| Pattern match against a prior personal trade / analysis | `references/ticker/private/*.md` — trader's local archive (gitignored). List the directory and pick by date / event / ticker |
+| Pattern match against a prior personal trade / analysis | `references/private/{ticker,market,review}/**/*.md` — trader's local archive (gitignored). Pick subdir by analysis type (`ticker/` single-name, `market/` macro/multi-ticker, `review/` book/weekly/monthly) then by `{date}-{ticker}-{long|short|mixed}-{highlight}.md` filename |
 | Capturing a new pitfall from a closed trade | `references/pitfalls/_template.md` → copy to `NN-slug.md`; add row to `references/pitfalls/README.md` (index currently empty — backfill from trade history is tracked as H1). Strip all account-specific numbers before promoting from `private/` |
+| Weekly / monthly review ("复盘" / "weekly review" / "review my recent calls") | `references/review-framework.md`; `scripts.retrospective::run_review` (pure functions) + `python -m scripts.retrospective --window weekly|monthly` (orchestrator CLI). **Hard rule #9 — 3 independent layers:** Layer A = analysis quality from archive only (markout T+1/5/10/21/45d, directional verdict, hit rate). Layer B = trade flow from **IB MCP + Futu CLI** (both brokers required; execution markout, realized P&L, roll patterns). Layer C = cross-cut advisory (judgment-only, no algorithmic scorecard). Action items at END (S/P/T/D). Auto-writeback of verdict to source `## Outcome / Lesson` section. Auto pitfall draft generation to `references/pitfalls/_drafts/`. **FCN / AQ / DQ are out of scope** — those audit separately. |
 
 ## Book-review output structure
 
@@ -136,7 +152,51 @@ Edge case — structurally dangerous position (naked short call discovered, unde
 
 ## Reporting & archive
 
-**Output the analysis to the screen first.** Do NOT auto-write to `private/` by default. The trader explicitly requests save with phrases like "保存这份" / "save this" / "archive" / "存档" — only then write to `references/ticker/private/<slug>-YYYY-MM-DD-<event>.md`.
+**Output the analysis to the screen first.** Do NOT auto-write to `private/` by default. The trader explicitly requests save with phrases like "保存这份" / "save this" / "archive" / "存档" — only then write to:
+
+```
+references/private/{ticker|market|review}/{date}-{ticker}-{long|short|mixed}-{highlight}.md
+```
+
+Subdir routing (active subtree):
+- `ticker/` — single-name analyses, structure evals, roll/close decisions
+- `market/` — macro calls, SPX/index hedge sizing, premarket snapshots, multi-ticker decisions
+- `review/` — book reviews, weekly/monthly retrospectives, dual-broker book audits
+
+Filename slots: `{date}` = YYYY-MM-DD, `{ticker}` = single symbol / broker tag (`futu`, `ib`) / scope (`macro`, `book`), `{long|short}` = directional thesis (做多 / 做空) or `mixed` when no single direction, `{highlight}` = short kebab-case event tag (`runbook-analysis`, `sell-put-eval`, `roll-preflight`, `tp-close`, `weekly-retrospective`).
+
+### Active vs cold storage (30-day TTL)
+
+Two-tier layout to prevent stale theses from contaminating future analysis:
+
+```
+references/private/
+  ticker/  market/  review/                      ← ACTIVE  (last ~30 days, in scope for default review)
+  archive/YYYY-MM/{ticker|market|review}/...     ← COLD    (frozen, skipped by default)
+```
+
+- **Default review** (`scripts.retrospective` weekly / monthly, `pattern-match` lookup): scans active subtree only. Cold `archive/` files are invisible.
+- **Opt-in scan**: pass `--include-archive` to `python -m scripts.retrospective …` for monthly / quarterly reviews that span back past the TTL.
+- **Migration**: `python -m scripts.archive_cold --apply` moves any file whose `archive_eligible_after` ≤ today into `archive/YYYY-MM/<subdir>/`. Run once at month-end (or whenever the active subtree feels too noisy).
+
+Why: pattern-match against prior analyses (`references/private/{ticker,market,review}/**/*.md` routing row) would otherwise pick up a 2-month-old thesis as if it were current. 30 days is long enough to cover a single ER cycle and the average position lifetime; older files survive in cold storage for audit but stay out of the default working set.
+
+**File format** (trade-skills frontmatter convention):
+```yaml
+---
+ticker: <SYMBOL or comma-list for macro>
+event: <one-line context>
+date: YYYY-MM-DD
+status: proposed | analysis-only | decision-pending | pending-<reason>
+result: profit | loss | breakeven | pending
+structures: [list]
+tags: [list]
+archive_eligible_after: YYYY-MM-DD   # optional — defaults to `date` + 30 days
+---
+```
+
+- `status` is **analysis intent only** per hard rule #9 (`proposed` / `analysis-only` / `decision-pending`) — never trade execution. Execution lives in the broker side (IB + Futu pull).
+- `archive_eligible_after` is the date on which this file becomes eligible for cold-storage migration. **Default = `date` + 30 days** (no need to set it explicitly). Set it later if the file is still load-bearing — e.g., when the analysis covers a position that doesn't expire until next quarter, set `archive_eligible_after: 2026-09-19` (post-expiry) so it stays in the active subtree through the position's life.
 
 Reports that the trader typically wants saved (but still requires explicit ask):
 
@@ -147,24 +207,11 @@ Reports that the trader typically wants saved (but still requires explicit ask):
 - Pre-flight + YES/NO order trace (regardless of YES, NO, or abort)
 - Roll / close decision on existing positions
 
-The `private/` subdirectory is **gitignored** at project root; it's the trader's personal trade journal containing NLV / positions / fills. The public `references/ticker/` tree only holds anonymized framework-teaching case studies (e.g., `orcl-2026-06-fcn.md`).
-
-**File format** (trade-skills frontmatter convention):
-```yaml
----
-ticker: <SYMBOL or comma-list for macro>
-event: <one-line context>
-date: YYYY-MM-DD
-status: open | closed | analysis-only | decision-pending | pending-<reason>
-result: profit | loss | breakeven | pending
-structures: [list]
-tags: [list]
----
-```
+The `references/private/` directory is **gitignored**; it's the trader's personal trade journal containing NLV / positions / fills. The public `references/ticker/` tree only holds anonymized framework-teaching case studies (e.g., `orcl-2026-06-fcn.md`). (Separately, `/private/` at project root holds `trader-profile.md` — also gitignored, but unrelated.)
 
 Body must capture: TL;DR, Data snapshot (point-in-time, with sources), Analysis, Decision + reasoning, Gaps in data, empty **Outcome / Lesson** section for audit fill-in.
 
-**Audit cadence**: trader (or skill on re-invocation against same ticker) revisits each `private/` file at its named checkpoint (next ER / expiry / 30d for macro) and fills in the outcome section. Lessons that generalize get promoted to `references/pitfalls/NN-slug.md` (account-stripped).
+**Audit cadence**: trader (or skill on re-invocation against same ticker) revisits each `references/private/{ticker,market,review}/**/*.md` file at its named checkpoint (next ER / expiry / 30d for macro) and fills in the outcome section. Lessons that generalize get promoted to `references/pitfalls/NN-slug.md` (account-stripped). After the outcome is filled and the position resolved, the file is eligible for cold-storage migration on its `archive_eligible_after` date.
 
 **Save is explicit, not default.** The trader prefers to review the screen output first and decide whether it's worth preserving. Surface a one-line "want me to save this?" hint at the very end of substantive reports if you think the artifact is worth keeping, but do not write the file until they say yes.
 
