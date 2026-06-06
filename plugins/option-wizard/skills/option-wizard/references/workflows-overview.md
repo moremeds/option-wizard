@@ -1,6 +1,6 @@
 # Workflows Overview
 
-Routing index for the 4 distinct workflows. Read this **first** when a
+Routing index for the 6 distinct workflows. Read this **first** when a
 trader request comes in — match the request to a workflow, then drill
 into the linked deep-reference file for the per-step detail.
 
@@ -116,6 +116,71 @@ into the linked deep-reference file for the per-step detail.
 
 ---
 
+## Workflow 6 — 复盘 (weekly / monthly review of past calls + trades)
+
+**Trigger phrases:**
+- Chinese: `"复盘"`, `"本周复盘"`, `"本月复盘"`
+- English: `"weekly review"`, `"monthly review"`, `"review my recent calls"`
+
+**Scope (intentional narrow):** directional calls + vol regime calls +
+listed-options structure recommendations + actual stock/listed-option
+trades. **FCN / AQ / DQ are explicitly out of scope** — PB structured
+products audit separately through their own counter-offer / refusal
+workflows. Archive files tagged `structures: [fcn|aq|dq|accumulator|
+decumulator|eln]` are filtered at the extraction stage.
+
+**Cadence:** two separate workflow invocations.
+
+| Cadence | Window | Use case | Output emphasis |
+|---|---|---|---|
+| Weekly review | 7 calendar days back | Micro-feedback: did this week's calls hold up? | Per-call scorecard + side-by-side markout + discipline 4-quadrant |
+| Monthly review | 30 calendar days back | Pattern detection: am I systematically wrong somewhere? | Everything above + pattern analysis (hit rate by call type / ticker / regime) + skill rule suggestions |
+
+**Pipeline (5 steps):**
+
+1. **Archive scan** — walk `references/ticker/private/*.md` for files
+   with `date` in window; skip PB-product files; classify each as
+   directional / vol_regime / structure call.
+2. **Markout computation** — for each call, compute markout at fixed
+   horizons **T+1d / T+5d / T+10d / T+21d / T+45d**. Directional uses
+   `signed_dir × (spot_T / spot_0 − 1)`; vol regime uses `signed_dir ×
+   (iv_rank_T − iv_rank_0)`; structure uses delta-1 spot proxy (Phase
+   1) or BSM mark (Phase 2+).
+3. **Trade markout** — for each IB execution within window, compute
+   normalized P/L markout at same horizons. Stock uses TV historical
+   spot directly; options use BSM with TV spot + held IV (Phase 1) or
+   IB historical chain (Phase 2) or macmini DB (Phase 3).
+4. **Side-by-side aggregation + discipline 4-quadrant** — average call
+   markout vs average trade markout per horizon; Δ diagnoses where
+   edge is being created vs leaked. Followed-vs-ignored × correct-vs-
+   wrong matrix flags discipline gaps.
+5. **Auto-emit action items + writebacks** — verdict block appended to
+   each source file's empty `## Outcome / Lesson` section
+   (idempotent). WRONG calls generate pitfall drafts in
+   `references/pitfalls/_drafts/` for trader review. Action items
+   (S/P/T/D groups) at END only, never mid-flow.
+
+**Verdict thresholds** (qualitative for now — quantify later when
+N ≥ 50 calls):
+
+- Directional: ±2% noise band at T+21d → CORRECT / NEUTRAL / WRONG
+- Vol regime: ±5 IV rank pts at T+10d
+- Structure: P/L sign at T+21d (no noise band — already normalized)
+
+**Routes to:**
+- `references/review-framework.md` — full design (8 sections)
+- `scripts/retrospective.py` — pure functions + CLI orchestrator
+  (`.venv/bin/python -m scripts.retrospective --window weekly|monthly`)
+- `tests/test_retrospective.py` — verifies markout sign convention,
+  scope filter, discipline classification, writeback idempotency
+
+**Out of scope (explicit):** FCN / AQ / DQ. These products' P/L
+decomposition (path-truncation on KO, doubling tail, observation
+cadence) doesn't fit the horizon-markout shape and their refusal
+verdicts have their own checklist accountability via Workflows 4 and 5.
+
+---
+
 ## Routing decision flowchart
 
 ```
@@ -132,6 +197,8 @@ Trader request
 ├─ "PB 给我报了 ... AQ / DQ" / "evaluate aq quote" / "evaluate dq quote" → Workflow 5
 │
 ├─ "SPX 大盘对冲" / "size spx hedge" → Workflow 2 (L0 trigger + L7 macro hedge)
+│
+├─ "复盘" / "weekly review" / "monthly review" → Workflow 6
 │
 └─ "<TICKER> close 还是 roll" / 21 DTE blocking → Workflow 3 stage 4 (Action items menu)
 ```

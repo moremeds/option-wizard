@@ -79,6 +79,7 @@ Chinese:
 - "我账户里这些仓位有没有问题"
 - "SPX 大盘对冲"
 - "<TICKER> 现在该 close 还是 roll"
+- "复盘" / "本周复盘" / "本月复盘"
 
 English:
 - "negotiate fcn quote"
@@ -88,6 +89,7 @@ English:
 - "evaluate <ticker> for <structure>"
 - "size spx hedge"
 - "review positions"
+- "weekly review" / "monthly review" / "review my recent calls"
 
 ## When to read which file
 
@@ -116,6 +118,7 @@ points into specific layers without re-reading the whole runbook.
 | Pattern match against a prior FCN deal | `references/ticker/orcl-2026-06-fcn.md` (public, anonymized) |
 | Pattern match against a prior personal trade / analysis | `references/ticker/private/*.md` — trader's local archive (gitignored). List the directory and pick by date / event / ticker |
 | Capturing a new pitfall from a closed trade | `references/pitfalls/_template.md` → copy to `NN-slug.md`; add row to `references/pitfalls/README.md` (index currently empty — backfill from trade history is tracked as H1). Strip all account-specific numbers before promoting from `private/` |
+| Weekly / monthly review ("复盘" / "weekly review" / "review my recent calls") | `references/review-framework.md`; `scripts.retrospective::run_review` (pure functions) + `python -m scripts.retrospective --window weekly|monthly` (orchestrator CLI). Markout (T+1/5/10/21/45d) on directional / vol regime / structure calls + actual trades. Side-by-side avg-call vs avg-trade markout. 4-quadrant discipline scorecard (followed/ignored × correct/wrong). Monthly adds pattern analysis. Action items at END (S/P/T/D). Auto-writeback of verdict to source Outcome / Lesson section. Auto pitfall draft generation to `references/pitfalls/_drafts/`. **FCN / AQ / DQ are out of scope** — those audit separately. |
 
 ## Book-review output structure
 
