@@ -5,7 +5,7 @@ description: >
   fact sheet (revenue / margins / FCF / balance sheet / capital returns)
   and synthesizes a valuation read. Two depth modes: --depth=quick (3-section
   brief, ~5 min, slots into option-wizard's ticker analysis as a fundamentals
-  layer) and --depth=deep (10-section LULU-style equity research report
+  layer) and --depth=deep (11-section LULU-style equity research report
   with peer matrix, historical PE percentile, turnaround case studies, EV
   scenario, MD+HTML+PDF export). Use when the trader asks about company
   quality, valuation re-rating, "why is the PE so low / high", "deep dive
@@ -44,7 +44,7 @@ sub-layer; deep mode is a standalone research report (LULU-style).
 |---|---|---|
 | "X 基本面怎么样" / "fundamentals on X" / no other qualifier | **quick** | Cheap default — 3 sections, no peer matrix. ~5 minutes. |
 | Mentioned as a sub-step of `分析 <TICKER>` flow | **quick** | Drops into the existing 8-layer runbook as a fundamentals layer; do not derail into deep dive. |
-| "深度研究 X" / "deep dive on X" / "全面分析 X" / "comprehensive" | **deep** | Full 10-section report with MD + HTML + PDF export. |
+| "深度研究 X" / "deep dive on X" / "全面分析 X" / "comprehensive" | **deep** | Full 11-section report with MD + HTML + PDF export. |
 | "X 为什么 PE 这么低" / "why is X PE so low / high" | **deep** | Re-rating questions need peer matrix + historical PE percentile + scenario analysis. |
 | "比较 X vs Y vs Z" with ≥ 3 peers | **deep** | Peer matrix only makes sense in deep mode. |
 | Activist / turnaround / CEO change context | **deep** | Catalyst-driven re-rating thesis needs case-study comparables. |

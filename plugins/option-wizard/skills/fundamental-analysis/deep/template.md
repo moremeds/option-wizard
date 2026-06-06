@@ -1,6 +1,6 @@
 # Deep-mode template
 
-10-section equity research report, modeled on the LULU report
+11-section equity research report (10 numbered + Section 5.5 core franchise), modeled on the LULU report
 (`/Users/chenxi/projects/option-wizard/references/ticker/LULU/LULU_Report_2026-06-06.md`).
 Generates 3 files: MD source + HTML (pandoc) + PDF (Chrome headless).
 
@@ -120,6 +120,68 @@ different, where the analogy breaks down>.
 
 The "where the analogy breaks down" part is mandatory. Don't sell the
 analog as a clean comp if it isn't.
+
+## Section 5.5 — 核心竞争力 / Core Franchise Analysis
+
+**Why this section exists separately from the peer matrix:** Section 3 compares everyone on the same financial yardstick (margin, FCF, PE). But the question that actually drives the long-term thesis is: **核心产品 / 业务线 在它自己的市场里能不能保住份额、TAM 还会不会扩张、竞品的产品力相对怎样**。Financials follow product reality with a 1-3 year lag. This section gets ahead of that lag.
+
+Structure: 5 subsections, each focused. ~1.5-2 pages of content. Where a peer doesn't directly compete in the target's core market (e.g., MRK to NVO in obesity), say so and skip — don't pad.
+
+### 5.5.A 核心产品 / 业务线 (Target)
+
+1-2 paragraphs identifying the franchise that drives the thesis. For each franchise:
+- Name + product list (brand names, mechanism if relevant)
+- Revenue % of total (most recent FY) — cite UW income statements
+- Growth contribution (last 3Y CAGR of this segment vs total company CAGR)
+- Profit % of total if disclosed (gross or operating)
+
+If the franchise breakdown isn't disclosed in UW (UW only shows total), pull from the 10-K via `Massive financials.source_filing_url` or WebSearch — cite explicitly.
+
+### 5.5.B 市场前景 / TAM Analysis
+
+| 维度 | 数值 | 来源 |
+|---|---|---|
+| Current TAM (today) | $X B | cite source |
+| Projected TAM (5Y out, e.g. 2030 or 2031) | $X B | analyst consensus / industry report |
+| Implied TAM CAGR | X% | computed |
+| Key TAM drivers (3-4 bullets) | ... | ... |
+| Risks to TAM (2-3 bullets) | ... | ... |
+
+TAM analysis must distinguish:
+- **Today's TAM** (validated by actual prescription / revenue data)
+- **Projected TAM** (analyst extrapolation — flag as CONSENSUS)
+- **Implied TAM** (what's priced into the stock — derive from valuation if possible)
+
+If today's TAM is < 50% of projected TAM, that's a "TAM expansion story" — the bull case lives or dies on the expansion rate, not on share. Note this explicitly.
+
+### 5.5.C 目标公司在此市场的定位
+
+3-4 paragraphs answering:
+- **Current market share** — cite a specific number with date, not "leading position"
+- **Share trajectory** — gaining / losing / flat over last 2-3 years, with the underlying reason (better product? supply constraint resolved? price war? regulatory tailwind?)
+- **Source of competitive advantage (moat)** — pick from: manufacturing scale, IP / patents (cite expiration year), brand / physician relationships, regulatory expertise, distribution, network effects, switching costs. Be specific: "NVO has 60% of global GLP-1 manufacturing capacity expanding to 100B-dose annual by 2027" beats "NVO has manufacturing advantage."
+- **Specific threats** — name the 2-3 most credible threats with timeframes. "LLY's Zepbound continues taking US share at ~5pp/year" beats "competition is increasing."
+
+### 5.5.D 对照公司在此市场的定位 (Peer-by-peer)
+
+A table — one row per peer, columns:
+
+| Peer | Their product in this market | Their share | Their advantage | Their next move (12-18 mo) | Direct or adjacent? |
+|---|---|---|---|---|---|
+
+Skip peers that don't compete in the target's core market. Note them as "adjacent — not material to this thesis" in a one-liner so the trader sees you considered them.
+
+Specifically for adjacent peers, the question is **"could they enter and disrupt within the thesis horizon?"** — if yes, surface as a tail risk; if no, dismiss.
+
+### 5.5.E 5-10 年 trajectory
+
+One paragraph synthesizing A-D into a forward-looking call:
+- Will the market itself grow (+X% CAGR over thesis horizon)?
+- Will the target gain, lose, or hold share?
+- What's the implied revenue path (today × growth × share = year-X revenue)?
+- What share / TAM combination would invalidate the bull case?
+
+Close with a one-line franchise verdict: e.g., **"核心 franchise 论点:GLP-1 TAM 从 $X B 到 $Y B (5 年 CAGR Z%);NVO 从 35% 守住 30% 份额 → 营收路径 $A B → $B B,implies EPS path C → D"**. This number plugs straight into Section 7 scenario analysis.
 
 ## Section 6 — Head-to-head vs closest peer
 
@@ -296,7 +358,7 @@ Do NOT auto-commit. The trader controls the git push.
 
 ## What this template forbids
 
-- **Fewer than 10 sections.** If you can't fill a section meaningfully, write it as `**Section X — <title> (limited data)**` with the gap explained. Do not silently drop sections.
+- **Fewer than 11 sections (10 numbered + Section 5.5).** If you can't fill a section meaningfully, write it as `**Section X — <title> (limited data)**` with the gap explained. Do not silently drop sections. Section 5.5 (core franchise) may be condensed but not skipped — if you can't analyze the franchise's market, the whole report is on shaky ground.
 - **Sections without numeric backing.** Every table must have at least one cited number. A table that's all `UNVERIFIED` should be deleted, not published with placeholders.
 - **Sell-side language.** Don't write "we believe", "we see", "the company appears poised to". Write subject-verb-object: "LULU's net margin is 14.2% [UW: get_income_statements]. Peer median is 7.5%."
 - **Conclusion before evidence.** The 牛/熊 case must follow the data tables, not lead them.
