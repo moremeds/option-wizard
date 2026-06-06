@@ -1,7 +1,7 @@
 # Deep-mode template
 
 11-section equity research report (10 numbered + Section 5.5 core franchise), modeled on the LULU report
-(`/Users/chenxi/projects/option-wizard/references/ticker/LULU/LULU_Report_2026-06-06.md`).
+(`/Users/chenxi/projects/option-wizard/plugins/option-wizard/skills/fundamental-analysis/references/ticker/LULU/LULU_Report_2026-06-06.md`).
 Generates 3 files: MD source + HTML (pandoc) + PDF (Chrome headless).
 
 Chinese narrative, English technical terms. Footnoted citations
@@ -16,7 +16,7 @@ Before writing a single section:
 1a. **Detect ADR / dual-share class.** Check Massive `/v3/reference/tickers/<TICKER>` `type` field: if `ADRC` (American Depositary Receipt — Common), flag in the report's Section 1 narrative. ADR-specific cautions per `shared/data-fetch.md` "ADR-specific handling": (i) financials in home currency, derive FX rate; (ii) market cap from `weighted_shares_outstanding`, not UW `outstanding`; (iii) TTM EPS from `fundamental_breakdown` not summed quarters (split risk); (iv) related-companies likely empty.
 2. **Define a "closest peer"** for the head-to-head (Section 6). This is the name whose business model most closely mirrors the target — usually the highest-revenue overlap competitor.
 3. **Identify 1-2 turnaround comparables** for Section 5. These are NOT necessarily current peers — they're historical analogues where a similar name went through PE compression and re-rated (up or down). E.g., for LULU you used ANF + AEO (specialty retail PE-floor analogues), not Nike.
-4. **Verify save path exists:** `mkdir -p /Users/chenxi/projects/option-wizard/references/ticker/<TICKER>/`.
+4. **Verify save path exists:** `mkdir -p /Users/chenxi/projects/option-wizard/plugins/option-wizard/skills/fundamental-analysis/references/ticker/<TICKER>/`.
 5. **Verify Chrome path:** `/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome` (see `[[pdf-generation-on-mac]]` memory). If missing, fall back to MD + HTML only and flag.
 
 ## Section 1 — Executive summary
@@ -308,7 +308,7 @@ End the report with a `## Sources` section per the template in
 
 ## File export (after the MD is written)
 
-Three files, all under `/Users/chenxi/projects/option-wizard/references/ticker/<TICKER>/`.
+Three files, all under `/Users/chenxi/projects/option-wizard/plugins/option-wizard/skills/fundamental-analysis/references/ticker/<TICKER>/`.
 Filename convention from `[[research-report-storage]]` memory:
 `<TICKER>_Report_<YYYY-MM-DD>.{md,html,pdf}`.
 
@@ -320,8 +320,8 @@ Use the Write tool. Already done if you got here.
 
 ```bash
 pandoc \
-  /Users/chenxi/projects/option-wizard/references/ticker/<TICKER>/<TICKER>_Report_<DATE>.md \
-  -o /Users/chenxi/projects/option-wizard/references/ticker/<TICKER>/<TICKER>_Report_<DATE>.html \
+  /Users/chenxi/projects/option-wizard/plugins/option-wizard/skills/fundamental-analysis/references/ticker/<TICKER>/<TICKER>_Report_<DATE>.md \
+  -o /Users/chenxi/projects/option-wizard/plugins/option-wizard/skills/fundamental-analysis/references/ticker/<TICKER>/<TICKER>_Report_<DATE>.html \
   --standalone \
   --metadata title="<TICKER> 基本面分析 — <DATE>"
 ```
@@ -335,8 +335,8 @@ first; pandoc rejects raw HTML on the CLI).
 ```bash
 /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
   --headless --disable-gpu --no-pdf-header-footer \
-  --print-to-pdf=/Users/chenxi/projects/option-wizard/references/ticker/<TICKER>/<TICKER>_Report_<DATE>.pdf \
-  "file:///Users/chenxi/projects/option-wizard/references/ticker/<TICKER>/<TICKER>_Report_<DATE>.html"
+  --print-to-pdf=/Users/chenxi/projects/option-wizard/plugins/option-wizard/skills/fundamental-analysis/references/ticker/<TICKER>/<TICKER>_Report_<DATE>.pdf \
+  "file:///Users/chenxi/projects/option-wizard/plugins/option-wizard/skills/fundamental-analysis/references/ticker/<TICKER>/<TICKER>_Report_<DATE>.html"
 ```
 
 Stderr noise (`DEPRECATED_ENDPOINT`, allocator warnings) is harmless —
@@ -349,9 +349,9 @@ End the chat response with:
 
 ```
 📂 文件
-- MD:   /Users/chenxi/projects/option-wizard/references/ticker/<TICKER>/<TICKER>_Report_<DATE>.md
-- HTML: /Users/chenxi/projects/option-wizard/references/ticker/<TICKER>/<TICKER>_Report_<DATE>.html
-- PDF:  /Users/chenxi/projects/option-wizard/references/ticker/<TICKER>/<TICKER>_Report_<DATE>.pdf
+- MD:   /Users/chenxi/projects/option-wizard/plugins/option-wizard/skills/fundamental-analysis/references/ticker/<TICKER>/<TICKER>_Report_<DATE>.md
+- HTML: /Users/chenxi/projects/option-wizard/plugins/option-wizard/skills/fundamental-analysis/references/ticker/<TICKER>/<TICKER>_Report_<DATE>.html
+- PDF:  /Users/chenxi/projects/option-wizard/plugins/option-wizard/skills/fundamental-analysis/references/ticker/<TICKER>/<TICKER>_Report_<DATE>.pdf
 ```
 
 Do NOT auto-commit. The trader controls the git push.
