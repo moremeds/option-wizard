@@ -21,6 +21,23 @@ The 复盘 framework answers both via **markout** — the standard
 execution-quality metric measuring P/L at horizon T after each
 decision, normalized so analyses and trades are directly comparable.
 
+## Source separation (SKILL.md hard rule #9)
+
+**Three independent layers, sourced strictly. Never cross-infer.**
+
+| Layer | Source | What it measures |
+|---|---|---|
+| **A — Analysis quality** | `references/ticker/private/*.md` (archive only) | Directional verdict on past analyses: was the call right? Hit rate by call type / ticker. **Archive describes a proposed trade or analysis-only thesis — never a trade record.** |
+| **B — Trade flow** | **IB MCP `get_account_trades` + Futu via `portfolio-analyser` CLI** — BOTH brokers, every review | Actual fills, execution markout, realized P&L, roll patterns. **Only legitimate source for "what was actually done."** |
+| **C — Cross-cut advisory** | Trader / LLM judgment | Manual observations linking A ↔ B. **Judgment-only — no algorithmic scorecard, no `followed × correct` quadrant.** |
+
+**Forbidden** (per hard rule #9):
+- Inferring execution from an archive filename like `qqq-...-tp-close.md` — that's analysis, not a trade
+- Auto-joining calls to trades by ticker + date proximity (the deleted `reconcile_calls_with_trades` / `discipline_quadrant`)
+- Running 复盘 with only IB pulled — Futu is required every time
+
+Layer A and Layer B aggregates are reported in **separate tables**, never side-by-side with a computed Δ. If the trader wants the "did execution capture the analysis edge?" question answered, that observation goes into Layer C as judgment, with explicit references back to the Layer A call and the Layer B trade — but stays advisory.
+
 ## What this is NOT
 
 **FCN / AQ / DQ are out of scope.** PB structured products live on a
@@ -43,8 +60,8 @@ post-mortems separately.
 
 | Workflow | Window | Use case | Output emphasis |
 |---|---|---|---|
-| **Weekly review** | 7 calendar days back from invocation date | Micro-feedback loop: did this week's calls hold up? Did I follow them? | Per-call scorecard + discipline 4-quadrant + side-by-side markout table. No pattern aggregation (sample too small). |
-| **Monthly review** | 30 calendar days back | Pattern detection: am I systematically wrong on a call type / ticker / regime? Where is execution leaking edge? | Everything from weekly + pattern analysis (hit rate by call type / ticker / regime) + action items proposing skill rule changes |
+| **Weekly review** | 7 calendar days back from invocation date | Micro-feedback loop: did this week's calls hold up? What position changes happened? | Layer A per-call scorecard + Layer B trade log + Layer C advisory observations. No pattern aggregation (sample too small). |
+| **Monthly review** | 30 calendar days back | Pattern detection: systematic miss on a call type / ticker / regime? Roll cadence / execution drift? | Everything from weekly + Layer A pattern analysis (hit rate by call type / ticker / regime) + action items proposing skill rule changes |
 
 CLI:
 
@@ -57,10 +74,10 @@ CLI:
 Default behavior writes verdicts back to source archive files and emits
 pitfall draft candidates. Flags opt out.
 
-## Layer 1 — Call extraction + markout
+## Layer A — Analysis quality (archive only)
 
 A "call" is one falsifiable claim extracted from an archived analysis.
-The framework recognizes three types.
+The framework recognizes three types. **Source is `references/ticker/private/*.md` exclusively** — archive presence never implies a trade happened.
 
 ### Three call types
 
@@ -189,10 +206,18 @@ quallitative-first is to be lenient enough to learn from the data, not
 to assert precision the sample size doesn't support. Tighten once data
 accumulates.
 
-## Layer 2 — Trade markout
+## Layer B — Trade flow (broker only: IB + Futu)
 
-For every actual fill within the window (IB executions + any secondary
-broker trades documented in `private/trader-profile.md`):
+**Both brokers required every review** (per `private/trader-profile.md`
+"Position-review scope"). Pull each independently, then call the
+matching parser:
+
+- **IB**: `mcp__claude_ai_Interactive_Brokers_IBKR__get_account_trades period=DAYS_7|DAYS_30` → `parse_ib_trades(response, window_start, window_end) → list[Trade]`
+- **Futu**: `cd ~/projects/portfolio-analyser && npx tsx src/cli.ts ft --range 1m` (writes JSON report under `reports/`) → `parse_futu_trades(report_json, window_start, window_end) → list[Trade]`
+
+Tag `trade_sources=["IB", "Futu"]` (or whichever subset succeeded) on the `ReviewReport`. If a broker pull fails or returns empty, surface that as a **data gap in Layer B's output**, never silently drop. The `cross_cut_advisory` is computed only against the brokers actually pulled.
+
+For every fill within the window:
 
 | Trade type | `entry_basis` | `mark_T` source | Normalization denominator |
 |---|---|---|---|
@@ -214,59 +239,61 @@ remaining horizons report N/A. Reports surface the % of marks that came
 from `chain` vs `model` so the trader knows how much to trust the
 markout curve.
 
-## Layer 3 — Discipline scorecard (4-quadrant)
+## Layer C — Cross-cut (advisory, judgment-only)
 
-For each call, the framework checks whether the trader executed a
-matching trade within **1-3 trading days** of the analysis date. A
-match requires:
+**No algorithmic scorecard. No `followed × correct` quadrant. No automated reconciliation.** Per hard rule #9, the framework refuses to auto-join archive (Layer A) and broker (Layer B) data — those are independent streams answering separate questions.
 
-- Same ticker
-- Same direction signal (long stock or long delta → matches bullish
-  call; short stock or short delta → matches bearish call)
-- For structure calls: structure type matches (CSP recommendation +
-  trader sold a put on same ticker within 3 days → match; CSP
-  recommendation + trader bought a call instead → no match)
+What lives here:
 
-| | Call CORRECT | Call WRONG |
+- Manual observations the trader (or LLM in advisory mode) wants to flag, each labeled **"judgment-only"** in output
+- Example: `"6/04 macro premarket bearish call → corresponding VIX hedge opened only on 6/05 after VIX 15→21 → execution lag of 1 trading day on hedge timing"`
+  - References Layer A: `macro-2026-06-04-premarket-snapshot.md`
+  - References Layer B: IB VIX AUG2026 20/30 call spread × 25 on 2026-06-05
+  - **Not scored, not aggregated** — just surfaced for trader review
+
+Schema (passed into `run_review(cross_cut_advisory=[...])`):
+
+```python
+[
+  {
+    "observation": "human-readable string",
+    "layer_a_refs": ["macro-2026-06-04-premarket-snapshot.md", ...],
+    "layer_b_refs": ["VIX AUG2026 20/30 call spread 2026-06-05", ...],
+    "propose_action_item": True,  # if True, surfaces as a T-item
+  },
+  ...
+]
+```
+
+**Why no scorecard?** A trade is its own decision — it doesn't "follow" or "ignore" an archive. The archive may have proposed something different from what was executed; the executed trade may have responded to fresh information not in the archive. Conflating the two streams produced false discipline metrics in early versions of this framework (see v0.3 changelog below).
+
+## Per-layer aggregate outputs
+
+Layer A and Layer B aggregates are reported **separately**:
+
+**Layer A — Avg call markout (archive only)**
+
+| Horizon | Avg call markout | n_calls |
 |---|---|---|
-| **Trader followed** | ✅ system + discipline both right | ⚠️ system wrong, not trader's fault |
-| **Trader ignored** | ❌ discipline gap — trader missed a right call | ✅ trader's instinct saved them |
+| T+1d | … | … |
+| T+5d | … | … |
+| T+10d | … | … |
+| T+21d | … | … |
+| T+45d | … | … |
 
-The framework reports the 4 counts + an `avg_markout` per quadrant.
-If `avg_markout(ignored_correct) > avg_markout(followed_correct)`, the
-trader is systematically filtering OUT the better calls — a discipline
-failure mode worth flagging in action items.
+**Layer B — Avg trade markout (broker only, IB + Futu)**
 
-## The key output — side-by-side markout table
+| Horizon | Avg trade markout | n_trades |
+|---|---|---|
+| T+1d | … | … |
+| T+5d | … | … |
+| T+10d | … | … |
+| T+21d | … | … |
+| T+45d | … | … |
 
-This is the single most important table in the 复盘 output. It tells
-the trader where edge is being created vs leaked:
+No "Δ (call − trade)" column — that comparison is judgment-only and lives in Layer C.
 
-| Horizon | Avg call markout | Avg trade markout | Δ (call − trade) | n_calls | n_trades |
-|---|---|---|---|---|---|
-| T+1d | … | … | … | … | … |
-| T+5d | … | … | … | … | … |
-| T+10d | … | … | … | … | … |
-| T+21d | … | … | … | … | … |
-| T+45d | … | … | … | … | … |
-
-Diagnostic rules:
-
-- **Δ > 0 systematically** → Analysis is right but trades aren't
-  capturing it. Look for: structure mismatch (analysis says CSP, trade
-  is a long call), timing lag (trader enters 5+ days after analysis,
-  missing the move), undersizing (correct structure but token-size
-  position).
-- **Δ < 0 systematically** → Trader's live decisions outperform the
-  case-prepared analysis. The analysis framework needs improvement;
-  trader instinct is the better signal. Investigate which analyses were
-  ignored profitably and capture the pattern.
-- **Both call and trade markout < 0** → System-wide problem. Either the
-  market regime has shifted away from the analytical model's
-  assumptions, or there's a structural error in the analysis pipeline.
-
-The same comparison runs per-ticker and per-regime in the monthly
-review so the diagnosis can point at where the edge / leak concentrates.
+Per-ticker / per-regime breakdowns run inside each layer independently (monthly only).
 
 ## Pattern analysis (monthly only)
 
@@ -414,6 +441,26 @@ surfaced four gaps. All four are now closed:
   unparseable date, missing `## Outcome / Lesson` section. Exits
   non-zero if any file has issues so it can be wired into CI.
 
+## Architectural refactor (v0.3 — source separation)
+
+The first real run (2026-06-06 weekly) exposed a deeper concept bug than the v0.2 D1-S2 fixes addressed: the framework was **conflating archive-derived "calls" with broker-derived "trades"** via `reconcile_calls_with_trades` and `discipline_quadrant`. SKILL.md hard rule #9 codifies the separation; the code now enforces it:
+
+- **Deleted** (cross-stream joins): `reconcile_calls_with_trades`, `discipline_quadrant`, `DisciplineQuadrant`, `_trade_matches_call`, `DISCIPLINE_MATCH_WINDOW_DAYS`, the unified `aggregate_markout(calls, trades)`.
+- **Split**: `aggregate_call_markout(call_markouts)` (Layer A only) + `aggregate_trade_markout(trade_markouts)` (Layer B only). Returned dicts contain no fields from the other layer.
+- **Added** (broker integration): `parse_ib_trades(ib_response, window_start, window_end)` + `parse_futu_trades(futu_report_json, window_start, window_end)`. Both required every review.
+- **Schema added**: `ReviewReport.trade_sources: list[str]` declares which brokers were pulled; `ReviewReport.cross_cut_advisory: list[dict]` carries Layer C judgment observations passed in by the caller.
+- **Reconciliation tests removed**: `test_trade_matches_call_*`, `test_discipline_quadrant_classifies_each_call`, `test_reconcile_calls_with_trades_builds_full_map`. Replaced with `test_source_separation_no_reconcile_or_discipline_symbols_exported` as a regression guard.
+
+**Frontmatter status semantics changed.** Archive `status:` field no longer carries broker-lifecycle meaning. The old `open | closed | executed` taxonomy implied trade state, which Layer A is forbidden to know. New values:
+
+| Status | Meaning |
+|---|---|
+| `proposed` | Archive proposes a specific trade structure. Whether it was actually executed lives in Layer B (IB / Futu) — not here. |
+| `analysis-only` | Diagnostic / thesis with no specific trade attached. Used for macro reads, vol-regime labels, pre-event setup notes. |
+| `decision-pending` | Archive captures partial work; trader hasn't picked structure yet. |
+
+Backward-compat: legacy archives with `status: open` / `closed` are read as `proposed` for extraction purposes. The framework does NOT use this field to infer Layer B information.
+
 ## Phase 1 limitations (current)
 
 1. **Option marks for trade markout** use BSM with TV historical spot +
@@ -424,44 +471,78 @@ surfaced four gaps. All four are now closed:
    Phase 2; macmini DB is Phase 3.
 2. **Directional verdict threshold** is fixed ±2% noise band, not
    vol-adjusted. Replace with ±0.5σ once N ≥ 50 directional calls.
-3. **Match window for discipline scorecard** is fixed at 3 trading
-   days. Some trader workflows (FCN counter-offer negotiation) have
-   longer natural gaps; 复盘 doesn't capture those (correctly — FCN is
-   out of scope).
-4. **Closing-trade pairing not yet implemented.** D1 excludes closes
+3. **Closing-trade pairing not yet implemented.** D1 excludes closes
    from markout but doesn't pair them with their opens to attribute
    realized P/L to the original entry decision. Phase 2 would walk the
    trade list, match BTC/STC fills against earlier STO/BTO fills by
    (symbol, strike, expiry, right), and score the OPEN trade with
    final realized P/L.
-5. **Open-trade detection is signal-based, not state-based.** D1 uses
+4. **Open-trade detection is signal-based, not state-based.** D1 uses
    `realized_pnl != 0` as the open/close signal. This works for IB
-   executions (the broker stamps realized P/L on closes) but may need
-   refinement for trades from other brokers where the signal differs.
+   executions (the broker stamps realized P/L on closes) and Futu
+   matched-pair closes (the parser attaches `pair.realizedPnl` to the
+   close leg). Unmatched Futu legs land with `realized_pnl=None`,
+   which is correct for opens but may miss isolated closes the matcher
+   didn't pair.
+5. **Layer C is purely opt-in.** The framework accepts `cross_cut_advisory`
+   as caller input but does NOT generate observations itself. The trader
+   (or LLM in advisory mode) writes them; the framework only renders +
+   exposes them through action items. This is intentional under hard
+   rule #9 — algorithmic A↔B joining is forbidden.
 
 ## How to invoke
 
-Pure functions (consistent with other skill modules — `python -c`):
+Pure functions (consistent with other skill modules — `python -c`). Both brokers must be pulled per hard rule #9:
 
 ```bash
 .venv/bin/python -c '
+import json
+from datetime import date
+from pathlib import Path
 from scripts.retrospective import (
-    extract_calls, compute_call_markout, compute_trade_markout,
-    aggregate_markout, render_report,
+    parse_ib_trades, parse_futu_trades,
+    run_review, render_report,
 )
-# orchestrator code here, with pre-fetched spot/iv/trade data
+
+# Layer B — pull BOTH brokers (caller responsibility).
+ib_response = {...}        # from MCP get_account_trades period=DAYS_7
+with open("/path/to/futu_report.json") as f:
+    futu_report = json.load(f)
+
+window_start, window_end = date(2026,5,30), date(2026,6,6)
+trades = (
+    parse_ib_trades(ib_response, window_start, window_end)
+    + parse_futu_trades(futu_report, window_start, window_end)
+)
+
+# Layer C — optional advisory observations (judgment-only).
+advisory = [
+    {"observation": "6/04 bearish call → hedge opened 6/05 = 1d lag",
+     "layer_a_refs": ["macro-2026-06-04-premarket-snapshot.md"],
+     "layer_b_refs": ["VIX AUG2026 20/30 call spread 2026-06-05"],
+     "propose_action_item": False},
+]
+
+report = run_review(
+    window="weekly", today=window_end,
+    archive_dir=Path(".../private"),
+    spot_history={...}, iv_rank_history={...},
+    trades=trades, trade_sources=["IB", "Futu"],
+    cross_cut_advisory=advisory,
+    drafts_dir=Path(".../pitfalls/_drafts"),
+)
+print(render_report(report))
 '
 ```
 
-Orchestrator CLI (convenience entrypoint that fetches data via existing
-`_clients/` and runs the full pipeline):
+Orchestrator CLI (Phase 1 scaffold — data fetchers still need to be wired in by the trader):
 
 ```bash
 # Weekly review, write back verdicts to archive Outcome sections, emit pitfall drafts
 .venv/bin/python -m scripts.retrospective --window weekly
 
-# Monthly review with pattern analysis, no email
-.venv/bin/python -m scripts.retrospective --window monthly --no-email
+# Monthly review with pattern analysis
+.venv/bin/python -m scripts.retrospective --window monthly
 
 # Exploratory run — no archive edits, no drafts
 .venv/bin/python -m scripts.retrospective --window monthly --no-writeback --no-pitfall-drafts

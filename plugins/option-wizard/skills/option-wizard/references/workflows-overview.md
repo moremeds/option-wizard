@@ -133,27 +133,37 @@ decumulator|eln]` are filtered at the extraction stage.
 
 | Cadence | Window | Use case | Output emphasis |
 |---|---|---|---|
-| Weekly review | 7 calendar days back | Micro-feedback: did this week's calls hold up? | Per-call scorecard + side-by-side markout + discipline 4-quadrant |
-| Monthly review | 30 calendar days back | Pattern detection: am I systematically wrong somewhere? | Everything above + pattern analysis (hit rate by call type / ticker / regime) + skill rule suggestions |
+| Weekly review | 7 calendar days back | Micro-feedback: did this week's calls hold up? What position changes happened? | Layer A per-call scorecard + Layer B trade log + Layer C advisory observations |
+| Monthly review | 30 calendar days back | Pattern detection: systematic miss on a call type / ticker / regime? | Everything above + Layer A pattern analysis (hit rate by call type / ticker / regime) + skill rule suggestions |
+
+**SKILL.md hard rule #9 — source separation (every 复盘 run):**
+
+| Layer | Source | Output |
+|---|---|---|
+| A | `references/ticker/private/*.md` (archive only) | Directional verdict, hit rate. Never inferred to imply a trade. |
+| B | **IB MCP + Futu CLI** (both brokers required) | Trade flow, execution markout, realized P&L. Only legit source. |
+| C | Trader / LLM judgment | Advisory observations linking A ↔ B. No algorithmic scorecard. |
 
 **Pipeline (5 steps):**
 
-1. **Archive scan** — walk `references/ticker/private/*.md` for files
+1. **Archive scan (Layer A)** — walk `references/ticker/private/*.md` for files
    with `date` in window; skip PB-product files; classify each as
    directional / vol_regime / structure call.
-2. **Markout computation** — for each call, compute markout at fixed
+2. **Call markout (Layer A)** — for each call, compute markout at fixed
    horizons **T+1d / T+5d / T+10d / T+21d / T+45d**. Directional uses
    `signed_dir × (spot_T / spot_0 − 1)`; vol regime uses `signed_dir ×
    (iv_rank_T − iv_rank_0)`; structure uses delta-1 spot proxy (Phase
-   1) or BSM mark (Phase 2+).
-3. **Trade markout** — for each IB execution within window, compute
-   normalized P/L markout at same horizons. Stock uses TV historical
-   spot directly; options use BSM with TV spot + held IV (Phase 1) or
-   IB historical chain (Phase 2) or macmini DB (Phase 3).
-4. **Side-by-side aggregation + discipline 4-quadrant** — average call
-   markout vs average trade markout per horizon; Δ diagnoses where
-   edge is being created vs leaked. Followed-vs-ignored × correct-vs-
-   wrong matrix flags discipline gaps.
+   1) or BSM mark (Phase 2+). Aggregate via `aggregate_call_markout`.
+3. **Trade flow (Layer B) — BOTH brokers required.** Pull IB
+   (`get_account_trades`) + Futu (`portfolio-analyser` CLI), feed into
+   `parse_ib_trades` + `parse_futu_trades`. Compute `compute_trade_markout`
+   per fill (D1 excludes closes via `realized_pnl != 0`).
+   Aggregate via `aggregate_trade_markout`.
+4. **Cross-cut advisory (Layer C) — opt-in.** Trader (or LLM) supplies
+   judgment-only observations linking specific Layer A calls to Layer B
+   trades. **No automatic `followed × correct` quadrant.** Each
+   observation carries `layer_a_refs` + `layer_b_refs` + optional
+   `propose_action_item=True` flag.
 5. **Auto-emit action items + writebacks** — verdict block appended to
    each source file's empty `## Outcome / Lesson` section
    (idempotent). WRONG calls generate pitfall drafts in
@@ -168,11 +178,12 @@ N ≥ 50 calls):
 - Structure: P/L sign at T+21d (no noise band — already normalized)
 
 **Routes to:**
-- `references/review-framework.md` — full design (8 sections)
+- `references/review-framework.md` — full design (3-layer architecture, v0.3)
 - `scripts/retrospective.py` — pure functions + CLI orchestrator
   (`.venv/bin/python -m scripts.retrospective --window weekly|monthly`)
-- `tests/test_retrospective.py` — verifies markout sign convention,
-  scope filter, discipline classification, writeback idempotency
+  + `parse_ib_trades` / `parse_futu_trades` broker adapters
+- `tests/test_retrospective.py` — markout sign convention, scope filter,
+  broker parsers, writeback idempotency, source-separation regression guard
 
 **Out of scope (explicit):** FCN / AQ / DQ. These products' P/L
 decomposition (path-truncation on KO, doubling tail, observation

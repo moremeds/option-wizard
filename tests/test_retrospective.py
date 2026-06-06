@@ -1,13 +1,16 @@
 """Tests for the 复盘 (review) framework — see scripts/retrospective.py.
 
-Covers the pure-function core: frontmatter parsing, scope filter, call
-extraction, markout computation (directional / vol regime / structure),
-trade markout, discipline reconciliation, aggregate side-by-side table,
-pattern analysis, action item generation, pitfall draft idempotency,
+Covers the pure-function core under hard rule #9 source separation:
+frontmatter parsing, scope filter, call extraction, markout
+(directional / vol regime / structure), trade markout, per-layer
+aggregates (Layer A = call-only, Layer B = trade-only), pattern
+analysis, action item generation, pitfall draft idempotency,
 Outcome / Lesson writeback idempotency.
 
-Live data fetchers (TV historical, IB executions, UW IV rank history)
-are NOT tested here — they're CLI orchestrator concerns.
+Live data fetchers (TV historical, IB executions, Futu CLI, UW IV
+rank history) are NOT tested here — they're CLI orchestrator concerns.
+Cross-stream join functions were removed in the source-separation
+refactor; their tests are gone.
 """
 
 from __future__ import annotations
@@ -24,17 +27,15 @@ from scripts.retrospective import (
     Trade,
     _horizon_date,
     _is_in_scope,
-    _trade_matches_call,
-    aggregate_markout,
+    aggregate_call_markout,
+    aggregate_trade_markout,
     compute_call_markout,
     compute_trade_markout,
     detect_pattern_anomalies,
-    discipline_quadrant,
     extract_calls_from_archive,
     generate_action_items,
     generate_pitfall_drafts,
     parse_archive_frontmatter,
-    reconcile_calls_with_trades,
     run_review,
     validate_archive_dir,
     write_back_outcome,
@@ -430,99 +431,11 @@ def test_option_trade_markout_short_put_falls_with_spot_rise():
     assert tm.horizons[21] is not None and tm.horizons[21] > 0
 
 
-# ----- Reconcile / discipline -----
+# ----- Per-layer aggregate (Layer A / Layer B, never mixed) -----
 
 
-def test_trade_matches_call_when_direction_aligns():
-    call = Call(
-        ticker="GOOGL",
-        analysis_date=date(2026, 5, 1),
-        call_type="directional",
-        direction=+1,
-        structure=None,
-        archive_path=Path("g.md"),
-        notes="",
-    )
-    long_call_trade = Trade(
-        ticker="GOOGL",
-        trade_date=date(2026, 5, 3),  # 2 days after — inside window
-        side="BUY",
-        quantity=1,
-        fill_price=5.0,
-        contract_type="OPT",
-        option_meta={"right": "C", "strike": 180.0, "expiry_iso": "2026-06-15"},
-    )
-    assert _trade_matches_call(call, long_call_trade)
-
-
-def test_trade_doesnt_match_when_wrong_direction():
-    call = Call(
-        ticker="GOOGL",
-        analysis_date=date(2026, 5, 1),
-        call_type="directional",
-        direction=+1,
-        structure=None,
-        archive_path=Path("g.md"),
-        notes="",
-    )
-    long_put_trade = Trade(
-        ticker="GOOGL",
-        trade_date=date(2026, 5, 2),
-        side="BUY",
-        quantity=1,
-        fill_price=5.0,
-        contract_type="OPT",
-        option_meta={"right": "P", "strike": 170.0, "expiry_iso": "2026-06-15"},
-    )
-    assert not _trade_matches_call(call, long_put_trade)
-
-
-def test_trade_doesnt_match_outside_window():
-    call = Call(
-        ticker="GOOGL",
-        analysis_date=date(2026, 5, 1),
-        call_type="directional",
-        direction=+1,
-        structure=None,
-        archive_path=Path("g.md"),
-        notes="",
-    )
-    trade = Trade(
-        ticker="GOOGL",
-        trade_date=date(2026, 5, 10),  # 9 days later — outside 3-day window
-        side="BUY",
-        quantity=100,
-        fill_price=175.0,
-        contract_type="STK",
-        option_meta=None,
-    )
-    assert not _trade_matches_call(call, trade)
-
-
-def test_discipline_quadrant_classifies_each_call():
-    base = date(2026, 5, 1)
-    spot = {
-        "X": {base: 100.0, _horizon_date(base, 21): 110.0},  # bullish correct
-        "Y": {base: 100.0, _horizon_date(base, 21): 90.0},  # bullish wrong
-    }
-    c_xx = Call("X", base, "directional", +1, None, Path("x.md"), "")
-    c_yy = Call("Y", base, "directional", +1, None, Path("y.md"), "")
-    cms = [
-        compute_call_markout(c_xx, spot_history=spot),
-        compute_call_markout(c_yy, spot_history=spot),
-    ]
-    followed = {c_xx: True, c_yy: False}  # followed correct X, ignored wrong Y
-    q = discipline_quadrant(cms, followed)
-    assert len(q.followed_correct) == 1
-    assert len(q.ignored_wrong) == 1
-    assert len(q.followed_wrong) == 0
-    assert len(q.ignored_correct) == 0
-
-
-# ----- Aggregate markout -----
-
-
-def test_aggregate_markout_excludes_iv_rank_calls():
+def test_aggregate_call_markout_excludes_iv_rank_units():
+    """Layer A: mixes raw_pct + normalized_pnl, never iv_rank_pts."""
     base = date(2026, 5, 1)
     spot = {"X": {base: 100.0, _horizon_date(base, 21): 110.0}}
     iv = {"X": {base: 75.0, _horizon_date(base, 21): 50.0}}
@@ -532,10 +445,22 @@ def test_aggregate_markout_excludes_iv_rank_calls():
         compute_call_markout(c_dir, spot_history=spot),
         compute_call_markout(c_vol, spot_history=spot, iv_rank_history=iv),
     ]
-    agg = aggregate_markout(cms, [])
-    # Only directional contributes to T+21 average (vol_regime in iv_rank_pts units).
+    agg = aggregate_call_markout(cms)
     assert agg[21]["n_calls"] == 1
     assert agg[21]["avg_call_markout"] == pytest.approx(0.10)
+    assert "avg_trade_markout" not in agg[21]  # source separation: no trade fields
+
+
+def test_aggregate_trade_markout_is_pure_layer_b():
+    """Layer B: aggregates trade markouts only, no call fields."""
+    base = date(2026, 5, 1)
+    spot = {"X": {base: 100.0, _horizon_date(base, 1): 102.0}}
+    trade = Trade("X", base, "BUY", 100, 100.0, "STK", None)
+    tm = compute_trade_markout(trade, spot_history=spot)
+    agg = aggregate_trade_markout([tm])
+    assert agg[1]["n_trades"] == 1
+    assert agg[1]["avg_trade_markout"] == pytest.approx(0.02)
+    assert "avg_call_markout" not in agg[1]  # source separation: no call fields
 
 
 # ----- Pattern analysis (monthly) -----
@@ -617,6 +542,7 @@ def test_action_items_proposes_skill_rule_for_low_hit_rate_ticker(tmp_path: Path
         spot_history=spot,
         iv_rank_history=None,
         trades=[],
+        trade_sources=[],
         drafts_dir=drafts_dir,
         write_back=False,
         generate_drafts=True,
@@ -736,6 +662,7 @@ def test_run_review_end_to_end_smoke(tmp_path: Path):
         spot_history=spot,
         iv_rank_history=None,
         trades=trades,
+        trade_sources=["IB", "Futu"],
         option_iv={"GOOGL": 0.30},
         drafts_dir=tmp_path / "drafts",
         write_back=False,  # don't mutate fixture file content beyond appending
@@ -750,16 +677,22 @@ def test_run_review_end_to_end_smoke(tmp_path: Path):
         spot_history=spot,
         iv_rank_history=None,
         trades=trades,
+        trade_sources=["IB", "Futu"],
         option_iv={"GOOGL": 0.30},
         drafts_dir=tmp_path / "drafts",
         write_back=False,
         generate_drafts=False,
     )
+    # Layer A (archive): one call, verdict CORRECT.
     assert len(report_m.calls) == 1
     assert report_m.calls[0].verdict == "CORRECT"
+    # Layer B (broker): one trade. NO scorecard joining the two layers (hard rule #9).
     assert len(report_m.trades) == 1
-    # The trade was on the same direction → followed_correct.
-    assert len(report_m.discipline.followed_correct) == 1
+    assert report_m.trade_sources == ["IB", "Futu"]
+    assert report_m.cross_cut_advisory == []  # no advisory passed in
+    # Per-layer aggregates exist as independent dicts.
+    assert "avg_call_markout" in report_m.call_aggregate[21]
+    assert "avg_trade_markout" in report_m.trade_aggregate[21]
 
 
 # ----- Horizon date helper -----
@@ -772,19 +705,163 @@ def test_horizon_date_uses_5_per_week_proxy():
     assert _horizon_date(base, 45) == base + timedelta(days=63)
 
 
-# ----- Reconcile mapping -----
+# ----- Broker trade parsers (Layer B sources) -----
 
 
-def test_reconcile_calls_with_trades_builds_full_map():
-    base = date(2026, 5, 1)
-    c1 = Call("X", base, "directional", +1, None, Path("x.md"), "")
-    c2 = Call("Y", base, "directional", -1, None, Path("y.md"), "")
-    trades = [
-        Trade("X", base + timedelta(days=2), "BUY", 100, 100.0, "STK", None),
-    ]
-    out = reconcile_calls_with_trades([c1, c2], trades)
-    assert out[c1] is True
-    assert out[c2] is False
+def test_parse_ib_trades_window_and_realized_pnl():
+    from scripts.retrospective import parse_ib_trades
+
+    resp = {
+        "trades": [
+            {
+                "symbol": "QQQ",
+                "sec_type": "OPT",
+                "side": "SELL",
+                "size": 1,
+                "price": 177.11,
+                "trade_time": "2026-06-03T14:14:16Z",
+                "realized_pnl": 10226.53,
+            },
+            {
+                "symbol": "QQQ",
+                "sec_type": "OPT",
+                "side": "BUY",
+                "size": 1,
+                "price": 72.67,
+                "trade_time": "2026-06-05T14:46:19Z",
+                "realized_pnl": 0,  # opening trade — should map to None
+            },
+            {
+                "symbol": "QQQ",
+                "sec_type": "OPT",
+                "side": "SELL",
+                "size": 1,
+                "price": 9.09,
+                "trade_time": "2026-05-22T17:34:11Z",  # outside window
+                "realized_pnl": 0,
+            },
+        ]
+    }
+    out = parse_ib_trades(resp, date(2026, 5, 30), date(2026, 6, 6))
+    assert len(out) == 2
+    closer = next(t for t in out if t.trade_date == date(2026, 6, 3))
+    opener = next(t for t in out if t.trade_date == date(2026, 6, 5))
+    assert closer.realized_pnl == pytest.approx(10226.53)
+    assert opener.realized_pnl is None  # zero realized_pnl normalized to None
+
+
+def test_parse_futu_trades_matched_pair_attaches_realized_to_close_only():
+    from scripts.retrospective import parse_futu_trades
+
+    report = {
+        "trades": {
+            "matchedTrades": [
+                {
+                    "openTrade": {
+                        "symbol": "FCX",
+                        "instrumentType": "option",
+                        "side": "buy",
+                        "quantity": 6,
+                        "price": 6.85,
+                        "timestamp": "2026-06-01T15:44:26.048Z",
+                        "optionDetails": {
+                            "underlying": "FCX",
+                            "expiry": "2026-09-18",
+                            "strike": 70,
+                            "putCall": "call",
+                        },
+                    },
+                    "closeTrade": {
+                        "symbol": "FCX",
+                        "instrumentType": "option",
+                        "side": "sell",
+                        "quantity": 1,
+                        "price": 9.4,
+                        "timestamp": "2026-06-04T14:23:02.164Z",
+                        "optionDetails": {
+                            "underlying": "FCX",
+                            "expiry": "2026-09-18",
+                            "strike": 70,
+                            "putCall": "call",
+                        },
+                    },
+                    "realizedPnl": 255.0,
+                }
+            ],
+            "unmatchedTrades": [
+                {
+                    "symbol": "MU",
+                    "instrumentType": "option",
+                    "side": "buy",
+                    "quantity": 2,
+                    "price": 4.27,
+                    "timestamp": "2026-06-04T14:21:06.458Z",
+                    "optionDetails": {
+                        "underlying": "MU",
+                        "expiry": "2026-06-12",
+                        "strike": 750,
+                        "putCall": "put",
+                    },
+                }
+            ],
+        }
+    }
+    out = parse_futu_trades(report, date(2026, 5, 30), date(2026, 6, 6))
+    assert len(out) == 3
+    open_leg = next(t for t in out if t.ticker == "FCX" and t.side == "BUY")
+    close_leg = next(t for t in out if t.ticker == "FCX" and t.side == "SELL")
+    unmatched = next(t for t in out if t.ticker == "MU")
+    # Source separation invariant: realizedPnl lives on the CLOSE leg only.
+    assert open_leg.realized_pnl is None
+    assert close_leg.realized_pnl == pytest.approx(255.0)
+    assert unmatched.realized_pnl is None
+    # Option metadata propagated.
+    assert close_leg.option_meta["right"] == "C"
+    assert close_leg.option_meta["strike"] == 70.0
+    assert unmatched.option_meta["right"] == "P"
+
+
+def test_parse_futu_trades_filters_window():
+    from scripts.retrospective import parse_futu_trades
+
+    report = {
+        "trades": {
+            "matchedTrades": [],
+            "unmatchedTrades": [
+                {
+                    "symbol": "X",
+                    "instrumentType": "stock",
+                    "side": "buy",
+                    "quantity": 10,
+                    "price": 100.0,
+                    "timestamp": "2026-05-15T15:00:00Z",  # outside window
+                }
+            ],
+        }
+    }
+    out = parse_futu_trades(report, date(2026, 5, 30), date(2026, 6, 6))
+    assert out == []
+
+
+# ----- Hard rule #9: source separation invariants -----
+
+
+def test_source_separation_no_reconcile_or_discipline_symbols_exported():
+    """Regression guard for hard rule #9: cross-stream join API must stay deleted."""
+    import scripts.retrospective as r
+
+    for name in (
+        "reconcile_calls_with_trades",
+        "discipline_quadrant",
+        "DisciplineQuadrant",
+        "_trade_matches_call",
+        "DISCIPLINE_MATCH_WINDOW_DAYS",
+        "aggregate_markout",  # split into call/trade specific
+    ):
+        assert not hasattr(r, name), (
+            f"{name} must remain removed per SKILL.md hard rule #9 "
+            "(archive ≠ broker source separation)"
+        )
 
 
 # ----- D1: closing-trade exclusion -----

@@ -50,9 +50,6 @@ DEFAULT_DIRECTIONAL_VERDICT_HORIZON = 21
 DEFAULT_VOL_REGIME_VERDICT_HORIZON = 10
 DEFAULT_STRUCTURE_VERDICT_HORIZON = 21
 
-DISCIPLINE_MATCH_WINDOW_DAYS = 3
-"""Trading days after analysis_date in which a matching trade counts as 'followed'."""
-
 # FCN / AQ / DQ markers in frontmatter — used to filter out of scope.
 OUT_OF_SCOPE_STRUCTURE_TAGS: frozenset[str] = frozenset(
     {"fcn", "aq", "dq", "accumulator", "decumulator", "eln"}
@@ -173,31 +170,30 @@ class TradeMarkout:
 
 
 @dataclass
-class DisciplineQuadrant:
-    followed_correct: list[CallMarkout] = field(default_factory=list)
-    followed_wrong: list[CallMarkout] = field(default_factory=list)
-    ignored_correct: list[CallMarkout] = field(default_factory=list)
-    ignored_wrong: list[CallMarkout] = field(default_factory=list)
-
-    def counts(self) -> dict[str, int]:
-        return {
-            "followed_correct": len(self.followed_correct),
-            "followed_wrong": len(self.followed_wrong),
-            "ignored_correct": len(self.ignored_correct),
-            "ignored_wrong": len(self.ignored_wrong),
-        }
-
-
-@dataclass
 class ReviewReport:
+    """Three independent layers per SKILL.md hard rule #9 (复盘 source separation).
+
+    - Layer A (archive only): calls + call_aggregate. Directional verdict.
+    - Layer B (broker only): trades + trade_aggregate. Execution markout.
+    - Layer C (advisory): cross_cut_advisory. Judgment-only, no scorecard.
+
+    Never cross-infer: archive presence ≠ trade evidence; trades don't follow calls.
+    """
+
     window: Literal["weekly", "monthly"]
     window_start: date
     window_end: date
     archive_dir: Path
+    # Layer A — analysis quality (archive)
     calls: list[CallMarkout]
+    call_aggregate: dict[int, dict[str, Any]]
+    # Layer B — trade flow (broker, IB + Futu)
     trades: list[TradeMarkout]
-    discipline: DisciplineQuadrant
-    aggregate_markout: dict[int, dict[str, Any]]
+    trade_aggregate: dict[int, dict[str, Any]]
+    trade_sources: list[str]  # which brokers were pulled (e.g., ["IB", "Futu"])
+    # Layer C — cross-cut advisory (judgment-only)
+    cross_cut_advisory: list[dict[str, str]]
+    # Misc
     pattern_analysis: dict[str, Any] | None  # monthly only
     action_items: list[dict[str, str]]
     pitfall_candidates: list[dict[str, Any]]
@@ -722,45 +718,7 @@ def compute_trade_markout(
 # --- Reconcile calls with trades ------------------------------------
 
 
-def _trade_matches_call(call: Call, trade: Trade) -> bool:
-    if call.ticker != trade.ticker:
-        return False
-    gap_days = (trade.trade_date - call.analysis_date).days
-    if not (0 <= gap_days <= DISCIPLINE_MATCH_WINDOW_DAYS):
-        return False
-    # For directional / structure: trade direction must align with call direction.
-    if call.direction == 0:
-        return True  # range call — any trade in the window counts as engagement
-    if trade.contract_type == "STK":
-        trade_sign = 1 if trade.side == "BUY" else -1
-        return trade_sign == call.direction
-    # OPT: long_call / short_put → +1; long_put / short_call → -1
-    meta = trade.option_meta or {}
-    right = str(meta.get("right", "C")).upper()
-    if trade.side == "BUY" and right == "C":
-        trade_sign = +1
-    elif trade.side == "SELL" and right == "P":
-        trade_sign = +1
-    elif trade.side == "BUY" and right == "P":
-        trade_sign = -1
-    elif trade.side == "SELL" and right == "C":
-        trade_sign = -1
-    else:
-        trade_sign = 0
-    return trade_sign == call.direction
-
-
-def reconcile_calls_with_trades(
-    calls: list[Call], trades: list[Trade]
-) -> dict[Call, bool]:
-    """Return {Call: followed_bool}."""
-    out: dict[Call, bool] = {}
-    for call in calls:
-        out[call] = any(_trade_matches_call(call, t) for t in trades)
-    return out
-
-
-# --- Aggregate markout (the central table) --------------------------
+# --- Aggregate markout (per-layer, source-separated) ----------------
 
 
 def _mean(values: list[float]) -> float | None:
@@ -770,55 +728,42 @@ def _mean(values: list[float]) -> float | None:
     return sum(vs) / len(vs)
 
 
-def aggregate_markout(
-    call_markouts: list[CallMarkout], trade_markouts: list[TradeMarkout]
+def aggregate_call_markout(
+    call_markouts: list[CallMarkout],
 ) -> dict[int, dict[str, Any]]:
-    """Side-by-side avg-markout table keyed by horizon.
+    """Layer A only — avg per-horizon call markout. Archive source.
 
-    Note: call markouts in different units (raw_pct / iv_rank_pts /
-    normalized_pnl) are NOT mixed — the aggregate only averages
-    raw_pct + normalized_pnl calls (both percent-scale). IV rank pts
-    calls are reported separately in the pattern analysis.
+    Mixes only `raw_pct` + `normalized_pnl` units (both percent-scale).
+    `iv_rank_pts` calls are reported separately via pattern analysis.
     """
     out: dict[int, dict[str, Any]] = {}
     for h in MARKOUT_HORIZONS:
-        call_vals = [
+        vals = [
             cm.horizons.get(h)
             for cm in call_markouts
             if cm.horizon_units in ("raw_pct", "normalized_pnl")
         ]
-        trade_vals = [tm.horizons.get(h) for tm in trade_markouts]
-        avg_call = _mean([v for v in call_vals if v is not None])
-        avg_trade = _mean([v for v in trade_vals if v is not None])
-        delta = None
-        if avg_call is not None and avg_trade is not None:
-            delta = avg_call - avg_trade
+        avg = _mean([v for v in vals if v is not None])
         out[h] = {
-            "avg_call_markout": avg_call,
-            "avg_trade_markout": avg_trade,
-            "delta": delta,
-            "n_calls": sum(1 for v in call_vals if v is not None),
-            "n_trades": sum(1 for v in trade_vals if v is not None),
+            "avg_call_markout": avg,
+            "n_calls": sum(1 for v in vals if v is not None),
         }
     return out
 
 
-def discipline_quadrant(
-    call_markouts: list[CallMarkout], followed_map: dict[Call, bool]
-) -> DisciplineQuadrant:
-    q = DisciplineQuadrant()
-    for cm in call_markouts:
-        followed = followed_map.get(cm.call, False)
-        if cm.verdict == "CORRECT" and followed:
-            q.followed_correct.append(cm)
-        elif cm.verdict == "WRONG" and followed:
-            q.followed_wrong.append(cm)
-        elif cm.verdict == "CORRECT" and not followed:
-            q.ignored_correct.append(cm)
-        elif cm.verdict == "WRONG" and not followed:
-            q.ignored_wrong.append(cm)
-        # NEUTRAL / UNKNOWN are not counted (no signal to score discipline against).
-    return q
+def aggregate_trade_markout(
+    trade_markouts: list[TradeMarkout],
+) -> dict[int, dict[str, Any]]:
+    """Layer B only — avg per-horizon trade markout. Broker source."""
+    out: dict[int, dict[str, Any]] = {}
+    for h in MARKOUT_HORIZONS:
+        vals = [tm.horizons.get(h) for tm in trade_markouts]
+        avg = _mean([v for v in vals if v is not None])
+        out[h] = {
+            "avg_trade_markout": avg,
+            "n_trades": sum(1 for v in vals if v is not None),
+        }
+    return out
 
 
 # --- Pattern analysis (monthly only) --------------------------------
@@ -918,37 +863,22 @@ def generate_action_items(report: ReviewReport) -> list[dict[str, str]]:
         )
         counter["D"] += 1
 
-    # T — trader profile from discipline failure mode.
-    fc_avg = _mean(
-        [
-            cm.horizons.get(cm.verdict_horizon) or 0.0
-            for cm in report.discipline.followed_correct
-        ]
-    )
-    ic_avg = _mean(
-        [
-            cm.horizons.get(cm.verdict_horizon) or 0.0
-            for cm in report.discipline.ignored_correct
-        ]
-    )
-    if (
-        fc_avg is not None
-        and ic_avg is not None
-        and ic_avg > fc_avg
-        and len(report.discipline.ignored_correct) >= 2
-    ):
-        items.append(
-            {
-                "id": f"T{counter['T']}",
-                "desc": (
-                    f"Ignored-correct calls averaged {ic_avg:+.2%} markout vs "
-                    f"followed-correct {fc_avg:+.2%} — trader is filtering OUT the better "
-                    f"calls. Review which signal types are being skipped."
-                ),
-                "trigger": f"T{counter['T']} review",
-            }
-        )
-        counter["T"] += 1
+    # T — trader profile items now come from cross_cut_advisory (judgment-only).
+    # Per hard rule #9, no algorithmic followed/ignored quadrant can fire here;
+    # only the trader (or LLM in advisory mode) can promote a Cross-cut observation
+    # into a T-item, by adding it to report.cross_cut_advisory before action_items
+    # generation. We surface each as a T-item without inferring source linkage.
+    for obs in report.cross_cut_advisory:
+        if obs.get("propose_action_item"):
+            items.append(
+                {
+                    "id": f"T{counter['T']}",
+                    "desc": obs.get("observation", "")
+                    + " (cross-cut advisory; judgment-only)",
+                    "trigger": f"T{counter['T']} review",
+                }
+            )
+            counter["T"] += 1
 
     return items
 
@@ -1074,15 +1004,26 @@ def render_report(report: ReviewReport) -> str:
     lines.append(
         f"**Window:** {report.window_start.isoformat()} → {report.window_end.isoformat()}"
     )
+    lines.append(
+        "**Source separation (hard rule #9):** Layer A = archive only · "
+        "Layer B = broker only (IB + Futu) · Layer C = advisory (judgment-only)"
+    )
     lines.append(f"**Archive dir:** `{report.archive_dir}`")
+    lines.append(
+        f"**Trade sources pulled:** {', '.join(report.trade_sources) or '(none)'}"
+    )
     lines.append(f"**Calls scored:** {len(report.calls)}")
     lines.append(f"**Trades scored:** {len(report.trades)}")
     if report.skipped_archives:
         lines.append(f"**Skipped archives:** {len(report.skipped_archives)} (see end)")
     lines.append("")
 
-    # Per-call scorecard.
-    lines.append("## Per-call scorecard")
+    # ----- Layer A — Analysis quality (archive only) -----
+    lines.append("## Layer A — Analysis quality (archive)")
+    lines.append("")
+    lines.append(
+        "_Source: `references/ticker/private/*.md`. Directional verdicts only — not trade records._"
+    )
     lines.append("")
     lines.append(
         "| Ticker | Date | Type | Dir | T+1 | T+5 | T+10 | T+21 | T+45 | Verdict |"
@@ -1106,38 +1047,53 @@ def render_report(report: ReviewReport) -> str:
             f"| {cm.verdict} |"
         )
     lines.append("")
-
-    # Side-by-side markout.
-    lines.append("## Side-by-side markout (the central output)")
+    lines.append("**Aggregate call markout (Layer A):**")
     lines.append("")
-    lines.append(
-        "| Horizon | Avg call markout | Avg trade markout | Δ (call − trade) | n_calls | n_trades |"
-    )
-    lines.append(
-        "|---------|------------------|-------------------|------------------|---------|----------|"
-    )
+    lines.append("| Horizon | Avg call markout | n_calls |")
+    lines.append("|---------|------------------|---------|")
     for h in MARKOUT_HORIZONS:
-        row = report.aggregate_markout.get(h, {})
+        row = report.call_aggregate.get(h, {})
         lines.append(
-            f"| T+{h}d "
-            f"| {_fmt_pct_or_na(row.get('avg_call_markout'))} "
-            f"| {_fmt_pct_or_na(row.get('avg_trade_markout'))} "
-            f"| {_fmt_pct_or_na(row.get('delta'))} "
-            f"| {row.get('n_calls', 0)} "
-            f"| {row.get('n_trades', 0)} |"
+            f"| T+{h}d | {_fmt_pct_or_na(row.get('avg_call_markout'))} | {row.get('n_calls', 0)} |"
         )
     lines.append("")
 
-    # Discipline 4-quadrant.
-    lines.append("## Discipline 4-quadrant")
+    # ----- Layer B — Trade flow (broker only) -----
+    lines.append("## Layer B — Trade flow (broker)")
     lines.append("")
-    c = report.discipline.counts()
-    lines.append(f"- Followed × CORRECT: **{c['followed_correct']}**")
-    lines.append(f"- Followed × WRONG:   {c['followed_wrong']}")
     lines.append(
-        f"- Ignored × CORRECT:  {c['ignored_correct']}  ← discipline gap if high"
+        f"_Source: {' + '.join(report.trade_sources) or '(no brokers pulled)'}. "
+        "Actual fills + execution markout — never inferred from archive._"
     )
-    lines.append(f"- Ignored × WRONG:    {c['ignored_wrong']}")
+    lines.append("")
+    lines.append("**Aggregate trade markout (Layer B):**")
+    lines.append("")
+    lines.append("| Horizon | Avg trade markout | n_trades |")
+    lines.append("|---------|-------------------|----------|")
+    for h in MARKOUT_HORIZONS:
+        row = report.trade_aggregate.get(h, {})
+        lines.append(
+            f"| T+{h}d | {_fmt_pct_or_na(row.get('avg_trade_markout'))} | {row.get('n_trades', 0)} |"
+        )
+    lines.append("")
+
+    # ----- Layer C — Cross-cut advisory (judgment-only) -----
+    lines.append("## Layer C — Cross-cut (advisory, judgment-only)")
+    lines.append("")
+    lines.append(
+        "_Manual observations linking Layer A ↔ Layer B. No algorithmic scorecard; "
+        "no `followed × correct` quadrant. Per hard rule #9._"
+    )
+    lines.append("")
+    if not report.cross_cut_advisory:
+        lines.append("_(none surfaced this window)_")
+    else:
+        for obs in report.cross_cut_advisory:
+            lines.append(f"- {obs.get('observation', '')}")
+            for ref in obs.get("layer_a_refs", []):
+                lines.append(f"  - Layer A ref: `{ref}`")
+            for ref in obs.get("layer_b_refs", []):
+                lines.append(f"  - Layer B ref: `{ref}`")
     lines.append("")
 
     # Pattern analysis (monthly only).
@@ -1180,6 +1136,122 @@ def render_report(report: ReviewReport) -> str:
     return "\n".join(lines)
 
 
+# --- Broker trade parsers (Layer B sources) -------------------------
+# Per hard rule #9, ALL trade flow comes from these parsers — IB MCP and
+# Futu CLI are the only legitimate sources. Both must be pulled each
+# review (per `private/trader-profile.md`).
+
+
+def _iso_to_date(iso_ts: str) -> date | None:
+    """Parse an ISO 8601 timestamp into the trade date (UTC). Returns None on failure."""
+    try:
+        return date.fromisoformat(iso_ts[:10])
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_ib_trades(
+    ib_response: dict[str, Any],
+    window_start: date,
+    window_end: date,
+) -> list[Trade]:
+    """Convert IB MCP `get_account_trades` response → Trade[].
+
+    Filters to `[window_start, window_end]` inclusive. IB only exposes
+    {symbol, sec_type, side, size, price, trade_time, realized_pnl} per
+    leg — option strike/expiry require a separate `search_contracts` call,
+    so `option_meta` is left None unless the caller pre-enriches.
+    """
+    out: list[Trade] = []
+    for tr in ib_response.get("trades", []):
+        d = _iso_to_date(str(tr.get("trade_time", "")))
+        if d is None or not (window_start <= d <= window_end):
+            continue
+        sec = str(tr.get("sec_type", "STK")).upper()
+        contract_type: Literal["STK", "OPT"] = "OPT" if sec == "OPT" else "STK"
+        out.append(
+            Trade(
+                ticker=str(tr.get("symbol", "")).upper(),
+                trade_date=d,
+                side="BUY" if str(tr.get("side", "")).upper() == "BUY" else "SELL",
+                quantity=tr.get("size", 0),
+                fill_price=float(tr.get("price", 0.0)),
+                contract_type=contract_type,
+                option_meta=None,
+                realized_pnl=(
+                    float(tr["realized_pnl"]) if tr.get("realized_pnl") else None
+                ),
+            )
+        )
+    return out
+
+
+def _futu_leg_to_trade(
+    leg: dict[str, Any], realized_pnl: float | None = None
+) -> Trade | None:
+    """Map one Futu trade leg dict → Trade. Returns None if timestamp unparseable."""
+    d = _iso_to_date(str(leg.get("timestamp", "")))
+    if d is None:
+        return None
+    is_option = str(leg.get("instrumentType", "stock")).lower() == "option"
+    opt = leg.get("optionDetails") or {}
+    option_meta: dict[str, Any] | None = None
+    ticker = str(leg.get("symbol", "")).upper()
+    if is_option and opt:
+        ticker = str(opt.get("underlying", ticker)).upper()
+        put_call = str(opt.get("putCall", "")).lower()
+        right = (
+            "C" if put_call.startswith("c") else "P" if put_call.startswith("p") else ""
+        )
+        option_meta = {
+            "right": right,
+            "strike": float(opt.get("strike", 0.0)),
+            "expiry_iso": str(opt.get("expiry", "")),
+        }
+    return Trade(
+        ticker=ticker,
+        trade_date=d,
+        side="BUY" if str(leg.get("side", "")).lower() == "buy" else "SELL",
+        quantity=leg.get("quantity", 0),
+        fill_price=float(leg.get("price", 0.0)),
+        contract_type="OPT" if is_option else "STK",
+        option_meta=option_meta,
+        realized_pnl=realized_pnl,
+    )
+
+
+def parse_futu_trades(
+    futu_report: dict[str, Any],
+    window_start: date,
+    window_end: date,
+) -> list[Trade]:
+    """Convert portfolio-analyser JSON report → Trade[].
+
+    Reads `trades.matchedTrades[]` and `trades.unmatchedTrades[]`. Each
+    matched pair emits two Trade objects (open + close, with the pair's
+    `realizedPnl` attached to the close leg). Unmatched legs emit one
+    Trade each with `realized_pnl=None`. Filters to date window inclusive.
+    """
+    trades_block = futu_report.get("trades", {})
+    out: list[Trade] = []
+    for pair in trades_block.get("matchedTrades", []):
+        realized = pair.get("realizedPnl")
+        realized_f = float(realized) if realized is not None else None
+        if open_leg := pair.get("openTrade"):
+            t = _futu_leg_to_trade(open_leg, realized_pnl=None)
+            if t and window_start <= t.trade_date <= window_end:
+                out.append(t)
+        if close_leg := pair.get("closeTrade"):
+            t = _futu_leg_to_trade(close_leg, realized_pnl=realized_f)
+            if t and window_start <= t.trade_date <= window_end:
+                out.append(t)
+    for leg in trades_block.get("unmatchedTrades", []):
+        t = _futu_leg_to_trade(leg, realized_pnl=None)
+        if t and window_start <= t.trade_date <= window_end:
+            out.append(t)
+    return out
+
+
 # --- Orchestrator CLI ------------------------------------------------
 
 
@@ -1199,27 +1271,40 @@ def run_review(
     spot_history: dict[str, dict[date, float]],
     iv_rank_history: dict[str, dict[date, float]] | None,
     trades: list[Trade],
+    trade_sources: list[str],
     option_iv: dict[str, float] | None = None,
+    cross_cut_advisory: list[dict[str, str]] | None = None,
     drafts_dir: Path | None = None,
     write_back: bool = True,
     generate_drafts: bool = True,
 ) -> ReviewReport:
-    """End-to-end pure-function pipeline. All live data passed in as args."""
+    """End-to-end pure-function pipeline (3-layer per hard rule #9).
+
+    Layer A (archive) and Layer B (broker) are computed in isolation.
+    Layer C (advisory) is passed in as `cross_cut_advisory` — judgment-only
+    observations relating A↔B, never auto-derived. Caller is responsible
+    for filling B's trades from ALL configured brokers (IB + Futu per
+    `trader-profile.md`) and tagging `trade_sources` accordingly.
+    """
     window_start, window_end = _window_dates(window, today)
     calls, skipped = extract_calls_from_archive(archive_dir, window_start, window_end)
+    # Layer A
     call_markouts = [
         compute_call_markout(
             c, spot_history=spot_history, iv_rank_history=iv_rank_history
         )
         for c in calls
     ]
+    call_aggregate = aggregate_call_markout(call_markouts)
+    # Layer B
     trade_markouts = [
         compute_trade_markout(t, spot_history=spot_history, option_iv=option_iv)
         for t in trades
     ]
-    followed = reconcile_calls_with_trades(calls, trades)
-    discipline = discipline_quadrant(call_markouts, followed)
-    aggregate = aggregate_markout(call_markouts, trade_markouts)
+    trade_aggregate = aggregate_trade_markout(trade_markouts)
+    # Layer C (passed in)
+    advisory = cross_cut_advisory or []
+
     pattern = detect_pattern_anomalies(call_markouts) if window == "monthly" else None
     report = ReviewReport(
         window=window,
@@ -1227,9 +1312,11 @@ def run_review(
         window_end=window_end,
         archive_dir=archive_dir,
         calls=call_markouts,
+        call_aggregate=call_aggregate,
         trades=trade_markouts,
-        discipline=discipline,
-        aggregate_markout=aggregate,
+        trade_aggregate=trade_aggregate,
+        trade_sources=trade_sources,
+        cross_cut_advisory=advisory,
         pattern_analysis=pattern,
         action_items=[],
         pitfall_candidates=[],
@@ -1318,6 +1405,8 @@ def main(argv: list[str] | None = None) -> int:
         spot_history={},
         iv_rank_history=None,
         trades=[],
+        trade_sources=[],
+        cross_cut_advisory=[],
         drafts_dir=args.drafts_dir if not args.no_pitfall_drafts else None,
         write_back=not args.no_writeback,
         generate_drafts=not args.no_pitfall_drafts,

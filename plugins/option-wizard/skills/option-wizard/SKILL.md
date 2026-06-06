@@ -60,6 +60,19 @@ incantations.
 6. Bracket order defaults: take-profit at 50% of max gain, stop-loss at 2× credit received (100% of max loss for spreads). Per-order override allowed.
 7. **Freshness gate.** Every data point quoted in an analysis must be **≤ 1 trading day stale** (live or T-1 close). Older = **gap**, not signal — list under "What this analysis is missing" and do **not** extrapolate forward. Always check UW response timestamps (`price_data.date`, indicator series last date, chain `last_price.date`) before quoting any number; if stale, treat as gap and either re-pull from a fresh source or flag explicitly.
 8. **Ticker analysis structure is non-negotiable.** Every "分析 <TICKER>" / "evaluate <ticker>" response opens with a **Layer Coverage table** (template in `references/analysis-runbook.md`) declaring per-layer source + freshness + ✓/skipped status. Skipping is allowed only when the layer's data is unreachable; it must appear as `skipped` in the table AND under "What this analysis is missing" — never silently dropped. Following the full 8-layer runbook end-to-end is the structural baseline; the trader has explicitly flagged "miss or skip" as a recurring problem and the Layer Coverage table is the structural counter.
+9. **复盘 source separation (archive ≠ broker).** Every weekly / monthly review (`复盘` / `weekly review` / `monthly review` / `review my recent calls`) outputs **three independent layers**, sourced strictly:
+
+   - **Layer A — Analysis quality (archive only).** Source: `references/ticker/private/*.md`. Use: directional verdict (right / wrong / unknown) via markout, hit-rate aggregates, lessons for improving future analyses. Archive documents describe **proposed trades or analysis-only theses** — they are NOT trade records. Never infer "a trade happened" from archive presence.
+   - **Layer B — Trade flow (broker only, BOTH brokers required).** Sources: **IB MCP `get_account_trades` + Futu via `portfolio-analyser` CLI** (per `private/trader-profile.md`). Use: actual fills, execution markout, realized P&L, roll patterns, position deltas. **Only legitimate source for "what was actually done"** — never substitute archive titles (e.g., `qqq-...-short-put-tp-close.md`) as evidence of execution.
+   - **Layer C — Cross-cut (advisory, judgment-only).** Manual observations relating Layer A to Layer B (e.g., "6/04 bearish call → 6/05 才 hedge,lag 1 day"). Must be labeled **"judgment-only, not algorithmic"**. No automated `followed × correct` quadrant; no scorecard joining the two streams.
+
+   **Forbidden:**
+   - `reconcile_calls_with_trades` / `discipline_quadrant` style auto-join between archive and broker streams
+   - Inferring trade execution from archive frontmatter status field
+   - Using `qqq-...-tp-close.md`-style filenames as trade evidence
+   - Running 复盘 with only one broker pulled — both IB and Futu must be hit each time
+
+   See `references/review-framework.md` §"3-layer architecture" for the full pipeline and `scripts/retrospective.py` orchestrator.
 
 ## Triggers
 
@@ -118,7 +131,7 @@ points into specific layers without re-reading the whole runbook.
 | Pattern match against a prior FCN deal | `references/ticker/orcl-2026-06-fcn.md` (public, anonymized) |
 | Pattern match against a prior personal trade / analysis | `references/ticker/private/*.md` — trader's local archive (gitignored). List the directory and pick by date / event / ticker |
 | Capturing a new pitfall from a closed trade | `references/pitfalls/_template.md` → copy to `NN-slug.md`; add row to `references/pitfalls/README.md` (index currently empty — backfill from trade history is tracked as H1). Strip all account-specific numbers before promoting from `private/` |
-| Weekly / monthly review ("复盘" / "weekly review" / "review my recent calls") | `references/review-framework.md`; `scripts.retrospective::run_review` (pure functions) + `python -m scripts.retrospective --window weekly|monthly` (orchestrator CLI). Markout (T+1/5/10/21/45d) on directional / vol regime / structure calls + actual trades. Side-by-side avg-call vs avg-trade markout. 4-quadrant discipline scorecard (followed/ignored × correct/wrong). Monthly adds pattern analysis. Action items at END (S/P/T/D). Auto-writeback of verdict to source Outcome / Lesson section. Auto pitfall draft generation to `references/pitfalls/_drafts/`. **FCN / AQ / DQ are out of scope** — those audit separately. |
+| Weekly / monthly review ("复盘" / "weekly review" / "review my recent calls") | `references/review-framework.md`; `scripts.retrospective::run_review` (pure functions) + `python -m scripts.retrospective --window weekly|monthly` (orchestrator CLI). **Hard rule #9 — 3 independent layers:** Layer A = analysis quality from archive only (markout T+1/5/10/21/45d, directional verdict, hit rate). Layer B = trade flow from **IB MCP + Futu CLI** (both brokers required; execution markout, realized P&L, roll patterns). Layer C = cross-cut advisory (judgment-only, no algorithmic scorecard). Action items at END (S/P/T/D). Auto-writeback of verdict to source `## Outcome / Lesson` section. Auto pitfall draft generation to `references/pitfalls/_drafts/`. **FCN / AQ / DQ are out of scope** — those audit separately. |
 
 ## Book-review output structure
 
