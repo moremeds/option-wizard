@@ -344,16 +344,9 @@ def extract_calls_from_archive(
         if not in_scope:
             skipped.append({"file": md_path.name, "reason": reason})
             continue
-        ticker_field = fm.get("ticker", "")
-        if "," in str(ticker_field):
-            # macro analyses with multiple tickers — log and skip for now;
-            # multi-ticker markout aggregation is Phase 2.
-            skipped.append(
-                {"file": md_path.name, "reason": "multi-ticker macro — Phase 2"}
-            )
-            continue
-        ticker = str(ticker_field).strip().upper()
-        if not ticker:
+        ticker_field = str(fm.get("ticker", "")).strip()
+        tickers = [t.strip().upper() for t in ticker_field.split(",") if t.strip()]
+        if not tickers:
             skipped.append({"file": md_path.name, "reason": "no ticker"})
             continue
         body = text[len(_FRONTMATTER_RE.match(text).group(0)) :]  # type: ignore[union-attr]
@@ -362,52 +355,128 @@ def extract_calls_from_archive(
         if isinstance(structures, str):
             structures = [structures]
         structures = [s.lower() for s in structures]
-        # Emit one Call per analysis using the most-specific classification.
-        if structures and any(s in STRUCTURE_DIRECTION for s in structures):
-            for s in structures:
-                if s in STRUCTURE_DIRECTION:
-                    calls.append(
-                        Call(
-                            ticker=ticker,
-                            analysis_date=analysis_date,
-                            call_type="structure",
-                            direction=STRUCTURE_DIRECTION[s],
-                            structure=s,
-                            archive_path=md_path,
-                            notes=notes,
+        # Multi-ticker archives (macro book reviews) force prose classification:
+        # the structures list typically describes per-position picks scattered
+        # across the book (e.g., "[BPS, BCS, long-call]" for a 17-name review),
+        # not a single structure that applies to every ticker uniformly. Forcing
+        # prose classification gives one directional/vol_regime call per ticker,
+        # which is the only semantically clean interpretation.
+        is_multi_ticker = len(tickers) > 1
+        use_structure_branch = (
+            not is_multi_ticker
+            and structures
+            and any(s in STRUCTURE_DIRECTION for s in structures)
+        )
+        for ticker in tickers:
+            if use_structure_branch:
+                for s in structures:
+                    if s in STRUCTURE_DIRECTION:
+                        calls.append(
+                            Call(
+                                ticker=ticker,
+                                analysis_date=analysis_date,
+                                call_type="structure",
+                                direction=STRUCTURE_DIRECTION[s],
+                                structure=s,
+                                archive_path=md_path,
+                                notes=notes,
+                            )
                         )
+                        break
+                continue
+            # No structure (or multi-ticker) → classify by prose.
+            vol_dir = _classify_vol_regime(body)
+            if vol_dir != 0:
+                calls.append(
+                    Call(
+                        ticker=ticker,
+                        analysis_date=analysis_date,
+                        call_type="vol_regime",
+                        direction=vol_dir,
+                        structure=None,
+                        archive_path=md_path,
+                        notes=notes,
                     )
-                    break
-            continue
-        # No structure → classify by prose.
-        vol_dir = _classify_vol_regime(body)
-        if vol_dir != 0:
+                )
+                continue
+            dir_dir = _classify_directional(body)
+            # Even direction=0 (range) emits a directional call so it surfaces.
             calls.append(
                 Call(
                     ticker=ticker,
                     analysis_date=analysis_date,
-                    call_type="vol_regime",
-                    direction=vol_dir,
+                    call_type="directional",
+                    direction=dir_dir,
                     structure=None,
                     archive_path=md_path,
                     notes=notes,
                 )
             )
-            continue
-        dir_dir = _classify_directional(body)
-        # Even if dir_dir is 0 (range), emit a directional call so it surfaces in scorecard.
-        calls.append(
-            Call(
-                ticker=ticker,
-                analysis_date=analysis_date,
-                call_type="directional",
-                direction=dir_dir,
-                structure=None,
-                archive_path=md_path,
-                notes=notes,
-            )
-        )
     return calls, skipped
+
+
+# --- Archive validator ----------------------------------------------
+
+
+_REQUIRED_FRONTMATTER_FIELDS: tuple[str, ...] = ("ticker", "date", "structures", "tags")
+_OUTCOME_SECTION_HEADER = "## Outcome / Lesson"
+
+
+def validate_archive_dir(archive_dir: Path) -> list[dict[str, Any]]:
+    """Scan archive dir for format issues. Returns [{file, issues: [...]}].
+
+    Checks per file: frontmatter present, required fields present, date
+    parseable, Outcome/Lesson section present. Files with empty `issues`
+    are clean.
+    """
+    out: list[dict[str, Any]] = []
+    if not archive_dir.exists():
+        return out
+    for md_path in sorted(archive_dir.glob("*.md")):
+        if md_path.name.lower() == "readme.md":
+            continue
+        issues: list[str] = []
+        text = md_path.read_text(encoding="utf-8")
+        fm = parse_archive_frontmatter(text)
+        if fm is None:
+            issues.append("missing YAML frontmatter (file must start with `---` block)")
+        else:
+            for field_name in _REQUIRED_FRONTMATTER_FIELDS:
+                if field_name not in fm:
+                    issues.append(f"missing required frontmatter field: {field_name}")
+            if "date" in fm:
+                try:
+                    date.fromisoformat(str(fm["date"]))
+                except ValueError:
+                    issues.append(
+                        f"unparseable date: {fm['date']!r} (must be YYYY-MM-DD)"
+                    )
+        if _OUTCOME_SECTION_HEADER not in text:
+            issues.append(
+                f"missing `{_OUTCOME_SECTION_HEADER}` section (复盘 writeback target)"
+            )
+        out.append({"file": md_path.name, "issues": issues})
+    return out
+
+
+def render_validation_report(entries: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    clean = sum(1 for e in entries if not e["issues"])
+    total = len(entries)
+    lines.append(f"# Archive validation report")
+    lines.append("")
+    lines.append(
+        f"**Scanned:** {total} files | **Clean:** {clean} | **Issues:** {total - clean}"
+    )
+    lines.append("")
+    for entry in entries:
+        if entry["issues"]:
+            lines.append(f"⚠ **{entry['file']}**")
+            for issue in entry["issues"]:
+                lines.append(f"  - {issue}")
+        else:
+            lines.append(f"✓ {entry['file']}")
+    return "\n".join(lines)
 
 
 # --- BSM helpers (minimal — for option mark fallback) ---------------
@@ -508,9 +577,12 @@ def compute_call_markout(
     elif call.call_type == "vol_regime":
         ranks = (iv_rank_history or {}).get(call.ticker, {})
         rank_0 = ranks.get(call.analysis_date)
-        # Vol regime only meaningfully tracked at T+5/+10/+21.
+        # Vol regime tracked at T+1/+5/+10/+21. T+1d added in v0.2 after the
+        # 2026-06-05 sell-off showed IV rank can jump 17pts overnight when a
+        # regime shift hits (TSLA 16.57→33.07). T+45 stays skipped — IV rank
+        # has mean-reverted by then, the signal is too noisy.
         for h in MARKOUT_HORIZONS:
-            if h not in (5, 10, 21):
+            if h == 45:
                 horizons[h] = None
                 mark_sources[h] = "skipped"
                 continue
@@ -579,7 +651,20 @@ def compute_trade_markout(
     Stock: (spot_T − entry) / entry × direction_sign.
     Option: BSM mark at horizon using TV spot + held IV; normalized by
       strike (margin proxy) for short, by debit for long.
+
+    Closing trades (Trade.realized_pnl != 0) are excluded from markout —
+    P/L is already crystallized at trade time and re-marking via BSM
+    produces nonsense (this was the D1 gap surfaced by the first real
+    run, where a BTC at $1.84 on a P700 with the underlying at $740
+    showed a fake +95% T+1d markout).
     """
+    if trade.realized_pnl is not None and trade.realized_pnl != 0:
+        return TradeMarkout(
+            trade=trade,
+            horizons={h: None for h in MARKOUT_HORIZONS},
+            closed_at_horizon=0,
+            mark_sources={h: "closing_trade_excluded" for h in MARKOUT_HORIZONS},
+        )
     horizons: dict[int, float | None] = {}
     mark_sources: dict[int, str] = {}
     ticker_spots = spot_history.get(trade.ticker, {})
@@ -1174,7 +1259,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Weekly / monthly review of past analyses + trades"
     )
-    parser.add_argument("--window", choices=["weekly", "monthly"], required=True)
+    parser.add_argument(
+        "--window",
+        choices=["weekly", "monthly"],
+        default=None,
+        help="Required unless --validate-archive is passed",
+    )
     parser.add_argument(
         "--archive-dir",
         type=Path,
@@ -1190,9 +1280,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-writeback", action="store_true")
     parser.add_argument("--no-pitfall-drafts", action="store_true")
     parser.add_argument(
+        "--validate-archive",
+        action="store_true",
+        help="Scan archive dir for frontmatter / Outcome-section format issues and exit",
+    )
+    parser.add_argument(
         "--today", type=str, default=None, help="Override today (YYYY-MM-DD)"
     )
     args = parser.parse_args(argv)
+
+    if args.validate_archive:
+        entries = validate_archive_dir(args.archive_dir)
+        print(render_validation_report(entries))
+        # Exit non-zero if any file had issues, so this can be wired into CI.
+        return 1 if any(e["issues"] for e in entries) else 0
+
+    if not args.window:
+        parser.error("--window is required unless --validate-archive is passed")
 
     today = date.fromisoformat(args.today) if args.today else date.today()
 

@@ -36,6 +36,7 @@ from scripts.retrospective import (
     parse_archive_frontmatter,
     reconcile_calls_with_trades,
     run_review,
+    validate_archive_dir,
     write_back_outcome,
 )
 
@@ -300,7 +301,10 @@ def test_vol_regime_markout_rich_correct_when_iv_rank_falls():
     assert cm.verdict == "CORRECT"
 
 
-def test_vol_regime_markout_only_t5_t10_t21_have_values():
+def test_vol_regime_markout_skips_only_t45():
+    """D2: T+1d is now computed for vol regime (the 6/05 sell-off showed IV
+    rank can jump 17 pts overnight). T+45d remains skipped — IV mean-reverts
+    by then and the signal is too noisy."""
     call = Call(
         ticker="X",
         analysis_date=date(2026, 5, 1),
@@ -317,9 +321,41 @@ def test_vol_regime_markout_only_t5_t10_t21_have_values():
         }
     }
     cm = compute_call_markout(call, spot_history={}, iv_rank_history=iv_ranks)
-    assert cm.horizons[1] is None  # T+1d is skipped for vol regime
-    assert cm.horizons[45] is None  # T+45d too
+    # T+1d data is missing here, so it returns None — but with mark_source
+    # "missing" rather than "skipped" (proves the design now tries to compute).
+    assert cm.horizons[1] is None
+    assert cm.mark_sources[1] == "missing"
+    # T+45d is skipped by design (IV rank too noisy that far out).
+    assert cm.horizons[45] is None
+    assert cm.mark_sources[45] == "skipped"
+    # T+5d had data → computed.
     assert cm.horizons[5] is not None
+
+
+def test_d2_vol_regime_t1d_computes_when_iv_rank_jumps_overnight():
+    """D2: regression test for the 2026-06-05 scenario — TSLA IV rank jumped
+    16.57 → 33.07 overnight (+16.5 pts), confirming a CHEAP call from 6/04.
+    T+1d should now catch this; pre-fix it was hard-coded to None.
+    """
+    call = Call(
+        ticker="TSLA",
+        analysis_date=date(2026, 6, 4),
+        call_type="vol_regime",
+        direction=+1,  # CHEAP — expects IV to expand
+        structure=None,
+        archive_path=Path("tsla.md"),
+        notes="",
+    )
+    iv_ranks = {
+        "TSLA": {
+            date(2026, 6, 4): 16.57,
+            _horizon_date(date(2026, 6, 4), 1): 33.07,
+        }
+    }
+    cm = compute_call_markout(call, spot_history={}, iv_rank_history=iv_ranks)
+    # +1 direction × (33.07 − 16.57) = +16.5 pts. CORRECT well past the ±5 band.
+    assert cm.horizons[1] == pytest.approx(16.5)
+    assert cm.mark_sources[1] == "uw_iv_rank"
 
 
 # ----- Markout: structure -----
@@ -749,3 +785,196 @@ def test_reconcile_calls_with_trades_builds_full_map():
     out = reconcile_calls_with_trades([c1, c2], trades)
     assert out[c1] is True
     assert out[c2] is False
+
+
+# ----- D1: closing-trade exclusion -----
+
+
+def test_d1_closing_trade_excluded_from_markout():
+    """D1: a BTC trade with realized_pnl != 0 has crystallized P/L.
+    Re-marking via BSM produces nonsense (fake +95% markout on a deep ITM
+    option closed near intrinsic) — exclude entirely.
+    """
+    trade = Trade(
+        ticker="QQQ",
+        trade_date=date(2026, 6, 3),
+        side="BUY",  # BTC on a short put
+        quantity=1,
+        fill_price=1.84,
+        contract_type="OPT",
+        option_meta={"right": "P", "strike": 700.0, "expiry_iso": "2026-06-18"},
+        realized_pnl=1273.0,  # P/L already realized
+    )
+    spot = {
+        "QQQ": {
+            date(2026, 6, 3): 744.21,
+            _horizon_date(date(2026, 6, 3), 1): 740.61,
+        }
+    }
+    tm = compute_trade_markout(trade, spot_history=spot, option_iv={"QQQ": 0.30})
+    assert all(v is None for v in tm.horizons.values())
+    assert all(src == "closing_trade_excluded" for src in tm.mark_sources.values())
+    assert tm.closed_at_horizon == 0
+
+
+def test_d1_opening_trade_still_computed():
+    """D1 regression guard: realized_pnl=None or =0 → still compute markout."""
+    trade = Trade(
+        ticker="QQQ",
+        trade_date=date(2026, 6, 4),
+        side="BUY",
+        quantity=1,
+        fill_price=739.07,
+        contract_type="STK",
+        option_meta=None,
+        realized_pnl=None,
+    )
+    spot = {
+        "QQQ": {
+            date(2026, 6, 4): 739.07,
+            _horizon_date(date(2026, 6, 4), 1): 705.06,
+        }
+    }
+    tm = compute_trade_markout(trade, spot_history=spot)
+    assert tm.horizons[1] is not None
+    assert tm.horizons[1] < 0  # spot dropped → BUY loss
+    assert tm.mark_sources[1] == "tv_spot"
+
+
+# ----- S1: multi-ticker macro archives -----
+
+
+def test_s1_multi_ticker_archive_emits_one_call_per_ticker(tmp_path: Path):
+    """S1: previously archives with comma-separated tickers were skipped.
+    Now: emit one Call per ticker, all sharing the same archive_path.
+    """
+    _write_archive(
+        tmp_path,
+        name="macro-2026-05-15.md",
+        ticker="QQQ, SPY, IWM, DIA, VIX",
+        date_iso="2026-05-15",
+        structures=["observation", "vol-regime-call"],
+        body=(
+            "## TL;DR\n\nVol regime CHEAP across indices — IV ranks all "
+            "below 40, buy premium bias.\n"
+        ),
+    )
+    calls, skipped = extract_calls_from_archive(
+        tmp_path, date(2026, 5, 1), date(2026, 5, 31)
+    )
+    tickers = sorted(c.ticker for c in calls)
+    assert tickers == ["DIA", "IWM", "QQQ", "SPY", "VIX"]
+    # All five share the same archive_path.
+    assert len({c.archive_path for c in calls}) == 1
+    # All five classified as vol_regime (prose says CHEAP).
+    assert all(c.call_type == "vol_regime" for c in calls)
+    assert all(c.direction == +1 for c in calls)
+    assert not skipped  # nothing skipped
+
+
+def test_s1_multi_ticker_forces_prose_classification_not_structure(tmp_path: Path):
+    """S1: a multi-ticker book review with structures=[csp, bull_put_spread]
+    must NOT emit a structure call per ticker — those structures apply to
+    specific positions in the book, not every ticker uniformly.
+    """
+    _write_archive(
+        tmp_path,
+        name="book-2026-05-20.md",
+        ticker="TSLA, NVDA, GOOGL",
+        date_iso="2026-05-20",
+        structures=["csp", "bull_put_spread"],
+        body=("## TL;DR\n\nBullish into NFP — long delta theme across the book.\n"),
+    )
+    calls, _ = extract_calls_from_archive(tmp_path, date(2026, 5, 1), date(2026, 5, 31))
+    # Should be 3 directional calls (one per ticker), not 3 structure calls.
+    assert len(calls) == 3
+    assert all(c.call_type == "directional" for c in calls)
+    assert all(c.direction == +1 for c in calls)  # prose says bullish
+
+
+def test_s1_single_ticker_still_uses_structure_branch(tmp_path: Path):
+    """S1 regression guard: single-ticker archives unchanged behavior."""
+    _write_archive(
+        tmp_path,
+        name="nvda.md",
+        ticker="NVDA",
+        date_iso="2026-05-20",
+        structures=["csp"],
+    )
+    calls, _ = extract_calls_from_archive(tmp_path, date(2026, 5, 1), date(2026, 5, 31))
+    assert len(calls) == 1
+    assert calls[0].call_type == "structure"
+    assert calls[0].structure == "csp"
+
+
+# ----- S2: archive validator -----
+
+
+def test_s2_validator_flags_missing_frontmatter(tmp_path: Path):
+    """S2: a markdown file without YAML frontmatter is flagged."""
+    p = tmp_path / "broken.md"
+    p.write_text("# TSLA — runbook trace\n\nNo frontmatter here.\n")
+    entries = validate_archive_dir(tmp_path)
+    assert len(entries) == 1
+    issues = entries[0]["issues"]
+    assert any("missing YAML frontmatter" in i for i in issues)
+
+
+def test_s2_validator_flags_missing_required_fields(tmp_path: Path):
+    """S2: frontmatter missing ticker/date/structures/tags is flagged."""
+    p = tmp_path / "thin.md"
+    p.write_text("---\nticker: X\n---\n\n## Outcome / Lesson\n")
+    entries = validate_archive_dir(tmp_path)
+    issues = entries[0]["issues"]
+    assert any("date" in i for i in issues)
+    assert any("structures" in i for i in issues)
+    assert any("tags" in i for i in issues)
+
+
+def test_s2_validator_flags_unparseable_date(tmp_path: Path):
+    p = tmp_path / "bad-date.md"
+    p.write_text(
+        "---\n"
+        "ticker: X\n"
+        "date: yesterday\n"
+        "structures: []\n"
+        "tags: []\n"
+        "---\n\n"
+        "## Outcome / Lesson\n"
+    )
+    entries = validate_archive_dir(tmp_path)
+    assert any("unparseable date" in i for i in entries[0]["issues"])
+
+
+def test_s2_validator_flags_missing_outcome_section(tmp_path: Path):
+    p = tmp_path / "no-outcome.md"
+    p.write_text(
+        "---\n"
+        "ticker: X\n"
+        "date: 2026-05-15\n"
+        "structures: []\n"
+        "tags: []\n"
+        "---\n\n"
+        "# body without outcome section\n"
+    )
+    entries = validate_archive_dir(tmp_path)
+    assert any("Outcome / Lesson" in i for i in entries[0]["issues"])
+
+
+def test_s2_validator_clean_file_has_no_issues(tmp_path: Path):
+    _write_archive(
+        tmp_path,
+        name="clean.md",
+        ticker="X",
+        date_iso="2026-05-15",
+        structures=["csp"],
+        body="\n## Outcome / Lesson\n\n(empty)\n",
+    )
+    entries = validate_archive_dir(tmp_path)
+    assert entries[0]["issues"] == []
+
+
+def test_s2_validator_skips_readme(tmp_path: Path):
+    (tmp_path / "README.md").write_text("# index")
+    entries = validate_archive_dir(tmp_path)
+    assert entries == []

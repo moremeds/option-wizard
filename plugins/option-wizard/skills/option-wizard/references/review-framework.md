@@ -383,6 +383,37 @@ Opt-out: `--no-pitfall-drafts` flag skips draft emission.
   executable version of this sentence — invoke it at any time and it
   visits every checkpoint that falls inside the window.
 
+## Fixes from the first real run (v0.2)
+
+The first 复盘 run against the trader's actual archive (2026-06-06)
+surfaced four gaps. All four are now closed:
+
+- **D1 — Closing trades excluded from markout.** A BTC trade with
+  `realized_pnl != 0` has crystallized P/L; re-marking via BSM
+  produces nonsense (the first run showed a fake +95% T+1d markout on
+  a deep-ITM put closed near intrinsic). `compute_trade_markout` now
+  short-circuits to `mark_source = "closing_trade_excluded"` on those
+  trades. Opening trades unaffected.
+- **D2 — Vol regime gets T+1d.** The original design skipped T+1d for
+  vol_regime on the assumption that IV rank doesn't move materially
+  overnight. The 2026-06-05 sell-off disproved this: TSLA IV rank
+  jumped 16.57 → 33.07 in one session, confirming a CHEAP call from
+  the day before. T+1d is now computed for vol_regime; T+45d stays
+  skipped (IV rank mean-reverts by then and the signal is too noisy).
+- **S1 — Multi-ticker macro archives supported.** Previously archives
+  with comma-separated `ticker:` fields (e.g., `QQQ, SPY, IWM, DIA,
+  VIX`) were skipped with `"multi-ticker — Phase 2"`. Now: one Call
+  per ticker, all sharing the same `archive_path`. Multi-ticker
+  archives force prose classification (skip the structure-list branch
+  — book-review structures like `[csp, bull_put_spread, long_call]`
+  apply to specific positions in the book, not every ticker
+  uniformly).
+- **S2 — `--validate-archive` CLI subcommand.** Scans the archive dir
+  and reports per-file format issues: missing YAML frontmatter,
+  missing required fields (`ticker` / `date` / `structures` / `tags`),
+  unparseable date, missing `## Outcome / Lesson` section. Exits
+  non-zero if any file has issues so it can be wired into CI.
+
 ## Phase 1 limitations (current)
 
 1. **Option marks for trade markout** use BSM with TV historical spot +
@@ -393,14 +424,20 @@ Opt-out: `--no-pitfall-drafts` flag skips draft emission.
    Phase 2; macmini DB is Phase 3.
 2. **Directional verdict threshold** is fixed ±2% noise band, not
    vol-adjusted. Replace with ±0.5σ once N ≥ 50 directional calls.
-3. **Call extraction** uses YAML frontmatter + first-paragraph keyword
-   heuristics. Manually-edited analyses without standard frontmatter
-   are skipped with a log line. Phase 2 may add LLM-assisted extraction
-   for non-standard archives.
-4. **Match window for discipline scorecard** is fixed at 3 trading
+3. **Match window for discipline scorecard** is fixed at 3 trading
    days. Some trader workflows (FCN counter-offer negotiation) have
    longer natural gaps; 复盘 doesn't capture those (correctly — FCN is
    out of scope).
+4. **Closing-trade pairing not yet implemented.** D1 excludes closes
+   from markout but doesn't pair them with their opens to attribute
+   realized P/L to the original entry decision. Phase 2 would walk the
+   trade list, match BTC/STC fills against earlier STO/BTO fills by
+   (symbol, strike, expiry, right), and score the OPEN trade with
+   final realized P/L.
+5. **Open-trade detection is signal-based, not state-based.** D1 uses
+   `realized_pnl != 0` as the open/close signal. This works for IB
+   executions (the broker stamps realized P/L on closes) but may need
+   refinement for trades from other brokers where the signal differs.
 
 ## How to invoke
 
@@ -428,6 +465,10 @@ Orchestrator CLI (convenience entrypoint that fetches data via existing
 
 # Exploratory run — no archive edits, no drafts
 .venv/bin/python -m scripts.retrospective --window monthly --no-writeback --no-pitfall-drafts
+
+# Validate archive frontmatter / Outcome section format (S2).
+# Exits non-zero on any issue → suitable for CI.
+.venv/bin/python -m scripts.retrospective --validate-archive
 ```
 
 The CLI is the second skill orchestrator-script (after
