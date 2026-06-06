@@ -212,3 +212,66 @@ def test_readme_is_ignored(tmp_path: Path):
     plans, skips = plan_migrations(tmp_path, date(2026, 6, 1))
     assert plans == []
     assert skips == []
+
+
+def test_warns_when_archive_eligible_after_is_iso_timestamp(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """ISO timestamps with timezone (e.g., '2026-09-19T00:00:00Z') are
+    common copy-paste from UW responses. They are NOT accepted by
+    `date.fromisoformat`. Behavior: warn to stderr (so the trader sees their
+    override was discarded) and fall back to the default TTL — never silently
+    keep the file active past its intended override date.
+    """
+    _write(
+        tmp_path / "ticker",
+        "isots.md",
+        ticker="NVDA",
+        date_iso="2026-01-01",
+        archive_eligible_after="2026-09-19T00:00:00Z",  # ISO timestamp, rejected
+    )
+    plans, skips = plan_migrations(tmp_path, date(2026, 6, 1))
+    err = capsys.readouterr().err
+    assert "archive_eligible_after" in err
+    assert "2026-09-19T00:00:00Z" in err
+    assert "isots.md" in err  # source path is identified
+    # Override was ignored → default kicked in (2026-01-01 + 30 = 2026-01-31)
+    # → today 2026-06-01 is well past, so file IS eligible via default.
+    assert skips == []
+    assert len(plans) == 1
+    assert plans[0].eligibility_source == "default"
+
+
+def test_warns_when_archive_eligible_after_is_garbage(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """Any unparseable string (typo, free-form prose) follows the same
+    warn-and-fall-back path as the ISO-timestamp case.
+    """
+    _write(
+        tmp_path / "ticker",
+        "typo.md",
+        ticker="A",
+        date_iso="2026-01-01",
+        archive_eligible_after="someday next month",
+    )
+    plans, skips = plan_migrations(tmp_path, date(2026, 6, 1))
+    err = capsys.readouterr().err
+    assert "archive_eligible_after" in err
+    assert "someday next month" in err
+    assert len(plans) == 1
+    assert plans[0].eligibility_source == "default"
+
+
+def test_no_warn_when_archive_eligible_after_missing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """Field absent (the common case) → silent default, no warn noise."""
+    _write(
+        tmp_path / "ticker",
+        "ok.md",
+        ticker="A",
+        date_iso="2026-01-01",
+    )
+    plan_migrations(tmp_path, date(2026, 6, 1))
+    assert capsys.readouterr().err == ""

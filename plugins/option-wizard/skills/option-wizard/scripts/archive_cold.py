@@ -64,16 +64,32 @@ def _parse_date(value: object) -> date | None:
         return None
 
 
-def _eligible_after(fm: dict, source_date: date) -> tuple[date, str]:
+def _eligible_after(
+    fm: dict, source_date: date, *, source_path: Path | None = None
+) -> tuple[date, str]:
     """Return (eligible_date, source) where source ∈ {"frontmatter", "default"}.
 
-    Frontmatter `archive_eligible_after` wins if present and parseable.
-    Otherwise defaults to source_date + TTL_DAYS.
+    Frontmatter `archive_eligible_after` wins if present and parseable as a
+    plain `YYYY-MM-DD` date. If the field is missing → silent default. If the
+    field is present but unparseable (e.g., ISO timestamp `2026-09-19T00:00:00Z`
+    or garbage), warn to stderr and fall back to default — never silently
+    discard a trader-set override.
     """
     raw = fm.get("archive_eligible_after")
+    if raw is None:
+        return source_date + timedelta(days=TTL_DAYS), "default"
     parsed = _parse_date(raw)
     if parsed is not None:
         return parsed, "frontmatter"
+    location = f" in {source_path}" if source_path is not None else ""
+    print(
+        f"warning: archive_eligible_after={raw!r}{location} is not a plain "
+        f"YYYY-MM-DD date — falling back to default (source date + {TTL_DAYS} "
+        f"days). ISO timestamps and timezone suffixes are not accepted; strip "
+        f"to the date portion (e.g., '2026-09-19') if you want the override to "
+        f"take effect.",
+        file=sys.stderr,
+    )
     return source_date + timedelta(days=TTL_DAYS), "default"
 
 
@@ -99,7 +115,9 @@ def plan_migrations(
             if source_date is None:
                 skips.append(Skip(md_path, f"no/bad date field: {fm.get('date')!r}"))
                 continue
-            eligible, eligibility_source = _eligible_after(fm, source_date)
+            eligible, eligibility_source = _eligible_after(
+                fm, source_date, source_path=md_path
+            )
             if today < eligible:
                 continue  # still active — silent skip
             dest_subdir = (
