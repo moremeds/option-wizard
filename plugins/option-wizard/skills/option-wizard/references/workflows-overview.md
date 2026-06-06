@@ -14,7 +14,7 @@ into the linked deep-reference file for the per-step detail.
 - **Defined-risk only** (hard rule #1): refuse naked short calls /
   margin-leveraged short puts.
 - **Archive is opt-in** (SKILL.md §Reporting & archive): only write to
-  `references/ticker/private/` when the trader says "save / 存档".
+  `references/private/{ticker|market|review}/` when the trader says "save / 存档".
 
 ---
 
@@ -34,7 +34,7 @@ into the linked deep-reference file for the per-step detail.
 | 6 | L5 Catalyst | Next ER, OPEX, quad witching, sector binaries | UW company info + TV news | Trade expiry must precede ER by ≥7 days (12+ preferred) |
 | 7 | L6 Structure pick | (inputs above → regime × structure matrix) | computed | Run **4-signal bullish veto** (`strategies.md`); strikes anchored to put/call wall; 30-45 DTE; size = min(2-5% NLV, 25% available) |
 | 8 | L7 Preflight + YES/NO | Legs, mid, max loss/gain, BE, margin, P/L matrix ±5/10/20%, account check, UW regime check, liquidity, catalyst clock, bracket (TP 50% / SL 2×) | `scripts.ib_order::build_preflight` | Exactly one YES/NO; YES → submit + brackets |
-| 9 | L8 Archive (opt-in only) | All of above + decision + gaps | gitignored `references/ticker/private/` | Outcome/Lesson section left empty for audit |
+| 9 | L8 Archive (opt-in only) | All of above + decision + gaps | gitignored `references/private/ticker/{date}-{ticker}-{long|short|mixed}-{highlight}.md` | Outcome/Lesson section left empty for audit |
 
 ---
 
@@ -88,7 +88,7 @@ into the linked deep-reference file for the per-step detail.
 | 6 | **Worst-of basket** (if 2-name): `analyze_fcn_basket` runs MC for `p_ki_either`. Basket coupon must ≥ worst-single coupon × (1 + diversification premium); premium ≥ (1−ρ)·0.30·fair_worst_single. Below = PB pocketing diversification | `scripts.fair_coupon::joint_ki_prob_mc` |
 | 7 | **Verdict + counter-offer email**: any rung with FAIL → `build_counter_offer_email` auto-attaches (Chinese first, English second). WARN-only rung does not (trader chooses) | — |
 | 8 | **Decision tree**: (a) coupon ≥ 30% model fair **AND** first 5 checklist items all PASS/WARN (no FAIL) → take; (b) else **walk**, switch to 30-45 DTE listed short put / bull put spread where pricing is transparent | — |
-| 9 | Archive (opt-in only): `references/ticker/private/<slug>-YYYY-MM-DD-fcn-counter-offer.md` with PB original quote + ladder + verdict + sent email | gitignored |
+| 9 | Archive (opt-in only): `references/private/ticker/{date}-{ticker}-long-fcn-counter-offer.md` with PB original quote + ladder + verdict + sent email | gitignored |
 
 **FCN hard-ban conditions** (use listed options instead): IV rank <50, in-tenor ER / FDA / regulatory binary, need roll flexibility, want gamma scalp.
 
@@ -140,13 +140,13 @@ decumulator|eln]` are filtered at the extraction stage.
 
 | Layer | Source | Output |
 |---|---|---|
-| A | `references/ticker/private/*.md` (archive only) | Directional verdict, hit rate. Never inferred to imply a trade. |
+| A | `references/private/{ticker,market,review}/**/*.md` (archive only, recursive) | Directional verdict, hit rate. Never inferred to imply a trade. |
 | B | **IB MCP + Futu CLI** (both brokers required) | Trade flow, execution markout, realized P&L. Only legit source. |
 | C | Trader / LLM judgment | Advisory observations linking A ↔ B. No algorithmic scorecard. |
 
 **Pipeline (5 steps):**
 
-1. **Archive scan (Layer A)** — walk `references/ticker/private/*.md` for files
+1. **Archive scan (Layer A)** — recursively walk `references/private/{ticker,market,review}/**/*.md` for files
    with `date` in window; skip PB-product files; classify each as
    directional / vol_regime / structure call.
 2. **Call markout (Layer A)** — for each call, compute markout at fixed

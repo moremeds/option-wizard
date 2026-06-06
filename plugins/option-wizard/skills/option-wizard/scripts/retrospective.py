@@ -305,17 +305,51 @@ def _extract_notes(body: str) -> str:
     return first_para.replace("\n", " ").strip()[:200]
 
 
+# --- Active vs cold archive iteration -------------------------------
+#
+# Hard rule #9 + 30-day TTL: active subtree is `references/private/{ticker,
+# market,review}/**/*.md`. Files older than 30 days (by frontmatter
+# `archive_eligible_after`) get moved by `scripts.archive_cold` to a frozen
+# `references/private/archive/YYYY-MM/...` cold-storage subtree. Default
+# review only scans active to avoid stale-thesis contamination; monthly /
+# quarterly reviews pass `include_archive=True` to also walk the cold subtree.
+
+
+def _iter_archive_md(archive_dir: Path, *, include_archive: bool) -> list[Path]:
+    """Sorted list of archive .md files. Excludes `<archive_dir>/archive/...`
+    (cold storage) unless `include_archive=True`.
+    """
+    out: list[Path] = []
+    for md_path in archive_dir.rglob("*.md"):
+        if not include_archive:
+            try:
+                rel_parts = md_path.relative_to(archive_dir).parts
+            except ValueError:
+                rel_parts = md_path.parts
+            if rel_parts and rel_parts[0] == "archive":
+                continue
+        out.append(md_path)
+    return sorted(out)
+
+
 def extract_calls_from_archive(
-    archive_dir: Path, window_start: date, window_end: date
+    archive_dir: Path,
+    window_start: date,
+    window_end: date,
+    *,
+    include_archive: bool = False,
 ) -> tuple[list[Call], list[dict[str, str]]]:
     """Scan archive dir for analyses in [window_start, window_end]. Return
     (calls, skipped) where skipped is a list of {file, reason} dicts.
+
+    `include_archive=False` (default) skips the cold-storage `archive/`
+    subtree — pass True for monthly / quarterly reviews that span the TTL.
     """
     calls: list[Call] = []
     skipped: list[dict[str, str]] = []
     if not archive_dir.exists():
         return calls, skipped
-    for md_path in sorted(archive_dir.glob("*.md")):
+    for md_path in _iter_archive_md(archive_dir, include_archive=include_archive):
         if md_path.name.lower() == "readme.md":
             continue
         text = md_path.read_text(encoding="utf-8")
@@ -418,17 +452,20 @@ _REQUIRED_FRONTMATTER_FIELDS: tuple[str, ...] = ("ticker", "date", "structures",
 _OUTCOME_SECTION_HEADER = "## Outcome / Lesson"
 
 
-def validate_archive_dir(archive_dir: Path) -> list[dict[str, Any]]:
+def validate_archive_dir(
+    archive_dir: Path, *, include_archive: bool = False
+) -> list[dict[str, Any]]:
     """Scan archive dir for format issues. Returns [{file, issues: [...]}].
 
     Checks per file: frontmatter present, required fields present, date
     parseable, Outcome/Lesson section present. Files with empty `issues`
-    are clean.
+    are clean. `include_archive=False` (default) skips the cold-storage
+    `archive/` subtree.
     """
     out: list[dict[str, Any]] = []
     if not archive_dir.exists():
         return out
-    for md_path in sorted(archive_dir.glob("*.md")):
+    for md_path in _iter_archive_md(archive_dir, include_archive=include_archive):
         if md_path.name.lower() == "readme.md":
             continue
         issues: list[str] = []
@@ -1022,7 +1059,7 @@ def render_report(report: ReviewReport) -> str:
     lines.append("## Layer A — Analysis quality (archive)")
     lines.append("")
     lines.append(
-        "_Source: `references/ticker/private/*.md`. Directional verdicts only — not trade records._"
+        "_Source: `references/private/{ticker,market,review}/**/*.md` (active subtree; `archive/` cold storage skipped unless `--include-archive`). Directional verdicts only — not trade records._"
     )
     lines.append("")
     lines.append(
@@ -1307,6 +1344,7 @@ def run_review(
     drafts_dir: Path | None = None,
     write_back: bool = True,
     generate_drafts: bool = True,
+    include_archive: bool = False,
 ) -> ReviewReport:
     """End-to-end pure-function pipeline (3-layer per hard rule #9).
 
@@ -1315,9 +1353,16 @@ def run_review(
     observations relating A↔B, never auto-derived. Caller is responsible
     for filling B's trades from ALL configured brokers (IB + Futu per
     `trader-profile.md`) and tagging `trade_sources` accordingly.
+
+    `include_archive=False` (default) restricts Layer A to the active
+    subtree (`references/private/{ticker,market,review}/`). Pass True for
+    monthly / quarterly reviews that need to span the 30-day cold-storage
+    TTL — adds files under `references/private/archive/YYYY-MM/...`.
     """
     window_start, window_end = _window_dates(window, today)
-    calls, skipped = extract_calls_from_archive(archive_dir, window_start, window_end)
+    calls, skipped = extract_calls_from_archive(
+        archive_dir, window_start, window_end, include_archive=include_archive
+    )
     # Layer A
     call_markouts = [
         compute_call_markout(
@@ -1364,7 +1409,7 @@ def run_review(
 
 def _default_archive_dir() -> Path:
     skill_root = Path(__file__).resolve().parent.parent
-    return skill_root / "references" / "ticker" / "private"
+    return skill_root / "references" / "private"
 
 
 def _default_drafts_dir() -> Path:
@@ -1386,7 +1431,12 @@ def main(argv: list[str] | None = None) -> int:
         "--archive-dir",
         type=Path,
         default=_default_archive_dir(),
-        help="Defaults to references/ticker/private/",
+        help="Defaults to references/private/ (recursively scans ticker/market/review/ subdirs; cold-storage archive/ subtree is skipped by default — pass --include-archive to opt in)",
+    )
+    parser.add_argument(
+        "--include-archive",
+        action="store_true",
+        help="Also scan references/private/archive/YYYY-MM/... cold-storage subtree (default: active subdirs only). Use for monthly / quarterly reviews that span the 30-day TTL.",
     )
     parser.add_argument(
         "--drafts-dir",
@@ -1407,7 +1457,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.validate_archive:
-        entries = validate_archive_dir(args.archive_dir)
+        entries = validate_archive_dir(
+            args.archive_dir, include_archive=args.include_archive
+        )
         print(render_validation_report(entries))
         # Exit non-zero if any file had issues, so this can be wired into CI.
         return 1 if any(e["issues"] for e in entries) else 0
@@ -1440,6 +1492,7 @@ def main(argv: list[str] | None = None) -> int:
         drafts_dir=args.drafts_dir if not args.no_pitfall_drafts else None,
         write_back=not args.no_writeback,
         generate_drafts=not args.no_pitfall_drafts,
+        include_archive=args.include_archive,
     )
     print(render_report(report))
     return 0

@@ -345,11 +345,11 @@ what data we had, what we concluded, and what we missed — so future-us can
 compare prediction vs outcome and harvest pitfalls. **But the trader reviews
 the screen output first and decides whether the analysis is worth preserving.**
 
-**Write to** `references/ticker/private/<slug>-YYYY-MM-DD-<event>.md`,
+**Write to** `references/private/{ticker|market|review}/{date}-{ticker}-{long|short|mixed}-{highlight}.md`,
 gitignored, trader's personal journal, **only when the trader explicitly asks**
 ("save", "保存", "archive", "存档"). SKILL.md §"Reporting & archive" has the
-file format and the master rule. This layer runs that rule on demand, not
-automatically.
+file format, subdir routing, and the master rule. This layer runs that rule on
+demand, not automatically.
 
 **Capture** (locked at point of analysis so a future replay is possible):
 

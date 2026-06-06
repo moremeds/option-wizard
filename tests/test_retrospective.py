@@ -1123,3 +1123,61 @@ def test_s2_validator_skips_readme(tmp_path: Path):
     (tmp_path / "README.md").write_text("# index")
     entries = validate_archive_dir(tmp_path)
     assert entries == []
+
+
+# ----- Cold-storage archive/ subtree exclusion -----
+
+
+def test_extract_skips_cold_archive_subtree_by_default(tmp_path: Path):
+    """Active files under ticker/ are scanned; cold files under archive/
+    are excluded unless --include-archive is passed."""
+    (tmp_path / "ticker").mkdir()
+    (tmp_path / "archive" / "2026-04" / "ticker").mkdir(parents=True)
+    _write_archive(
+        tmp_path / "ticker",
+        name="2026-05-15-googl-long-eval.md",
+        ticker="GOOGL",
+        date_iso="2026-05-15",
+        structures=["bull_put_spread"],
+    )
+    _write_archive(
+        tmp_path / "archive" / "2026-04" / "ticker",
+        name="2026-04-10-aapl-long-eval.md",
+        ticker="AAPL",
+        date_iso="2026-04-10",
+        structures=["bull_put_spread"],
+    )
+    # Default: only active GOOGL surfaces; AAPL stays frozen
+    calls, _ = extract_calls_from_archive(tmp_path, date(2026, 4, 1), date(2026, 5, 31))
+    assert sorted(c.ticker for c in calls) == ["GOOGL"]
+    # Opt-in: both surface
+    calls_all, _ = extract_calls_from_archive(
+        tmp_path, date(2026, 4, 1), date(2026, 5, 31), include_archive=True
+    )
+    assert sorted(c.ticker for c in calls_all) == ["AAPL", "GOOGL"]
+
+
+def test_validator_skips_cold_archive_subtree_by_default(tmp_path: Path):
+    """Malformed file in cold archive/ should not noisy-up routine validation."""
+    (tmp_path / "ticker").mkdir()
+    (tmp_path / "archive" / "2026-04" / "ticker").mkdir(parents=True)
+    # Clean active file
+    _write_archive(
+        tmp_path / "ticker",
+        name="active.md",
+        ticker="X",
+        date_iso="2026-05-15",
+        structures=["csp"],
+        body="\n## Outcome / Lesson\n\n(empty)\n",
+    )
+    # Malformed cold file (no frontmatter)
+    (tmp_path / "archive" / "2026-04" / "ticker" / "frozen.md").write_text(
+        "# no frontmatter, but it's frozen\n"
+    )
+    # Default: only the active file is examined; cold file ignored
+    entries = validate_archive_dir(tmp_path)
+    assert [e["file"] for e in entries] == ["active.md"]
+    # Opt-in: cold file surfaces with its issue
+    entries_all = validate_archive_dir(tmp_path, include_archive=True)
+    files = sorted(e["file"] for e in entries_all)
+    assert files == ["active.md", "frozen.md"]

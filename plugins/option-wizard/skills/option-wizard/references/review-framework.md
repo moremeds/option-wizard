@@ -27,7 +27,7 @@ decision, normalized so analyses and trades are directly comparable.
 
 | Layer | Source | What it measures |
 |---|---|---|
-| **A — Analysis quality** | `references/ticker/private/*.md` (archive only) | Directional verdict on past analyses: was the call right? Hit rate by call type / ticker. **Archive describes a proposed trade or analysis-only thesis — never a trade record.** |
+| **A — Analysis quality** | `references/private/{ticker,market,review}/**/*.md` (archive only, recursive) | Directional verdict on past analyses: was the call right? Hit rate by call type / ticker. **Archive describes a proposed trade or analysis-only thesis — never a trade record.** |
 | **B — Trade flow** | **IB MCP `get_account_trades` + Futu via `portfolio-analyser` CLI** — BOTH brokers, every review | Actual fills, execution markout, realized P&L, roll patterns. **Only legitimate source for "what was actually done."** |
 | **C — Cross-cut advisory** | Trader / LLM judgment | Manual observations linking A ↔ B. **Judgment-only — no algorithmic scorecard, no `followed × correct` quadrant.** |
 
@@ -77,7 +77,7 @@ pitfall draft candidates. Flags opt out.
 ## Layer A — Analysis quality (archive only)
 
 A "call" is one falsifiable claim extracted from an archived analysis.
-The framework recognizes three types. **Source is `references/ticker/private/*.md` exclusively** — archive presence never implies a trade happened.
+The framework recognizes three types. **Source is `references/private/{ticker,market,review}/**/*.md` exclusively (recursive)** — archive presence never implies a trade happened.
 
 ### Three call types
 
@@ -348,7 +348,7 @@ framework waits for the trader to pick — never auto-applies.
 
 ## Auto-writeback to archive Outcome section
 
-Every archive file under `references/ticker/private/` has an empty
+Every archive file under `references/private/{ticker,market,review}/` has an empty
 `## Outcome / Lesson` section (per SKILL.md §"Reporting & archive"). The
 复盘 framework auto-fills these for any analysis it processed:
 
