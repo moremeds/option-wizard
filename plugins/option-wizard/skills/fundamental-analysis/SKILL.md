@@ -24,7 +24,7 @@ description: >
   Chinese response with English technical terms (PE, EBITDA, FCF, ROE,
   margin, etc.). No fabrication — every quoted number cites source per
   shared/sources.md. Deep reports save to
-  /Users/chenxi/projects/option-wizard/references/ticker/<TICKER>/ in MD,
+  /Users/chenxi/projects/option-wizard/plugins/option-wizard/skills/fundamental-analysis/references/ticker/<TICKER>/ in MD,
   HTML, PDF (public GitHub repo — do not save anything proprietary).
   Triggers on: "分析 X 基本面", "X 估值", "X 为什么 PE 这么低", "X 现在
   便宜吗", "X 公司质量怎么样", "深度研究 X", "fundamentals on X",
@@ -81,7 +81,9 @@ When in doubt, ask the trader: "quick brief 还是 deep dive?"
    + PDF (Chrome headless — see `[[pdf-generation-on-mac]]` memory).
    Save path per `[[research-report-storage]]` memory.
 7. **No auto-commit.** Files land in
-   `references/ticker/<TICKER>/` (public GitHub-synced); the trader
+   `plugins/option-wizard/skills/fundamental-analysis/references/ticker/<TICKER>/`
+   (lives inside the skill dir — committed alongside skill source as
+   example artifacts); the trader
    controls when to push.
 8. **No long-form output if quick mode.** Quick mode is 3 sections
    max. If your response is >40 lines, you're doing deep work — ask
