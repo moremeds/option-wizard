@@ -35,6 +35,7 @@ appear under "What this analysis is missing" at the end.
 | L3 Price action           | ✓ / skipped | **TV ONLY** (no UW)   | live / T-1 / gap |
 | L4 Tape (flow + dark pool)| ✓ / skipped | UW                    | T-0 or T-1 / gap |
 | L5 Catalyst clock         | ✓ / skipped | UW + TV news          | T-1 / gap |
+| L5.5 Fundamentals         | ✓ / skipped / n/a | UW + Massive (via `fundamental-analysis` skill) | annual FY (≤ 18 mo) / gap |
 | L6 Structure pick         | ✓           | computed              | — |
 | L7 Preflight              | ✓ / skipped | computed              | — |
 ```
@@ -225,12 +226,12 @@ trading day, `STALE` otherwise). Stale values do not get extrapolated.
 
 ---
 
-## Layer 4 — Tape (UW)
+## Layer 4 — Tape (UW + optional Massive)
 
 **Why:** confirms or contradicts the structural read. A bullish structural
 setup with bearish dealer flow is a yellow flag.
 
-**Pull:**
+**Pull (UW, primary):**
 - `get_flow_alerts` (filter `ticker_symbol`, last ~15-20 alerts) — rule-
   triggered unusual activity. Look at expiry distribution and side
   dominance.
@@ -238,6 +239,16 @@ setup with bearish dealer flow is a yellow flag.
   Look for inversions in the curve.
 - `get_dark_pool_trades` (filter `ticker_symbol`, `min_premium` ≥ $500K) —
   institutional block flow. Note level + recency.
+
+**Optional augment (Massive, requires `$MASSIVE_API_KEY`):**
+- `GET /stocks/v1/short-volume?ticker=<TICKER>&limit=10` — DAILY short
+  volume broken out by venue (NYSE / NASDAQ Carteret / NASDAQ Chicago /
+  ADF). Carteret hosts Citadel + Virtu execution stacks; an unusual
+  Carteret-side spike with no NYSE follow-through is HFT-driven
+  positioning, not directional. UW gives bi-weekly short interest only —
+  Massive's daily granularity catches positioning shifts UW misses by
+  weeks. Mark this row `augment-skipped` if `$MASSIVE_API_KEY` unset; do
+  not surface as a primary gap (it's optional).
 
 **Decision:**
 - Heavy call premium dominance at trade expiry → bullish flow tailwind.
@@ -275,6 +286,34 @@ review) is a backstop, not the primary gate.
 
 ---
 
+## Layer 5.5 — Fundamentals snapshot (optional sub-layer)
+
+**Why this is a sub-layer, not a primary layer:** vol / dealer / tape / catalysts (L1-L5) are the load-bearing inputs for every option structure pick. Fundamentals are load-bearing only for a subset of trades — longer-dated theses, "is this name expensive vs peers" questions, structures where the trader is OK owning the stock at strike (CSP, FCN), names where the entire setup hangs on a quality / re-rating thesis.
+
+**Skill that runs this layer:** `fundamental-analysis` (quick mode). Do **not** duplicate its data-pull logic here — invoke the skill with `--depth=quick` and paste its 3-section output (Snapshot / Fundamentals / Verdict) into this layer's block. See `plugins/option-wizard/skills/fundamental-analysis/SKILL.md` for the full mode taxonomy.
+
+**When to run:**
+- Trade thesis depends on company quality (turnaround, value re-rate, "why is PE so low")
+- Structure has the trader on the hook for owning the stock (CSP near support, FCN with KI close to spot, deep ITM covered call where assignment is plausible)
+- Trade duration ≥ 60 DTE or any LEAPS — fundamentals dominate over short-term vol mechanics at this horizon
+- Trader explicitly asks ("基本面怎么样", "PE 偏不偏贵", "is this cheap")
+
+**When to skip (default):**
+- Short-DTE event play (≤ 30 DTE around earnings / FOMC / catalyst) — fundamentals don't move in this window
+- Pure vol-regime structure (iron condor / jade lizard / put credit spread for VRP harvest) where the thesis is "skew is rich" not "company is cheap"
+- M7 + QQQ buy-and-hold names per trader profile — fundamentals are known-good; no structural re-rate thesis is being made
+
+Mark this row `skipped` in the Layer Coverage table when not run, or `n/a` for the M7/QQQ buy-and-hold carve-out (different reason: not "couldn't get data" but "thesis doesn't depend on it").
+
+**Decision output (feeds L6):**
+- Sizing modifier: high conviction + clean fundamentals → top of the 2-5% NLV band; "fundamentals say story is broken but vol setup attractive" → bottom of the band
+- Structure modifier: weak fundamentals AND short-premium structure on the table → require defined-risk wings tighter than usual (no jade lizard, no naked-leg lizard variants)
+- Veto: fundamentals returned `BLOCKED — insufficient data` AND trader was relying on a value re-rate thesis → refuse the structure pick and surface the gap
+
+**Token cost note:** quick mode pulls 5 UW endpoints in parallel (`get_company_info`, `get_income_statements`, `get_cash_flows`, `get_ticker_performances`, `get_analyst_ratings`) plus TV spot — quick mode does NOT pull Massive (keep this layer cheap). ~10-30K tokens. If the trader asks for deep mode (peer matrix, scenario EV), that's a standalone report — exit the ticker-analysis flow and run `fundamental-analysis --depth=deep` directly; deep mode is where Massive augments (related-companies peer set, `source_filing_url` for SEC links, news sentiment) actually pull. Don't try to inline a 10-section report into L5.5.
+
+---
+
 ## Layer 6 — Regime classification + structure pick
 
 **Inputs from above:**
@@ -282,6 +321,7 @@ review) is a backstop, not the primary gate.
 - Directional bias (Layer 3, 200DMA distance + tape)
 - Term structure shape (Layer 2)
 - Catalyst clearance (Layer 5)
+- Fundamentals conviction (Layer 5.5, if run) — sizing band + structure-tightening modifier
 
 **Decision:** map onto the regime × structure matrix in
 `references/strategies.md`. Then:

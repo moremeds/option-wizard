@@ -12,7 +12,7 @@ citations clutter).
 
 Before writing a single section:
 
-1. **Confirm peer set.** Ask the trader if you don't already know who counts as a comparable. Default heuristic: same GICS sub-industry + similar revenue scale (within 5x). Aim for 4-7 peers.
+1. **Confirm peer set.** Default source: Massive `/v1/related-companies/<TICKER>` returns ~10 ranked tickers — take the top 5-7. Only ask the trader if (a) related-companies returned fewer than 4 names, (b) the trader already named a specific cohort, or (c) the top 5-7 are obviously wrong (e.g. wildly different revenue scale or sector). Fallback heuristic when Massive is unavailable: same GICS sub-industry + similar revenue scale (within 5x). Aim for 4-7 peers.
 2. **Define a "closest peer"** for the head-to-head (Section 6). This is the name whose business model most closely mirrors the target — usually the highest-revenue overlap competitor.
 3. **Identify 1-2 turnaround comparables** for Section 5. These are NOT necessarily current peers — they're historical analogues where a similar name went through PE compression and re-rated (up or down). E.g., for LULU you used ANF + AEO (specialty retail PE-floor analogues), not Nike.
 4. **Verify save path exists:** `mkdir -p /Users/chenxi/projects/option-wizard/references/ticker/<TICKER>/`.

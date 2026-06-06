@@ -12,11 +12,15 @@ description: >
   on X", "is this cheap / expensive", "fundamental analysis on X", peer
   comparison, long-term ownership thesis. NOT for trade-decision flow
   (use SKILL.md analysis-runbook for that — vol / GEX / preflight). Data:
-  Unusual Whales for financials (get_income_statements / get_cash_flows /
-  get_balance_sheets / get_fundamental_breakdown / get_earnings_history /
-  get_analyst_ratings / get_ticker_performances / get_short_data_by_ticker
-  / get_institution_holdings) + TradingView for spot/news + WebSearch for
-  recent catalysts (CEO changes, activist filings, missed-quarter context).
+  Unusual Whales (primary) for financials (get_income_statements /
+  get_cash_flows / get_balance_sheets / get_fundamental_breakdown /
+  get_earnings_history / get_analyst_ratings / get_ticker_performances /
+  get_short_data_by_ticker / get_institution_holdings) + Massive REST
+  (tertiary; api.massive.com, Polygon rebrand; requires $MASSIVE_API_KEY)
+  for direct SEC 10-K URLs (source_filing_url), line-item financials,
+  per-article news sentiment, related-companies auto peer-set, and daily
+  short volume per-venue + TradingView for spot + WebSearch fallback for
+  activist 13D / proxy fights (categories Massive news under-indexes).
   Chinese response with English technical terms (PE, EBITDA, FCF, ROE,
   margin, etc.). No fabrication — every quoted number cites source per
   shared/sources.md. Deep reports save to
@@ -53,9 +57,15 @@ When in doubt, ask the trader: "quick brief 还是 deep dive?"
    `shared/sources.md`. If UW returns null / empty / stale, mark it
    `UNVERIFIED` inline — do NOT fill in a plausible-looking guess.
 2. **Source discipline.** Fundamentals from UW (`get_income_statements`,
-   `get_cash_flows`, etc.). Spot price from TV (not UW — per
+   `get_cash_flows`, etc.) as primary; Massive REST as tertiary augment
+   for direct SEC 10-K URLs, line-item financials, related-companies
+   peer set, daily short volume, and news sentiment (requires
+   `$MASSIVE_API_KEY` — if unset, fall back to UW only and flag the gap).
+   Spot price from TV (not UW, not Massive — per
    `~/projects/option-wizard/CLAUDE.md` hard rule #2). Recent catalysts
-   from WebSearch + TV news.
+   from Massive news with sentiment as primary; WebSearch for activist
+   13D / proxy fights / regulatory actions only (categories Massive
+   under-indexes).
 3. **Freshness gate.** Same rule as analysis-runbook: any number
    > 1 trading day stale = `gap`, flag explicitly, do not extrapolate.
    For annual financials, "stale" means the most recent reported FY is
