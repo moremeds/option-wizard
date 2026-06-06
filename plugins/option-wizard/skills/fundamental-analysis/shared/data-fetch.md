@@ -29,12 +29,24 @@ Non-UW data:
 Massive (`api.massive.com`, formerly `api.polygon.io`) fills gaps UW does not cover: direct SEC filing URLs, line-item-rich annuals, daily short volume per-venue, per-article news sentiment, and auto-ranked related companies. Use as augment, not replacement — UW remains primary for standard fundamentals.
 
 **Auth & invocation pattern:**
+
+The key lives in the project's gitignored `.env` (alongside `UW_API_KEY` etc., per the existing pattern in `uw.py`). Claude Code's Bash tool spawns non-interactive shells that skip `~/.zshrc`, so the skill **must source `.env` explicitly** before each Massive call rather than relying on shell config:
+
 ```bash
-# Trader sets MASSIVE_API_KEY in shell rc / .envrc — never hardcoded in skill files.
+# Run from project root (or any directory containing .env).
+set -a; source .env; set +a
 curl -s -H "Authorization: Bearer $MASSIVE_API_KEY" "https://api.massive.com/<path>"
 ```
 
-If `$MASSIVE_API_KEY` is unset, fall back to UW only and flag the gap in the report (do not prompt the trader mid-flow).
+The `set -a` / `set +a` bracket auto-exports every assignment inside `source` — this is how the project's Python scripts already pick up `UW_API_KEY`, so the convention carries over.
+
+If `.env` is missing or `MASSIVE_API_KEY` is empty after sourcing, fall back to UW only and flag the gap in the report (do not prompt the trader mid-flow). Check via:
+
+```bash
+[ -n "$MASSIVE_API_KEY" ] && echo "massive: ok" || echo "massive: skip — key unset"
+```
+
+Project setup (one-time): copy `.env.example` → `.env` and fill in `MASSIVE_API_KEY=<your-key>` (see Massive dashboard for the key). `.env` is gitignored; the key never reaches the repo.
 
 **Verified endpoints (paths confirmed against live API):**
 
