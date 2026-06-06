@@ -826,6 +826,10 @@ def test_parse_futu_trades_filters_window():
 
     report = {
         "trades": {
+            "dateRange": {
+                "from": "2026-05-01T00:00:00.000Z",
+                "to": "2026-06-06T15:59:59.000Z",  # fresh through Sat 6/06
+            },
             "matchedTrades": [],
             "unmatchedTrades": [
                 {
@@ -841,6 +845,70 @@ def test_parse_futu_trades_filters_window():
     }
     out = parse_futu_trades(report, date(2026, 5, 30), date(2026, 6, 6))
     assert out == []
+
+
+def test_parse_futu_trades_raises_when_stale():
+    """Hard rule #7: Futu cache ending before the last trading day in window must error.
+
+    The Futu CLI caches by ISO week, so re-runs without `--rerun` return data
+    silently 1-2 trading days stale. This is more dangerous than missing data:
+    the report appears to succeed but the most recent trading day's activity
+    is dropped. (Observed in first v0.3 weekly run, where 26 trades on 6/05
+    were missing from a cache that stopped at 6/04 EOD.)
+    """
+    from scripts.retrospective import parse_futu_trades
+
+    report = {
+        "trades": {
+            "dateRange": {
+                "from": "2026-05-01T00:00:00.000Z",
+                "to": "2026-06-04T15:59:59.000Z",  # cache ends Thu
+            },
+            "matchedTrades": [],
+            "unmatchedTrades": [],
+        }
+    }
+    # window_end Sat 6/06 → last trading day = Fri 6/05. Cache to Thu 6/04 < 6/05 → stale.
+    with pytest.raises(ValueError, match="Futu data stale"):
+        parse_futu_trades(report, date(2026, 5, 30), date(2026, 6, 6))
+
+
+def test_parse_futu_trades_allow_stale_overrides_freshness_gate():
+    """`allow_stale=True` opt-out for deliberate backfills / historical reviews."""
+    from scripts.retrospective import parse_futu_trades
+
+    report = {
+        "trades": {
+            "dateRange": {
+                "from": "2026-05-01T00:00:00.000Z",
+                "to": "2026-06-04T15:59:59.000Z",  # would normally be stale
+            },
+            "matchedTrades": [],
+            "unmatchedTrades": [],
+        }
+    }
+    out = parse_futu_trades(
+        report, date(2026, 5, 30), date(2026, 6, 6), allow_stale=True
+    )
+    assert out == []
+
+
+def test_parse_futu_trades_fresh_through_friday_is_ok_when_window_ends_saturday():
+    """Sat window_end + cache through Fri = NOT stale (Fri is the last trading day)."""
+    from scripts.retrospective import parse_futu_trades
+
+    report = {
+        "trades": {
+            "dateRange": {
+                "from": "2026-05-01T00:00:00.000Z",
+                "to": "2026-06-05T15:59:59.000Z",  # Friday EOD
+            },
+            "matchedTrades": [],
+            "unmatchedTrades": [],
+        }
+    }
+    out = parse_futu_trades(report, date(2026, 5, 30), date(2026, 6, 6))
+    assert out == []  # no trades but no exception either
 
 
 # ----- Hard rule #9: source separation invariants -----

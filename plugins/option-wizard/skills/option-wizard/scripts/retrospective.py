@@ -1220,10 +1220,19 @@ def _futu_leg_to_trade(
     )
 
 
+def _last_trading_day_at_or_before(d: date) -> date:
+    """Skip back over weekends (Sat=5, Sun=6). Used by the Futu staleness gate."""
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
 def parse_futu_trades(
     futu_report: dict[str, Any],
     window_start: date,
     window_end: date,
+    *,
+    allow_stale: bool = False,
 ) -> list[Trade]:
     """Convert portfolio-analyser JSON report → Trade[].
 
@@ -1231,8 +1240,29 @@ def parse_futu_trades(
     matched pair emits two Trade objects (open + close, with the pair's
     `realizedPnl` attached to the close leg). Unmatched legs emit one
     Trade each with `realized_pnl=None`. Filters to date window inclusive.
+
+    Freshness gate (SKILL.md hard rule #7): the Futu CLI caches by ISO
+    week, so a re-run without `--rerun` happily returns data 1-2 trading
+    days stale. This silently breaks Layer B — the entire most recent
+    trading day's activity gets dropped. We enforce: `dateRange.to`
+    (from the report JSON) MUST be >= the last trading day at or before
+    `window_end`. Raises `ValueError` if stale. Pass `allow_stale=True`
+    to opt out (e.g., backfills, deliberate historical reviews).
     """
     trades_block = futu_report.get("trades", {})
+    if not allow_stale:
+        to_iso = str(trades_block.get("dateRange", {}).get("to", ""))
+        to_date = _iso_to_date(to_iso)
+        last_td = _last_trading_day_at_or_before(window_end)
+        if to_date is not None and to_date < last_td:
+            raise ValueError(
+                f"Futu data stale: report dateRange.to is {to_date}, "
+                f"but the last trading day at or before review window_end "
+                f"({window_end}) is {last_td}. "
+                "Re-pull with `cd ~/projects/portfolio-analyser && "
+                "npx tsx src/cli.ts ft --range 1m --rerun` or pass "
+                "`allow_stale=True` to override (per SKILL.md hard rule #7)."
+            )
     out: list[Trade] = []
     for pair in trades_block.get("matchedTrades", []):
         realized = pair.get("realizedPnl")
