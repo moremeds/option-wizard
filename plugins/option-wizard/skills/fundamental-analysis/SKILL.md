@@ -1,35 +1,20 @@
 ---
 name: fundamental-analysis
 description: >
-  Equity fundamental analysis for US-listed tickers — pulls the financial
-  fact sheet (revenue / margins / FCF / balance sheet / capital returns)
-  and synthesizes a valuation read. Two depth modes: --depth=quick (3-section
-  brief, ~5 min, slots into option-wizard's ticker analysis as a fundamentals
-  layer) and --depth=deep (11-section LULU-style equity research report
-  with peer matrix, historical PE percentile, turnaround case studies, EV
-  scenario, MD+HTML+PDF export). Use when the trader asks about company
-  quality, valuation re-rating, "why is the PE so low / high", "deep dive
-  on X", "is this cheap / expensive", "fundamental analysis on X", peer
+  Equity fundamental analysis for US-listed tickers. Two modes: quick
+  (3-section brief, slots into ticker analysis as fundamentals layer)
+  and deep (11-section LULU-style report with peer matrix, PE percentile,
+  turnaround case studies, EV scenario, MD+HTML+PDF export). Use for
+  "deep dive on X", "is X cheap", "X 估值", "X 为什么 PE 这么低",
+  "深度研究 X", "fundamentals on X", "equity research on X", peer
   comparison, long-term ownership thesis. NOT for trade-decision flow
-  (use SKILL.md analysis-runbook for that — vol / GEX / preflight). Data:
-  Unusual Whales (primary) for financials (get_income_statements /
-  get_cash_flows / get_balance_sheets / get_fundamental_breakdown /
-  get_earnings_history / get_analyst_ratings / get_ticker_performances /
-  get_short_data_by_ticker / get_institution_holdings) + Massive REST
-  (tertiary; api.massive.com, Polygon rebrand; requires $MASSIVE_API_KEY)
-  for direct SEC 10-K URLs (source_filing_url), line-item financials,
-  per-article news sentiment, related-companies auto peer-set, and daily
-  short volume per-venue + TradingView for spot + WebSearch fallback for
-  activist 13D / proxy fights (categories Massive news under-indexes).
-  Chinese response with English technical terms (PE, EBITDA, FCF, ROE,
-  margin, etc.). No fabrication — every quoted number cites source per
-  shared/sources.md. Deep reports save to
-  /Users/chenxi/projects/option-wizard/plugins/option-wizard/skills/fundamental-analysis/references/ticker/<TICKER>/ in MD,
-  HTML, PDF (public GitHub repo — do not save anything proprietary).
-  Triggers on: "分析 X 基本面", "X 估值", "X 为什么 PE 这么低", "X 现在
-  便宜吗", "X 公司质量怎么样", "深度研究 X", "fundamentals on X",
-  "deep dive on X", "is X cheap", "equity research on X", "why is X PE
-  so low", "compare X vs Y vs Z fundamentals".
+  (use option-wizard SKILL.md for vol / GEX / preflight). Data: UW MCP
+  for financials, Massive REST for SEC URLs + news sentiment + peer set
+  + daily short volume, TradingView for spot, WebSearch for activist
+  13D / proxy fights. Chinese response with English technical terms.
+  No fabrication — every number cites source per shared/sources.md.
+  Deep reports save to references/ticker/<TICKER>/ (public repo —
+  strip proprietary NLV / positions before save).
 ---
 
 # fundamental-analysis
