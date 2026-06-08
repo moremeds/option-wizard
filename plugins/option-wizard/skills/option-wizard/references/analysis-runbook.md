@@ -121,9 +121,30 @@ out = compute_vrp(iv, rv, with_label=True)
 front-loaded catalyst (would show as inverted term structure) and tells
 you which side of the smile is structurally bid.
 
-**Pull:** `get_chains_for_expiry` for 4-5 expiries spanning the trade
-window — typically front-week, trade expiry, post-trade-expiry, post-ER.
-Limit ~30 strikes (sorted by volume in UW output) to keep response small.
+**Pull (Workflow 1 — new-position analysis):** `get_chains_for_expiry`
+for 4-5 expiries spanning the trade window — typically front-week, trade
+expiry, post-trade-expiry, post-ER. Limit ~30 strikes (sorted by volume
+in UW output) to keep response small.
+
+**Pull (Workflow 3 — position review mode):** the expiry list is **not**
+the generic 4-5 span — it is the **actual set of held expiries** for the
+ticker, plus the nearest weekly above the longest holding (anchor for
+the term-curve extrapolation). Example: 6/4 TSLA book held 7/17 + 8/21
++ 1/15 → pull those three + one anchor like 6/12. ATM ± 3 strikes per
+expiry is enough to read ATM IV; full chain is wasteful here. Build the
+IV term curve over the held window and explicitly label
+**contango / flat / inversion** per adjacent expiry pair.
+
+Single-ticker IV rank or 52w IV percentile (as served by UW
+`get_options/volatility` or IB `get_price_snapshot` field
+`option-implied-volatility-historical-percentile-52-week`) is a
+**point-in-time aggregate** — it does NOT reveal whether the trader is
+short vol on the rich part of the curve or the cheap part. A position
+review that quotes only IV percentile and skips the held-expiry term
+curve is missing the most important Workflow-3 signal: whether one of
+the held shorts sits on an inverted (catalyst-priced) chunk of the
+curve. This was the gap in the 6/4 TSLA Futu review and is now codified
+as required, not optional.
 
 **Compute:**
 - ATM IV per expiry = average of ATM call IV and ATM put IV. Look for
