@@ -120,6 +120,7 @@ points into specific layers without re-reading the whole runbook.
 | **About to recommend jade lizard / iron condor / calendar / diagonal** | **MANDATORY**: `references/strategies.md` §"Strong bullish conviction veto" — run the 4-signal check FIRST. If ≥3 fire, refuse and recommend long call / bull put spread / risk reversal / CSP instead |
 | Computing gamma flip / put wall / call wall from UW GEX | `references/gamma-framework.md`; invoke `scripts.gex_levels::compute_levels_per_expiry` with `call_wall_definition='oi_cluster'` for short-dated trades (aggregate `compute_levels` is misleading for short windows — see runbook Layer 1) |
 | Labelling vol regime (RICH / NEUTRAL / CHEAP) | `scripts.vrp::compute_vrp` — IV − RV with ±5pp thresholds |
+| Labelling IV term-curve regime (contango / flat / inverted) across held or analyzed expiries | `scripts.term_curve::label_regime` for per-pair labels + `summarize_regime` for the aggregate; `atm_iv_from_chain_rows` extracts ATM IV from a `get_chains_for_expiry` response. Single source of truth for Workflow 1 L2, Workflow 3 stage-2 item (h), and Workflow 6 step 3b. Inline LLM-judge labels are forbidden — they drift across runs. |
 | Reading TV chart, tape, news, catalyst-clock validation | `references/price-action-framework.md`; `references/data-sources.md` for TV setup gotchas (opencli ≥ 1.8.0, port 9222 collision with chrome-devtools-mcp, stale TV process recovery) |
 | FCN / ELN quote evaluation ("PB 给我报了 X% coupon on Y") | `references/fcn-framework.md`; `scripts.fair_coupon::analyze_fcn`. Output is the 8-item PB checklist + 70/75/80/85% strike ladder + bilingual counter-offer email — do NOT route through IB (hard rule #5) |
 | AQ/DQ quote evaluation ("PB 给我报了 AQ", "evaluate aq quote") | `references/aq-dq-framework.md`; `scripts.fair_aq_dq::analyze_quote` + `optimize_terms` + `build_counter_offer_email`. Output: 6-refusal-check → 8-item PB checklist → fair-value breakdown w/ provenance → Pareto frontier → bilingual email. Do NOT route through IB (hard rule #5). |
@@ -242,6 +243,22 @@ print(compute_levels(rows, spot=423.74))
 
 # VRP regime label
 .venv/bin/python -c 'from scripts.vrp import compute_vrp; print(compute_vrp(0.50, 0.40, with_label=True))'
+
+# IV term-curve regime (Workflow 1 L2 / Workflow 3 stage-2 (h) / Workflow 6 step 3b).
+# Caller supplies ATM IV per held (or analyzed) expiry. Use
+# atm_iv_from_chain_rows() if you only have raw UW chain responses.
+.venv/bin/python -c '
+from scripts.term_curve import label_regime, summarize_regime
+atm = {"2026-07-17": 0.42, "2026-08-21": 0.55, "2026-09-19": 0.46, "2027-01-15": 0.48}
+pairs = label_regime(atm)
+for p in pairs:
+    print(p["from_expiry"], "→", p["to_expiry"], p["regime"], "basis", round(p["basis"], 3))
+print("aggregate:", summarize_regime(pairs))
+# 2026-07-17 → 2026-08-21 contango basis 0.13
+# 2026-08-21 → 2026-09-19 inverted basis -0.09
+# 2026-09-19 → 2027-01-15 contango basis 0.02
+# aggregate: mixed_contango_inverted
+'
 
 # FCN ladder analysis (model path — no chain in snapshot)
 .venv/bin/python -c '

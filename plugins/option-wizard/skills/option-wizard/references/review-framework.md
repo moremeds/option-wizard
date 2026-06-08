@@ -239,6 +239,46 @@ remaining horizons report N/A. Reports surface the % of marks that came
 from `chain` vs `model` so the trader knows how much to trust the
 markout curve.
 
+### Open multi-expiry term-curve snapshot
+
+After trade-flow markouts complete, any ticker that still has **open**
+positions across ≥2 expiries gets a current-time IV term-curve check.
+This is the **same** check Workflow 3 (book review) runs in real-time
+— here it's invoked retroactively as part of the 复盘 so a trader who
+hasn't run a book review since the positions were opened still sees
+the regime.
+
+**Mechanics:**
+- Pull `get_chains_for_expiry` for each held expiry (ATM ± 3 strikes
+  is enough — full chain is wasteful here).
+- Extract ATM IV per expiry via
+  `scripts.term_curve.atm_iv_from_chain_rows(rows, spot)`.
+- Label adjacent pairs via
+  `scripts.term_curve.label_regime(atm_iv_by_expiry)` →
+  list of `{from_expiry, to_expiry, iv_from, iv_to, basis, regime}`.
+- Collapse with `scripts.term_curve.summarize_regime(pairs)` →
+  one of `all_contango`, `all_inverted`, `all_flat`,
+  `mixed_contango_inverted`, `mixed_with_flat`.
+
+Surface the per-pair table + aggregate label under Layer B's
+per-ticker block. **Skip** any ticker with only one held expiry (no
+adjacent pair to label). Single-ticker IV rank / 52w percentile
+**does not substitute** for this — same rule as Workflow 3.
+
+**Why it lives in Layer B, not Layer A:** the check needs the
+**actual held expiries**, which only the broker side knows. Archive
+files document the proposed thesis but not what is currently open
+across expiries. This is why the check sits in the Layer B pipeline
+(step 3b in `workflows-overview.md` Workflow 6) rather than the
+archive-driven Layer A.
+
+**Why not auto-emit an action item:** the regime label is a signal,
+not a directive. A ticker with `mixed_contango_inverted` may already
+be intentionally structured that way (e.g., long the inverted expiry
+as a vol-crush hedge against the contango short). Whether to roll
+the inverted leg out is a trader-judgment decision and surfaces in
+Layer C if the trader chooses to flag it.
+
 ## Layer C — Cross-cut (advisory, judgment-only)
 
 **No algorithmic scorecard. No `followed × correct` quadrant. No automated reconciliation.** Per hard rule #9, the framework refuses to auto-join archive (Layer A) and broker (Layer B) data — those are independent streams answering separate questions.

@@ -147,8 +147,17 @@ curve. This was the gap in the 6/4 TSLA Futu review and is now codified
 as required, not optional.
 
 **Compute:**
-- ATM IV per expiry = average of ATM call IV and ATM put IV. Look for
-  monotonic increase (contango = normal) or any inversion.
+- ATM IV per expiry = average of ATM call IV and ATM put IV. Use
+  `scripts.term_curve.atm_iv_from_chain_rows(rows, spot)` to extract
+  ATM IV from each `get_chains_for_expiry` response (handles
+  single-side fallback + tolerates string-formatted IV fields).
+- Term-curve labels via **`scripts.term_curve.label_regime(atm_iv_by_expiry)`**
+  — returns adjacent-pair labels (`contango` / `flat` / `inverted`) plus
+  basis. Use `summarize_regime(pairs)` for a single aggregate label
+  (`all_contango`, `all_inverted`, `mixed_contango_inverted`, etc.) to
+  drop into stage-2 book-review or 复盘 tables. The script is the single
+  source of truth — do NOT inline LLM-judge contango / inversion; that
+  produced inconsistent labels across runs.
 - 25Δ skew at the trade expiry = (25Δ call IV) − (25Δ put IV). Equity
   convention is **negative** (puts richer). Positive skew is unusual and
   signals heavy retail call demand (TSLA / NVDA / COIN behavior).
