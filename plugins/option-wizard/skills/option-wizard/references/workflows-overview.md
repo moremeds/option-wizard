@@ -62,7 +62,7 @@ into the linked deep-reference file for the per-step detail.
 | Stage | Action | Tooling |
 |---|---|---|
 | **1. Data pull (ALL configured brokers)** | (a) IB MCP primary: `get_account_summary` + `get_account_positions` + `get_account_orders`. (b) Any secondary brokers documented in `private/trader-profile.md` — run the pull command specified there (user-provided CLI / MCP / Python wrapper), then translate the output to IB shape (`contract_description` / `position` / `market_price`) before feeding into the audit pipeline. Report broker pull success/failure + data gaps (e.g., if a CLI report omits cash balance, note it as a gap and fall back to a separate pull if needed) | IB MCP + user-provided secondary broker connector(s) |
-| **2. Book-level analysis** | (a) Concentration: abs MV % + Δ-1 notional vs NLV. (b) Net Greeks: Δ / Γ / Θ / V + Δ-1 single-name bars. (c) Every leg listed. (d) **Defined-risk audit verdict** (`scripts.defined_risk_audit::audit_book`) with $20 strike-width false-positive callouts. (e) 22-45 DTE watchlist. (f) Catalyst clock per ticker (ER, FOMC). (g) Data quality flags (stale price, missing field). (h) **IV term verification across held expiries** — for any ticker with positions across ≥2 expiries, pull ATM IV at each held expiry (`get_chains_for_expiry`, ATM ± 3 strikes per expiry) and build the IV term curve over the actual exposure window. Flag contango (normal) vs inversion (catalyst priced into one of the held expiries). Single-ticker IV rank / 52w percentile is NOT a substitute — see `analysis-runbook.md` L2 §"Position-review mode" | `scripts.manage_positions --audit-only --no-email` (or call constituents directly) + `get_chains_for_expiry` per held expiry |
+| **2. Book-level analysis** | (a) Concentration: abs MV % + Δ-1 notional vs NLV. (b) Net Greeks: Δ / Γ / Θ / V + Δ-1 single-name bars. (c) Every leg listed. (d) **Defined-risk audit verdict** (`scripts.defined_risk_audit::audit_book`) with $20 strike-width false-positive callouts. (e) 22-45 DTE watchlist. (f) Catalyst clock per ticker (ER, FOMC). (g) Data quality flags (stale price, missing field). (h) **IV term verification across held expiries** — for any ticker with positions across ≥2 expiries, pull ATM IV at each held expiry (`get_chains_for_expiry`, ATM ± 3 strikes per expiry), extract via `scripts.term_curve.atm_iv_from_chain_rows`, label adjacent pairs with **`scripts.term_curve.label_regime`**, and collapse with `summarize_regime`. Surface the per-pair regime table + the aggregate label (`all_contango` / `mixed_contango_inverted` / `all_inverted` / etc.) per ticker. Single-ticker IV rank / 52w percentile is NOT a substitute — see `analysis-runbook.md` L2 §"Position-review mode" | `scripts.manage_positions --audit-only --no-email` (or call constituents directly) + `get_chains_for_expiry` per held expiry + `scripts.term_curve` |
 | **3. NO mid-flow decision** | 21 DTE positions, approaching-21 DTE, ER catalyst, large shorts, data anomalies — **observed in stage 2, NOT acted on yet** | — |
 | **4. Consolidated Action items (at the END, all together)** | 4 groups: **P1, P2, …** position-level (close/roll/hold menu inline); **D1, D2, …** data quality; **R1, R2, …** book-level risks (concentration, macro delta, cover failure); **I1, I2, …** infra. Each line ends with trigger phrase ("P1 submit" / "D2 verify"). **Wait** for trader to pick → then hard-rule-#3 preflight expands | — |
 
@@ -159,6 +159,17 @@ decumulator|eln]` are filtered at the extraction stage.
    `parse_ib_trades` + `parse_futu_trades`. Compute `compute_trade_markout`
    per fill (D1 excludes closes via `realized_pnl != 0`).
    Aggregate via `aggregate_trade_markout`.
+   - **3b. Open multi-expiry term-curve snapshot.** After trade-flow
+     aggregation, any ticker that still has **open** positions across
+     ≥2 expiries gets the same Workflow-3 check: pull
+     `get_chains_for_expiry` per held expiry (ATM ± 3 strikes), extract
+     ATM IV via `scripts.term_curve.atm_iv_from_chain_rows`, label
+     adjacent pairs via `scripts.term_curve.label_regime`, and surface
+     the regime table + aggregate label (via `summarize_regime`) under
+     Layer B's per-ticker block. This catches **retroactively** the
+     same gap Workflow 3 catches in real-time: a held short sitting
+     on an inverted (catalyst-priced) chunk of the curve. Skip the
+     ticker if it has only one held expiry.
 4. **Cross-cut advisory (Layer C) — opt-in.** Trader (or LLM) supplies
    judgment-only observations linking specific Layer A calls to Layer B
    trades. **No automatic `followed × correct` quadrant.** Each
