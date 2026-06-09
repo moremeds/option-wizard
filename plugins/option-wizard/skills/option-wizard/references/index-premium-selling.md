@@ -25,15 +25,36 @@ loses signal).
 
 - **UW**: IV rank, VRP label (via `scripts.vrp::compute_vrp`), GEX
   by strike (via `get_greek_exposure_by_strike` → `scripts.gex_levels`),
-  0DTE flow per expiry, max pain
+  0DTE flow per expiry, max pain. Chain (analytical): `get_options_chain`
 - **TV** (via `finance-data-providers:tradingview-reader`): spot,
   SMA(20/50/200), RSI(14), VIX & VIX1D & VIX9D term, news / catalyst
-  headlines
+  headlines. Chain (when desktop session live): `opencli tv options-chain`
 - **IB** (live trade mode): chain mid via `get_options_chain` (when
   decision <60s), `get_account_summary` for buying power
 
-Forbidden: UW `get_extended_technical_indicator` (lagged); IB for IV
-rank / skew / GEX (IB doesn't compute these).
+Forbidden: UW `get_extended_technical_indicator` (lagged); IB / TV for
+IV rank / skew / GEX (UW exclusive territory).
+
+### 2.1 Chain transform contract (UW / IB / TV)
+
+`build_diagonal_calendar(snapshot["chain"])` expects nested form:
+```python
+chain[expiry_iso][strike_pct][right] = {
+    "mid": float,           # in dollars per share
+    "iv": float,            # decimal, e.g., 0.235 for 23.5%
+    "greeks": {"delta": ..., "gamma": ..., "theta": ..., "vega": ...},
+}
+```
+
+| Source | Native shape | Transform |
+|---|---|---|
+| **UW** `get_options_chain` | `{states: [{iv, delta, gamma, theta, vega, strike, expires, option_type, theo, last_price, ...}, ...]}` | flat → nested via `s["expires"]` → `float(s["strike"])/spot` (4dp round) → `s["option_type"]`; `mid = s["theo"]` (or `(bid+ask)/2` when available); lift greeks |
+| **IB** `ib_insync.reqMktData` | `Ticker(bid, ask, modelGreeks=...)` | `mid = (bid+ask)/2`; lift `modelGreeks.{delta,gamma,theta,vega}` |
+| **TV** `opencli tv options-chain` | rows with `bid / ask / iv` (and greeks on Pro/Premium plans) | `mid = (bid+ask)/2`; lift greeks if present, else `greeks_source="bsm_fallback"` |
+
+Set `snapshot["chain_source"] ∈ {"UW", "IB", "TV"}`. Each leg's
+`mid_source` inherits this value; legs that fell back to BSM get
+`mid_source = "fallback"`.
 
 ## 3. CSP on index ETF (QQQ / SPY / IWM)
 

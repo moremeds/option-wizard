@@ -38,16 +38,26 @@ incantations.
    | Data point | Primary | Fallback | Why |
    |---|---|---|---|
    | Spot | TV | IB `get_price_snapshot` | TV intra-minute fresh + chart-verifiable; IB broker-feed authoritative for live-trade gating |
-   | Option chain mid / IV / greeks | **IB** (live trade <60s decision) / **UW** (analytical context) | mutual fallback | IB seconds-fresh from broker feed; UW better for skew/term analytical context |
+   | Option chain mid / IV / greeks | **IB** (live trade <60s decision) / **UW** (analytical context) / **TV** (opencli session, when already running) | mutual fallback | IB seconds-fresh from broker feed; UW better for skew/term analytical context; TV piggybacks the same desktop session used for spot/news (one fewer auth boundary, but no IV rank / GEX) |
    | OHLCV historical | TV (chart context) | IB `get_price_history` (backtest precision) | — |
 
    **Forbidden:**
    - UW `get_extended_technical_indicator` / `get_ticker_indicator_series` for analysis (series lagged by weeks)
    - IB for IV rank / skew / GEX / max pain (IB doesn't compute these derivative metrics)
+   - TV for IV rank / skew / GEX / max pain / RV (UW is the only source for derivative metrics)
 
    **Rule of thumb:** if any of the three serves it directly, never recompute. Verdict / analysis output must carry `data_provenance` for every quoted metric so the trader can audit the source.
 
-   **Skill-wide chain-mid path:** `scripts.fair_aq_dq`, `scripts.fair_coupon`, `scripts.macro_hedge` ALL accept an optional `chain` field on their snapshot input. When provided, listed-strike option mids are read directly from the chain (per workflow §2 source-selection: UW analytical default / IB live-trade) instead of recomputed via BSM. Output fields tag the source: `fair_coupon_source` ∈ {chain, model}, `pricing_source` ∈ {chain, mixed, bsm}, leg-level `mid_source` and `mid_provenance`. Orchestrator MUST pull a chain into the snapshot before calling these scripts when the trader is in live-trade or fair-value-comparison mode.
+   **Skill-wide chain-mid path:** `scripts.fair_aq_dq`, `scripts.fair_coupon`, `scripts.macro_hedge`, `scripts.diagonal_calendar` ALL accept an optional `chain` field on their snapshot input. When provided, listed-strike option mids are read directly from the chain (per workflow §2 source-selection: UW analytical default / IB live-trade / TV when desktop session live) instead of recomputed via BSM. Output fields tag the source: `fair_coupon_source` ∈ {chain, model}, `pricing_source` ∈ {chain, mixed, bsm}, leg-level `mid_source` ∈ {UW, IB, TV, fallback} and `mid_provenance`. Orchestrator MUST pull a chain into the snapshot before calling these scripts when the trader is in live-trade or fair-value-comparison mode.
+
+   **Chain orchestrator-transform contract:** UW / IB / TV native shapes differ — the orchestrator (skill prompt) MUST transform into the nested form:
+   ```
+   chain[expiry_iso][strike_pct][right] = {"mid": float, "iv": float, "greeks": {delta, gamma, theta, vega}}
+   ```
+   - **UW** `get_options_chain` returns `{states: [flat list of option_state]}` with greeks as top-level fields (`delta`, `gamma`, `theta`, `vega`), no `mid` (use `theo` or `(bid+ask)/2`); group by `expires` → `strike/spot` → `option_type`.
+   - **IB** via `ib_insync.reqMktData` returns a `Ticker` with `bid`/`ask`/`modelGreeks`; compute `mid = (bid+ask)/2`, lift `modelGreeks` → nested `greeks`.
+   - **TV** via `opencli tv options-chain` returns rows with `bid`/`ask`/`iv` and (depending on TV plan) greeks; same `mid = (bid+ask)/2` + nested greeks transform.
+   - `chain_source` ∈ {"UW", "IB", "TV"}; legs inherit this as `mid_source`. BSM fallback flags `mid_source = "fallback"` per leg.
 3. Every order shows the pre-flight (legs, mid price, net debit/credit, max loss, max gain, breakeven, margin, P/L matrix at expiry across spot −20 / −10 / −5 / 0 / +5 / +10 / +20 percent, account verification, UW regime check, liquidity check, catalyst clock) before submission. Exactly one YES/NO question. YES → submit via `ib_insync.placeOrder` (IB option orders) or `create_order_instruction` (IB stock drafts for tap-to-approve). Non-IB broker orders (any secondary broker configured in `private/trader-profile.md`) typically have no auto-submit path — flag "manual entry in the broker's trading app" in the preflight. Anything else → abort. Live-account preflight is the safety boundary — do **not** propose paper-account (IB TWS paper instance) tests, and do not treat paper-account criteria as a blocker.
 4. Any short-premium position at 21 DTE surfaces as an entry in the consolidated **Action items** section at the end of the book review (see §"Book-review output structure"). It is **not** a mid-flow blocking YES/NO prompt — the trader picks close / roll / hold-and-accept-gamma from the action-items menu, and only then does the full hard-rule-#3 preflight expand.
 5. **PB structured products (FCN / AQ / DQ): no IB ORDER ROUTING; IB MARKET DATA is allowed.** This is two separate concerns:
