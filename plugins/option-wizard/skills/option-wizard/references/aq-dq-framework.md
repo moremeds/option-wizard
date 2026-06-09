@@ -91,6 +91,8 @@ Verdict carries `mode='implicit_yield_aq'` and `discount_implied_yield_pa` (rath
 | `iv_rank`, `rv_30d`, `rv_90d` | UW | derivative metrics |
 | `gex_levels`, `max_pain` | UW | path-context |
 | `max_drawdown_5y` | fallback only | when chain doesn't cover deep-OTM tail (50% spot put) |
+| `high_52w`, `low_52w` | UW `get_ticker_candles_by_range` (interval=1y, range=4h) — min(low) / max(high) across 1y bars | **required for R0 (§6) + MoS (§6.5)**. Filter null bars before reduction. |
+| `avg_er_max_move_pct` | UW `get_earnings_history` × historical OHLC around ER dates (last 4-8 quarters) — max(intraday + close-to-close move) avg | **required for R6 graduated (§6.2)**. Fallback to `ATR(14)/spot × 2.0` if ER history < 4 quarters. |
 
 **Verdict carries `data_provenance` field** mapping every numeric output to its source. Example:
 
@@ -140,20 +142,98 @@ Each lever shows: parameter change → typical markup reduction (in pp) → PB p
 3. KO push-out is a fallback if doubling won't move.
 4. Combining 2-3 levers compounds the reduction; `optimize_terms` ranks by combined effect.
 
-## §6 Refusal red lines — 6 hard refusals
+## §6 Refusal red lines — 7 hard refusals (R0 + R1-R6)
 
-If ANY of the following triggers, output `decision='REFUSE'` immediately (before any chain pull / fair-value math). Document the triggered reason; do NOT continue to evaluate.
+If ANY of the following triggers, output `decision='REFUSE'` immediately (before any chain pull / fair-value math). Document the triggered reason; do NOT continue to evaluate. R0 runs FIRST as a pre-filter — it screens the underlying itself, before any quote-specific check.
 
 | # | Trigger | Why |
 |---|---|---|
+| **0** | `(snapshot.high_52w / snapshot.low_52w) > 3.0` | **52w peak-to-trough mean-reversion screen.** AQ locks trader 12M at fixed strike with no early exit; if the underlying has ranged 3×+ in the past 12M, today's strike sits comfortably above the recent low and there's no meaningful margin of safety. Bands: 1.5-2× = fundamentally driven (proceed); 2-3× = cyclical (CAUTION, tighten strike/KO requirements); 3-5× = speculative/momentum (REFUSE); >5× = extreme turnaround/IPO momentum (HARD REFUSE regardless of strike%). PB AQ pitches strikes vs current spot, not historical range; R0 corrects this framing. |
 | 1 | `doubling_factor >= 3.0` | Tail loss scales linearly with doubling; 3× is institutional-only territory, retail PB pricing fails |
 | 2 | `direction='AQ' AND iv_rank < 30` | Selling vol when vol is cheap means PB's vol-markup % is highest; you're double-screwed |
 | 3 | `abs(spot − ko_barrier) < 1 × ATR(14)` | KO virtually guaranteed to trigger early; you get fees but ~zero of the yield |
 | 4 | `shares_per_obs × strike_abs × n_obs × doubling_factor > 0.10 × NLV` (max-exposure notional) | True worst-case cash commitment > 10% portfolio NLV. **NOTE**: this formula intentionally includes `strike_abs` (the price PB will buy you in at — NOT spot) and `doubling_factor` (worst-case forced accumulation rate). The legacy `daily_notional × n_obs` formula systematically understated exposure on shares-denominated PB AQ contracts by 10-20%. |
 | 5 | `tenor_months > 18` | PB markup grows super-linearly past 18M; longer tenors compound their edge |
-| 6 | **ANY** earnings date in middle 50% of tenor (iterates `s.earnings_dates_iso` if provided, else quarterly-extrapolates from `s.earnings_date_iso`) | Binary event + doubling + KO is unmanageable. **NOTE**: legacy behavior only checked the single next-ER, which silently passed 12M+ tenors that had Q3 / Q4 ERs in middle 50%. Iteration is mandatory for tenors ≥ 9M. |
+| 6 | **Graduated ER check** — see §6.2 below | Pure binary "ANY ER in middle 50%" was too crude — a stable big-cap (LLY avg ER move ~7%) and a volatile mid-cap (ALAB avg ER move ~12%) should not be treated identically. R6 graduated: compare `avg_ER_max_move` to `KO_distance`. **Legacy binary R6** (`ANY ER → REFUSE`) is still available via `quote.use_legacy_r6=True` for conservative trader preference. |
 
 If trader insists on proceeding despite a red line, framework still runs evaluation but `decision` stays `REFUSE` and counter-offer email's preamble explicitly notes the red line.
+
+## §6.2 R6 graduated — ER avg-move vs KO-distance check
+
+R6 replaces the legacy binary "ANY ER in middle 50%" with a quantitative per-row check.
+
+**Step 1 — compute `avg_ER_max_move_pct` for the ticker:**
+
+- **Primary**: UW `get_earnings_history` × historical OHLC around each ER date. For each of the last 4-8 quarters, compute `max(|prior_close → ER_high|, |prior_close → ER_low|, |prior_close → next_close|) / prior_close`. Take the average. Use intraday range — close-to-close systematically understates because AQ daily-monitored KO triggers on intraday touch, not just closing print.
+- **Fallback**: `ATR(14)/spot × 2.0` when ER history unavailable (post-IPO names with <2y data, or restricted UW history). Flag as `estimated` in provenance.
+
+**Step 2 — compare against each row's KO distance:**
+
+```
+KO_distance_pct = (ko_abs - spot) / spot
+
+R6a (REFUSE):     avg_ER_max_move_pct > KO_distance_pct
+                   → ER will likely trigger KO every report
+                   → row flagged 'REFUSE' on R6
+
+R6b (CAUTION):    0.5 × KO_distance_pct ≤ avg_ER_max_move_pct ≤ KO_distance_pct
+                   → ~50% probability ER breaches KO
+                   → row flagged 'CAUTION' (warning, NOT refusal)
+
+R6c (PASS):       avg_ER_max_move_pct < 0.5 × KO_distance_pct
+                   → ER move too small to threaten KO independently
+                   → R6 cleared for this row
+
+R6d (doubling-tail additional check):
+                   if avg_ER_down_move_pct > (1 - strike_pct) × 0.3
+                   → doubling tail can be activated by single ER drop
+                   → flag as 'doubling_tail_risk' warning; do NOT block
+```
+
+Since R6 is now per-row, the verdict can return MIXED status: some rows REFUSE on R6a, others PASS via R6c on the same ticker. The orchestrator surfaces this differentiation rather than collapsing the entire ticker to a single REFUSE.
+
+R6 graduated is the default after framework version 2026-06-10. To force legacy binary behavior, set `quote.use_legacy_r6=True`.
+
+## §6.5 Margin of Safety analytical layer
+
+Separate from the 7 hard refusals: every Verdict now includes a Margin of Safety (MoS) computation per row. **Not a hard refusal** — surfaces an "entry quality" rating that helps the trader compare across rows and across tickers.
+
+**MoS metrics (per KO/strike row):**
+
+```
+strike_abs               = strike_pct × entry_spot
+mos_vs_52w_lo_pct        = (strike_abs - snapshot.low_52w) / snapshot.low_52w
+mos_in_52w_range_pct     = (strike_abs - snapshot.low_52w) / (snapshot.high_52w - snapshot.low_52w)
+mos_downside_at_lo_pct   = (snapshot.low_52w - strike_abs) / strike_abs    # negative = paper loss
+```
+
+**MoS rating bands:**
+
+| `mos_in_52w_range_pct` | Rating | Meaning |
+|---|---|---|
+| ≤ 25% | `DEEP_VALUE` | Strike below 25th percentile of 52w range — meaningful buffer above 52w low |
+| 25% – 50% | `DECENT` | Strike in lower half — modest buffer |
+| 50% – 75% | `MEDIOCRE` | Strike in upper half — limited downside protection |
+| > 75% | `NO_MARGIN` | Strike near 52w high — full mean-reversion exposure |
+
+**Why MoS matters specifically for AQ:** normal long stock can be sold at any time, so trader can stop the loss. AQ has no early exit during tenor — if spot drops below strike, doubling tail activates and trader is FORCED to buy 2× notional at strike for the remainder. The only downside protection is the buffer between `strike_abs` and the historically validated low. **PB AQ pitches advertise discount-from-spot; MoS strike-vs-52w-lo reveals the actual quality of entry retrospectively.** A 20% discount from spot can still leave strike sitting at 70% of 52w range — i.e., not safe in any historical sense.
+
+**Verdict shape:**
+
+```python
+verdict.mos_per_row = {
+    ko_pct_0: {
+        'strike_abs': 959.55,
+        'mos_vs_52w_lo_pct': 0.54,
+        'mos_in_52w_range_pct': 0.60,
+        'mos_downside_at_lo_pct': -0.35,
+        'rating': 'MEDIOCRE',
+    },
+    ...
+}
+```
+
+Markdown view labels each row with its MoS rating alongside the framework refusal/pass status. Use to compare rows within a quote and across quotes (e.g., LLY rated MEDIOCRE vs INTC rated NO_MARGIN on the same KO%).
 
 ## §7 Counter-offer email template
 
@@ -235,21 +315,26 @@ PB AQ quotes arrive as PDF screenshots, broker portals, or pasted Chinese text. 
 | Scenario 1 (KO during guarantee) | shares × strike | `Verdict.scenarios['ko_during_guarantee']` | Best case: KO triggers at first opportunity after guarantee window. |
 | Scenario 2 (no KO, no doubling) | shares × strike × n_obs | `Verdict.scenarios['full_term_no_doubling']` | Base case: spot stays above strike, no KO. |
 | Scenario 3 (max exposure) | shares × strike × n_obs × doubling | `Verdict.scenarios['max_exposure_all_doubled']` | Worst case: spot crashes below strike, doubling fires for the full tenor. |
-| (not in quote) | Next earnings date(s) | `Snapshot.earnings_date_iso` + `earnings_dates_iso` | Pull from UW `get_company_info` / `get_earnings_history`. For tenors ≥ 9M, populate `earnings_dates_iso` with the full list (refusal #6 iterates). |
+| (not in quote) | Next earnings date(s) | `Snapshot.earnings_date_iso` + `earnings_dates_iso` | Pull from UW `get_company_info` / `get_earnings_history`. For tenors ≥ 9M, populate `earnings_dates_iso` with the full list (R6 graduated iterates per-ER, per-row — see §6.2). |
+| (not in quote) | 52w high / 52w low | `Snapshot.high_52w` + `Snapshot.low_52w` | Pull from UW `get_ticker_candles_by_range` (interval=1y, range=4h); filter null bars, compute min(low) + max(high). **Required for R0 (§6) + MoS (§6.5).** |
+| (not in quote) | Avg historical ER max move | `Snapshot.avg_er_max_move_pct` | UW `get_earnings_history` × OHLC around past 4-8 ER dates. Compute max(intraday + close-to-close move) avg. **Required for R6 graduated (§6.2).** Fallback to `ATR(14)/spot × 2.0` when ER history short. |
 | (not in quote) | IV rank | `Snapshot.iv_rank` | UW only. Required for refusal #2. |
 | (not in quote) | ATR(14) | `Snapshot.atr_14_pct_of_spot` | TV only. Required for refusal #3. |
 
 **Critical**: `pb_quoted_yield_pa` is **NOT** in a PB AQ quote. The PB report shows the strike discount (e.g., 85.79% = 14.21% off entry) and the accumulation schedule — the "yield" is implicit in those two numbers. Always set `Quote.pb_quoted_yield_pa = None` for PB AQ decoding; analyze_quote then enters implicit-yield mode (see §3).
 
-## §8 Live-quote workflow (7 steps)
+## §8 Live-quote workflow (10 steps)
 
-1. Trader provides Quote params (or pastes PB quote text / sends screenshot). If screenshot, decode per §7.5 into the `Quote` / `Snapshot` contract.
-2. Run `_check_refusal_red_lines(quote, snapshot, nlv_usd)`. If non-empty, return `REFUSE` verdict with reasons + the 3-scenario projection. Stop. (Trader still sees the scenarios so they can verify whether the deal would have been REFUSEd on a larger NLV.)
-3. Orchestrator pulls chain data per workflow 5 §2 (live → IB, analytical → UW). Builds Snapshot. For tenors ≥ 9M, populate `Snapshot.earnings_dates_iso` with the full quarterly schedule from UW.
-4. Run `analyze_quote(q, s)` to get full Verdict with breakdown + data_provenance + 3 scenarios + mode flag.
-5. Run `optimize_terms(q, s)` to get sorted Pareto frontier of negotiation levers. Note: in implicit-yield mode, leverage_score uses inverted sign (mutations that increase `discount_implied_yield_pa` toward `fair_yield_pa` are the wins).
-6. Run `build_counter_offer_email(v, q)` to assemble bilingual draft. Email automatically switches preamble between markup-comparison and implicit-yield-aq modes.
-7. Present all five artifacts (checklist + breakdown + scenarios + Pareto + email) to trader.
+1. **Decode quote.** Trader provides Quote params (or pastes PB quote text / sends screenshot). If screenshot, decode per §7.5 into the `Quote` / `Snapshot` contract. Disambiguate `$notional` convention (A vs B per §10.7) — ask trader if unclear.
+2. **Goal check.** Ask or infer the trader's stated goal (forced accumulation vs upside exposure). If goal is upside exposure, surface §10 alternatives menu IN PARALLEL to running the AQ verdict — do not suppress just because AQ also gets evaluated.
+3. **Pull underlying snapshot.** UW: `get_ticker_ohlc_latest_or_date` for spot + IV rank, `get_extended_technical_indicator` for ATR(14), `get_earnings_history` for ER schedule. Compute `52w_high` / `52w_low` from `get_ticker_candles_by_range` (1y, 4h granularity).
+4. **R0 pre-check.** Compute `ratio = high_52w / low_52w`. If > 3.0, return `REFUSE` with reason='R0_52w_ratio_exceeds_mean_reversion_threshold' + the 3-scenario projection + §10 alternatives if applicable. Stop.
+5. **Run `_check_refusal_red_lines(quote, snapshot, nlv_usd)`** for R1-R6. R6 graduated per §6.2 (per-row). If all rows REFUSE, return `REFUSE` verdict with reasons + 3-scenario projection. (Trader still sees the scenarios so they can verify whether the deal would have been REFUSEd on a larger NLV.)
+6. **Pull chain data** per workflow 5 §2 (live → IB, analytical → UW). Builds Snapshot. For tenors ≥ 9M, populate `Snapshot.earnings_dates_iso` with the full quarterly schedule from UW.
+7. **Compute MoS per row** per §6.5. Surface ratings (DEEP_VALUE / DECENT / MEDIOCRE / NO_MARGIN) for each KO/strike row.
+8. **Run `analyze_quote(q, s)`** to get full Verdict with breakdown + data_provenance + 3 scenarios + mode flag.
+9. **Run `optimize_terms(q, s)`** to get sorted Pareto frontier of negotiation levers. Note: in implicit-yield mode, leverage_score uses inverted sign (mutations that increase `discount_implied_yield_pa` toward `fair_yield_pa` are the wins).
+10. **Assemble report.** Run `build_counter_offer_email(v, q)` for bilingual draft. Present all artifacts: checklist + R0 verdict + R1-R6 graduated verdict + MoS per row + breakdown + scenarios + Pareto + email + §10 alternatives (if goal is upside exposure).
 
 Final decision rules:
 - **markup_comparison mode** (PB quoted a yield — typical FCN/ELN):
@@ -285,3 +370,126 @@ The pre-trade workflow above answers "should we accept this PB quote?". For trad
 - `monitor_level`: `"near_ko"` (< 2% to KO — call your PB to confirm KO trigger logic), `"hedge_recommended"` (< 5% above strike — doubling tail is live, consider OTM put hedge), `"monitor"` (default).
 
 **Hedging the doubling tail** (when `monitor_level == "hedge_recommended"`): the PB AQ commits the trader to forced accumulation at strike if spot crashes. The natural hedge is a listed-options OTM put spread expiring near the tenor mid-point. Size: 1× the `max_additional_exposure_usd / strike_abs` share equivalent (covers the doubling-activated incremental shares). See `references/strategies.md` "OTM put spread overlay" for cost-budget framing.
+
+## §10 When AQ is the wrong instrument — upside-exposure alternatives menu
+
+The 8-item PB checklist + 7 hard refusals + MoS analysis collectively answer "is this AQ structurally acceptable?". A separate, prior question: **"is AQ the right instrument for the trader's stated goal at all?"**
+
+AQ is structurally optimized for "forced accumulation + accept capped upside". For a trader whose actual goal is to MAINTAIN UPSIDE EXPOSURE, AQ is the worst possible structure in the 6-instrument comparison below — the embedded KO retention transfers the trader's upside call value to the PB, leaving only the discount accumulation. **This is a 100% backwards trade for a bullish thesis.**
+
+### §10.1 When to surface this menu
+
+The orchestrator should surface §10 alternatives whenever the trader's stated goal mentions any of:
+- "I want to be long X"
+- "I want exposure to X" / "想要 X 的 exposure"
+- "I want upside in X" / "想保留 X 的 upside"
+- "I want to participate in X's rally" / "想跟着 X 涨"
+- "If X rallies, I want to capture it"
+
+If the trader explicitly states the goal is "forced accumulation" or "discount entry only" or "I just want shares delivered slowly", suppress this section (AQ is the correct instrument for that goal — albeit still subject to all 7 refusal rules).
+
+### §10.2 Instrument matrix by stated goal
+
+| Trader's stated goal | Recommended primary | Recommended fallback | Where AQ ranks |
+|---|---|---|---|
+| Strong bullish 12-18M, leveraged upside | **Deep-ITM LEAPS Call** (80-90 delta) | Risk reversal (sell OTM put + buy OTM call) | excluded — KO caps upside |
+| Bullish + want discount entry | **CSP ladder** at trader-chosen strikes, weekly/monthly | Direct buy + wait for pullback | excluded — PB dictates strike, not trader |
+| Range-bound bullish | **Risk reversal** (zero-cost synthetic long) | Bull call spread | excluded — doubling tail adds risk without upside benefit |
+| Strong bullish + want leverage | **Stock + OTM Call** kicker | Bull call spread | excluded — PB markup, KO caps profit |
+| AQ-like accumulation but no KO retention | **Weekly CSP** at chosen strikes (12-month roll cycle) | Direct DCA | excluded — listed market dominates on every dimension |
+
+### §10.3 Detailed instrument descriptions
+
+Each tool documents: Capital / Upside / Downside / Cost / Listed-market availability / vs AQ comparison.
+
+**Direct Stock**
+- Capital: 100% of spot value
+- Upside: unlimited, 1× delta
+- Downside: 100% to zero
+- Cost: 0 markup (commission only)
+- vs AQ: no strike discount, but full upside retained + anytime exit
+- Best for: long-term core holding (M7 framework — see `private/trader-profile.md`)
+
+**Deep-ITM LEAPS Call** (leveraged upside, defined loss)
+- Capital: ~50-70% of spot value (saves 30-50%)
+- Upside: ~85-95% of stock delta (near 1:1 tracking)
+- Downside: capped at premium paid
+- Cost: time decay ~5-10% / year, listed market transparent pricing
+- vs AQ: ✓ leveraged ✓ capped loss ✓ exit liquidity ✗ time decay
+- Concrete LLY example (Jan 2027 $850 Call at ~$310 premium): captures 90% delta with 27% capital. LLY $1,400 → call worth $550 = +77% on premium. AQ KO 110% at $1,265 would have terminated at the KO trigger with trader keeping only the small accumulated discount, while PB retains the embedded call value.
+
+**Risk Reversal** (synthetic long, near-zero cost)
+- Capital: margin only (short put collateral)
+- Upside: unlimited, 1× delta above call strike
+- Downside: 100% to put strike (trader-chosen, not PB)
+- Cost: near zero or slight credit
+- vs AQ: ✓ keeps full upside ✓ trader picks strike ✓ no KO retention ✓ no doubling ✗ requires margin
+- Concrete LLY example: short Dec 2026 $1,000 Put (~$45 credit) + long Dec 2026 $1,200 Call (~$50 debit) = $5 net debit. LLY $1,400 → call worth $200 = +$195 net. AQ KO 110%/strike $959 forces trader at $959; risk reversal lets trader pick $1,000 as the downside floor.
+
+**Cash-Secured Put (CSP) Ladder** — the real listed-market replacement for AQ
+- Capital: cash collateral at chosen strikes
+- Upside: premium collected each cycle + accumulated shares at trader-chosen strikes
+- Downside: assigned at strike (trader-chosen price)
+- Cost: 0 markup, fully listed and exchange-traded
+- vs AQ: ✓ trader dictates strike + DTE ✓ weekly/monthly roll freely ✓ no KO retention ✓ no doubling ✓ premium kept entirely ✗ requires active management (not "forced")
+- Concrete LLY example: weekly 30 DTE $1,000 Put sells, collect ~$15/week × 52 = ~$780. LLY stays above $1,000: 0 shares accumulated, +$780 premium kept. LLY drops below: assigned at $1,000 (trader-chosen), continue selling next put at new lower strike. **vs AQ KO 110%/strike $959**: trader controls $1,000 strike, not $959 (which PB locked).
+
+**Stock + OTM Call** (jet-fuel leverage on top of stock)
+- Capital: full stock + small option premium
+- Upside: 1× stock delta + leveraged call kicker
+- Downside: 100% stock loss + call premium loss (call expires worthless)
+- Cost: small premium ~3-5% of spot per call
+- vs AQ: ✓ full upside + leverage on top ✗ no downside discount on stock side
+
+### §10.4 Full comparison matrix — vs AQ
+
+| Dimension | AQ (KO 110% / strike 83%) | Direct Stock | ITM LEAPS Call | Risk Reversal | CSP Ladder | Stock + OTM Call |
+|---|---|---|---|---|---|---|
+| Upside cap | KO trigger (~$1,265 for LLY) | None | None | None | None | None |
+| Downside floor | None (doubled tail) | $0 | -premium | put strike (self-pick) | put strike (self-pick) | $0 |
+| Strike control | **PB dictates** | n/a | self-pick | self-pick | self-pick | self-pick |
+| Capital required | $500K commit (1×) / $1M worst (2×) | full spot | ~50-70% of spot | margin only | cash collateral | full stock + small premium |
+| Exit liquidity | **none for 52w** | anytime | listed market | listed market | weekly roll | anytime |
+| Markup | **2-5pp PB take** | 0 | listed | listed | listed | listed |
+| Tail risk | **2× doubling** (forced accumulation) | -100% | -premium (capped) | put strike (defined) | put strike (defined) | -100% |
+| ER catalyst handling | **forced** (R6 risk) | flexible | hedge optional | flexible | roll out | flexible |
+
+### §10.5 Why PB never recommends these
+
+PB's KPI is **AQ booked notional × tenor months × margin spread**. Listed options trade in IB / discount broker channels where PB earns zero. The structural misalignment: PB sales engineer's incentive is opposite to client PnL. Trader profile (per `private/trader-profile.md`) typically has IB Gateway primary; these instruments execute directly in IB without involving PB and without paying the 2-5pp PB markup baked into every AQ quote.
+
+### §10.6 Orchestrator integration rules
+
+When `analyze_quote` runs on an AQ quote, the orchestrator should:
+
+1. Run the framework verdict normally (R0–R6 + MoS + fair-value).
+2. If `verdict.decision in ('REFUSE', 'CAUTION')` OR if `verdict.mos_per_row[best_row].rating in ('MEDIOCRE', 'NO_MARGIN')`:
+   - Surface §10.2 alternatives matrix in the report
+   - Compute concrete listed-option price quotes for the top 2-3 alternative structures (use `get_chains_for_expiry`)
+   - Frame these as "structurally better instruments for your stated goal"
+3. Trader can suppress the alternatives surface by setting `quote.goal='forced_accumulation'`.
+4. For PB AQ ladders containing MULTIPLE tickers (typical PB pitch), apply §10 surface per-ticker — recommend alternatives for ticker A while still showing the AQ framework verdict for ticker B if its goal differs.
+
+### §10.7 Notional convention disambiguation ($500K example)
+
+PB AQ "notional" is ambiguous in HK / 亚太 PB contracts. The orchestrator must disambiguate before any shares calculation. Two conventions:
+
+| Convention | Definition | Weekly shares formula | Max exposure |
+|---|---|---|---|
+| **A (default, base-case)** | $500K = total base-case 52-week buy-in (no doubling, no early KO) | `$500K / (strike_abs × n_obs)` | 2× $500K = $1M worst-case (all weeks doubled) |
+| **B (max-exposure cap)** | $500K = worst-case all-doubled total | `$500K / (2 × strike_abs × n_obs)` | $500K (by definition, includes doubling) |
+
+PB sales convention is usually (A). The orchestrator should compute both and label clearly in the report:
+
+```python
+verdict.position_sizing = {
+    'convention': 'A',  # or 'B'
+    'base_shares': 521,           # 52 weeks × 1× × strike — base-case path
+    'max_shares_doubled': 1042,   # 52 weeks × 2× × strike — worst-case path
+    'base_notional_usd': 500_000,
+    'max_notional_usd': 1_000_000 if convention == 'A' else 500_000,
+    'weekly_shares': 10.03,
+}
+```
+
+**Action item for trader**: confirm with PB which convention the quoted notional follows. The difference is 2×, which directly drives R4 (10% NLV refusal check).

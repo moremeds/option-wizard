@@ -50,6 +50,21 @@ class Quote:
     daily_shares: int | None = None
     entry_spot: float | None = None
     guarantee_period_weeks: int = 0
+    # ── §10 alternatives surface gate (framework v2026-06-10) ────
+    # Trader's stated goal. When 'upside_exposure', §10 alternatives menu
+    # is surfaced ALONGSIDE the AQ verdict regardless of refusal status.
+    # When 'forced_accumulation', alternatives are suppressed (trader
+    # explicitly wants AQ semantics — orchestrator still runs the verdict).
+    # 'unspecified' = orchestrator-decided based on verdict + MoS rating
+    # per §10.6 rules.
+    goal: Literal["upside_exposure", "forced_accumulation", "unspecified"] = (
+        "unspecified"
+    )
+    # ── R6 graduated opt-out (framework v2026-06-10) ─────────────
+    # When True, force legacy binary R6 ("ANY ER in middle 50% → REFUSE")
+    # regardless of whether snapshot.avg_er_max_move_pct is populated. For
+    # conservative trader preference.
+    use_legacy_r6: bool = False
 
     def __post_init__(self):
         """Validate input ranges + direction/strike/ko alignment, and enforce
@@ -160,6 +175,21 @@ class Snapshot:
     # in a 12M+ tenor). When None, falls back to the single
     # `earnings_date_iso` (legacy 6M-tenor behavior).
     earnings_dates_iso: list[str] | None = None
+    # ── R0 + MoS data inputs (framework v2026-06-10) ──────────────
+    # 52w high/low for the underlying. Required for R0 mean-reversion
+    # pre-filter (§6) and Margin of Safety analytical layer (§6.5).
+    # Source: UW get_ticker_candles_by_range (interval=1y, range=4h);
+    # filter null bars then min(low) / max(high). When either is None,
+    # R0 and MoS are skipped with `r0_skipped_no_data` provenance.
+    high_52w: float | None = None
+    low_52w: float | None = None
+    # Average absolute ER-day max move (pct of prior close) over the last
+    # 4-8 quarters. Used by R6 graduated check (§6.2). Compute as
+    # max(|prior_close→ER_high|, |prior_close→ER_low|, |prior_close→next_close|)
+    # / prior_close, averaged across recent quarters. Fallback when ER
+    # history < 4 quarters: `atr_14_pct_of_spot × 2.0` (orchestrator-set).
+    # When None, R6 falls back to legacy binary "ANY ER in middle 50%".
+    avg_er_max_move_pct: float | None = None
 
 
 @dataclass
@@ -203,6 +233,27 @@ class Verdict:
     # as p.a. on total notional. Used in place of markup_pp when
     # pb_quoted_yield_pa is None.
     discount_implied_yield_pa: float = float("nan")
+    # ── R0 + MoS + §10 outputs (framework v2026-06-10) ──────────
+    # R0 (52w peak-to-trough mean-reversion screen) result. None when
+    # snapshot lacks high_52w / low_52w (R0 skipped).
+    r0_passed: bool | None = None
+    r0_ratio: float | None = None
+    # R6 graduated per-row status. Single Quote = single row, so this is
+    # one of: "PASS" (R6c) / "CAUTION" (R6b) / "REFUSE_R6a" / "LEGACY_BINARY"
+    # (when use_legacy_r6=True) / "SKIPPED" (no ER data + no avg_er_max_move).
+    r6_status: Literal["PASS", "CAUTION", "REFUSE_R6a", "LEGACY_BINARY", "SKIPPED"] = (
+        "SKIPPED"
+    )
+    r6_doubling_tail_warning: bool = False
+    # MoS analytical layer (§6.5). Empty dict when snapshot lacks 52w data.
+    # Shape: {'strike_abs', 'mos_vs_52w_lo_pct', 'mos_in_52w_range_pct',
+    # 'mos_downside_at_lo_pct', 'rating'} where rating in
+    # {'DEEP_VALUE', 'DECENT', 'MEDIOCRE', 'NO_MARGIN'}.
+    mos: dict[str, Any] = field(default_factory=dict)
+    # §10 alternatives surface. List of instrument dicts when goal is
+    # upside_exposure OR (decision in REFUSE/COUNTER and MoS in MEDIOCRE/NO_MARGIN).
+    # Suppressed when quote.goal='forced_accumulation'.
+    alternatives: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ─── Public API (stubs — implemented in subsequent tasks) ───
@@ -211,14 +262,18 @@ class Verdict:
 def analyze_quote(
     q: Quote, s: Snapshot, nlv_usd: float | None = None, strict_mode: bool = False
 ) -> Verdict:
-    """End-to-end quote analysis. 7-step pipeline:
+    """End-to-end quote analysis. 10-step pipeline (framework v2026-06-10):
+
     1. Compute 3 scenarios (always — trader sees them even on REFUSE)
-    2. Refusal red-line check
-    3. Chain pull (caller-provided in Snapshot)
-    4. Fair-value compute (strict_mode propagates to spot-drift handling)
-    5. Mode branch: markup_comparison (PB quoted yield) vs implicit_yield_aq (PB didn't)
-    6. Decision tier
-    7. Return Verdict.
+    2. Refusal red-line check — R0 (52w mean-reversion) + R1-R5 + R6 graduated
+    3. Compute MoS per §6.5 (entry quality rating)
+    4. Chain pull (caller-provided in Snapshot)
+    5. Fair-value compute (strict_mode propagates to spot-drift handling)
+    6. Mode branch: markup_comparison (PB quoted yield) vs implicit_yield_aq
+    7. Decision tier
+    8. Surface §10 alternatives when goal=upside_exposure OR verdict bad
+    9. Wire R0/R6/MoS/alternatives into Verdict
+    10. Return Verdict
     """
     # Late-bound _fair_yield lookup via module dict so test monkeypatches stick.
     import sys
@@ -226,13 +281,30 @@ def analyze_quote(
     _self = sys.modules[__name__]
 
     scenarios = _compute_scenarios(q, nlv_usd)
-    refusal_reasons = _check_refusal_red_lines(q, s, nlv_usd)
+
+    # Structured refusal check — gives us R0 ratio, R6 status, warnings list
+    # in addition to the legacy refusal reasons string list.
+    refusal_full = _check_refusal_full(q, s, nlv_usd)
+    refusal_reasons = refusal_full["reasons"]
+    refusal_warnings = refusal_full["warnings"]
+    r0_passed = refusal_full["r0_passed"]
+    r0_ratio = refusal_full["r0_ratio"]
+    r6_status = refusal_full["r6_status"]
+    r6_doubling_tail_warning = refusal_full["r6_doubling_tail_warning"]
+
+    # MoS analytical layer (§6.5) — computed even on REFUSE so trader sees
+    # entry quality alongside the refusal reasons.
+    mos = _compute_mos(q, s)
+    mos_rating = mos.get("rating")
 
     mode: Literal["markup_comparison", "implicit_yield_aq"] = (
         "implicit_yield_aq" if q.pb_quoted_yield_pa is None else "markup_comparison"
     )
 
     if refusal_reasons:
+        # On REFUSE, surface §10 alternatives so trader has a clear list of
+        # better-fit instruments without needing a second turn.
+        alternatives = _surface_alternatives(q, "REFUSE", mos_rating)
         return Verdict(
             fair_yield_pa=float("nan"),
             pb_quoted_yield_pa=q.pb_quoted_yield_pa,
@@ -242,9 +314,18 @@ def analyze_quote(
             decision="REFUSE",
             refusal_reasons=refusal_reasons,
             breakdown={},
-            data_provenance={"refusal_short_circuit": True},
+            data_provenance={
+                "refusal_short_circuit": True,
+                "warnings": refusal_warnings,
+            },
             scenarios=scenarios,
             mode=mode,
+            r0_passed=r0_passed,
+            r0_ratio=r0_ratio,
+            r6_status=r6_status,
+            r6_doubling_tail_warning=r6_doubling_tail_warning,
+            mos=mos,
+            alternatives=alternatives,
         )
 
     fair = _self._fair_yield(q, s, strict_mode=strict_mode)
@@ -303,6 +384,17 @@ def analyze_quote(
         else:
             decision = "ACCEPT_IF_MUST"
 
+    # §10 alternatives surface — runs after decision tier so MoS rating +
+    # final decision are both available to the gating logic.
+    alternatives = _surface_alternatives(q, decision, mos_rating)
+
+    # Thread refusal_warnings (R6b CAUTION + R6d doubling tail) into
+    # data_provenance so report renderers can display them without
+    # changing the Verdict shape further.
+    data_provenance = dict(fair["data_provenance"])
+    if refusal_warnings:
+        data_provenance["warnings"] = refusal_warnings
+
     return Verdict(
         fair_yield_pa=fair["fair_yield_pa"],
         pb_quoted_yield_pa=q.pb_quoted_yield_pa,
@@ -312,10 +404,16 @@ def analyze_quote(
         decision=decision,
         refusal_reasons=tier_refusal_reasons,
         breakdown=fair["breakdown"],
-        data_provenance=fair["data_provenance"],
+        data_provenance=data_provenance,
         scenarios=scenarios,
         mode=mode,
         discount_implied_yield_pa=discount_implied_yield_pa,
+        r0_passed=r0_passed,
+        r0_ratio=r0_ratio,
+        r6_status=r6_status,
+        r6_doubling_tail_warning=r6_doubling_tail_warning,
+        mos=mos,
+        alternatives=alternatives,
     )
 
 
@@ -609,33 +707,77 @@ def _num_observations(tenor_months: int, obs_freq: str) -> int:
 
 
 def _check_refusal_red_lines(q: Quote, s: Snapshot, nlv_usd: float | None) -> list[str]:
-    """6 hard refusals per framework §6. Returns list of triggered reason strings.
-    Empty list = no red line triggered.
+    """7 hard refusals per framework §6 (R0 + R1-R6). Returns list of
+    triggered reason strings. Empty list = no red line triggered.
+
+    Backward-compatible thin wrapper around `_check_refusal_full`. Returns
+    only the `reasons` field. For structured output (R0 ratio, R6 status,
+    warnings list, doubling-tail flag) use `_check_refusal_full` directly.
+    """
+    return _check_refusal_full(q, s, nlv_usd)["reasons"]
+
+
+def _check_refusal_full(q: Quote, s: Snapshot, nlv_usd: float | None) -> dict[str, Any]:
+    """Structured refusal check covering R0 pre-filter + R1-R6 hard rules
+    (with R6 graduated per §6.2). Returns:
+
+    ```
+    {
+        'reasons': list[str],          # hard refusals (R0 + R1-R5 + R6a)
+        'warnings': list[str],         # R6b CAUTION + R6d doubling tail
+        'r0_passed': bool | None,      # None when 52w data missing
+        'r0_ratio': float | None,
+        'r6_status': str,              # PASS/CAUTION/REFUSE_R6a/LEGACY_BINARY/SKIPPED
+        'r6_doubling_tail_warning': bool,
+    }
+    ```
     """
     reasons: list[str] = []
+    warnings: list[str] = []
+    r0_passed: bool | None = None
+    r0_ratio: float | None = None
+    r6_status: str = "SKIPPED"
+    r6_doubling_tail_warning: bool = False
 
-    # 1. doubling >= 3x
+    # R0. 52w peak-to-trough mean-reversion screen (framework §6 pre-filter).
+    # Runs FIRST — if R0 triggers REFUSE, the underlying itself is unsuited
+    # for 12M AQ lock-in regardless of strike%/KO% terms.
+    if s.high_52w is not None and s.low_52w is not None and s.low_52w > 0:
+        r0_ratio = s.high_52w / s.low_52w
+        if r0_ratio > 3.0:
+            r0_passed = False
+            severity = "extreme" if r0_ratio > 5.0 else "speculative"
+            reasons.append(
+                f"R0: 52w peak-to-trough ratio {r0_ratio:.2f}× > 3.0× "
+                f"({severity} — mean-reversion risk too high for 12M AQ lock-in)"
+            )
+        else:
+            r0_passed = True
+
+    # R1. doubling >= 3x
     if q.doubling_factor >= 3.0:
         reasons.append(
-            f"Doubling factor {q.doubling_factor:.1f}× ≥ 3× — institutional-only territory"
+            f"R1: Doubling factor {q.doubling_factor:.1f}× ≥ 3× — "
+            f"institutional-only territory"
         )
 
-    # 2. AQ + low IV rank
+    # R2. AQ + low IV rank
     if q.direction == "AQ" and s.iv_rank < 30.0:
         reasons.append(
-            f"AQ with IV rank {s.iv_rank:.0f} < 30 — selling vol when vol is cheap"
+            f"R2: AQ with IV rank {s.iv_rank:.0f} < 30 — selling vol when vol is cheap"
         )
 
-    # 3. KO within 1 ATR(14) of spot
+    # R3. KO within 1 ATR(14) of spot
     if s.atr_14_pct_of_spot is not None:
         ko_dist_pct = abs(q.ko_pct - 1.0)
         if ko_dist_pct < s.atr_14_pct_of_spot:
             reasons.append(
-                f"KO distance {ko_dist_pct * 100:.1f}% < 1×ATR(14) "
-                f"{s.atr_14_pct_of_spot * 100:.1f}% — KO virtually guaranteed to trigger"
+                f"R3: KO distance {ko_dist_pct * 100:.1f}% < 1×ATR(14) "
+                f"{s.atr_14_pct_of_spot * 100:.1f}% — "
+                f"KO virtually guaranteed to trigger"
             )
 
-    # 4. Max-exposure notional > 10% NLV.
+    # R4. Max-exposure notional > 10% NLV.
     # Real PB AQ contracts denominate in SHARES at STRIKE price (not spot),
     # and doubling magnifies the worst-case. The refusal check must reflect
     # the actual cash the trader can be put on the hook for, not the
@@ -644,31 +786,248 @@ def _check_refusal_red_lines(q: Quote, s: Snapshot, nlv_usd: float | None) -> li
         max_exposure = q.total_notional_usd * q.doubling_factor
         if max_exposure > 0.10 * nlv_usd:
             reasons.append(
-                f"Max-exposure notional ${max_exposure:,.0f} (= shares × strike × "
-                f"n_obs × {q.doubling_factor:g}× doubling) > 10% NLV ${nlv_usd:,.0f}"
+                f"R4: Max-exposure notional ${max_exposure:,.0f} (= shares × "
+                f"strike × n_obs × {q.doubling_factor:g}× doubling) > 10% NLV "
+                f"${nlv_usd:,.0f}"
             )
 
-    # 5. tenor > 18M
+    # R5. tenor > 18M
     if q.tenor_months > 18:
         reasons.append(
-            f"Tenor {q.tenor_months}M > 18M — PB markup grows super-linearly"
+            f"R5: Tenor {q.tenor_months}M > 18M — PB markup grows super-linearly"
         )
 
-    # 6. ANY earnings date in middle 50% of tenor.
-    # Previously only checked the single next earnings_date_iso, which silently
-    # missed Q3 / Q4 ERs on 12M+ tenors. Now iterates every scheduled ER in
-    # the window (either explicit s.earnings_dates_iso list or quarterly grid
-    # derived from s.earnings_date_iso).
+    # R6. ER check — graduated (default) or legacy binary.
+    # Graduated R6 (§6.2) compares avg_ER_max_move_pct to KO_distance per row.
+    # Falls back to legacy binary "ANY ER in middle 50% → REFUSE" when either
+    # (a) avg_er_max_move_pct is not populated, or (b) quote.use_legacy_r6=True.
     er_dates = _all_earnings_dates_in_tenor(s, q.tenor_months)
-    for er_iso in er_dates:
-        if _earnings_in_middle_50pct(er_iso, s.spot_timestamp, q.tenor_months):
-            reasons.append(
-                f"Earnings date {er_iso} in middle 50% of tenor — "
-                f"binary event + doubling + KO unmanageable"
-            )
-            break  # one ER is enough to refuse; don't spam list
+    middle_50_ers = [
+        er
+        for er in er_dates
+        if _earnings_in_middle_50pct(er, s.spot_timestamp, q.tenor_months)
+    ]
 
-    return reasons
+    if not middle_50_ers:
+        # No ERs in danger window → R6 PASS regardless of mode
+        r6_status = "PASS" if er_dates else "SKIPPED"
+    elif q.use_legacy_r6 or s.avg_er_max_move_pct is None:
+        # Legacy binary path: any ER in middle 50% → REFUSE
+        r6_status = "LEGACY_BINARY"
+        reasons.append(
+            f"R6: Earnings date {middle_50_ers[0]} in middle 50% of tenor "
+            f"(legacy binary mode — set snapshot.avg_er_max_move_pct to "
+            f"enable graduated R6)"
+        )
+    else:
+        # Graduated R6 (§6.2): compare avg_ER_max_move_pct to KO_distance_pct.
+        ko_dist_pct = abs(q.ko_pct - 1.0)
+        avg_move = s.avg_er_max_move_pct
+        if avg_move > ko_dist_pct:
+            # R6a — ER move > KO distance → ER will trigger KO every report
+            r6_status = "REFUSE_R6a"
+            reasons.append(
+                f"R6a: avg ER max move {avg_move * 100:.1f}% > KO distance "
+                f"{ko_dist_pct * 100:.1f}% — ER will likely trigger KO each "
+                f"report ({len(middle_50_ers)} ER(s) in middle 50%: "
+                f"{', '.join(middle_50_ers)})"
+            )
+        elif avg_move >= 0.5 * ko_dist_pct:
+            # R6b — borderline CAUTION (~50% prob breach), NOT a hard refusal
+            r6_status = "CAUTION"
+            warnings.append(
+                f"R6b: avg ER max move {avg_move * 100:.1f}% in "
+                f"[0.5×KO, KO] band ({ko_dist_pct * 100:.1f}%) — "
+                f"~50% probability ER breaches KO "
+                f"({len(middle_50_ers)} ER(s): {', '.join(middle_50_ers)})"
+            )
+        else:
+            # R6c — PASS, ER too small to threaten KO independently
+            r6_status = "PASS"
+
+        # R6d — additional doubling-tail check on adverse ER moves.
+        # If avg ER down-move could exceed 30% of strike discount, the
+        # doubling tail can fire from a single bad ER. Use the same
+        # avg_er_max_move_pct as a proxy for adverse-direction magnitude
+        # (conservative — symmetric assumption).
+        strike_discount = 1.0 - q.strike_pct  # AQ: positive number
+        if strike_discount > 0 and avg_move > strike_discount * 0.3:
+            r6_doubling_tail_warning = True
+            warnings.append(
+                f"R6d: avg ER move {avg_move * 100:.1f}% > 30% × strike "
+                f"discount ({strike_discount * 100:.1f}%) — doubling tail "
+                f"can be activated by a single adverse ER"
+            )
+
+    return {
+        "reasons": reasons,
+        "warnings": warnings,
+        "r0_passed": r0_passed,
+        "r0_ratio": r0_ratio,
+        "r6_status": r6_status,
+        "r6_doubling_tail_warning": r6_doubling_tail_warning,
+    }
+
+
+def _compute_mos(q: Quote, s: Snapshot) -> dict[str, Any]:
+    """Margin of Safety analytical layer (framework §6.5).
+
+    Computes per-Quote MoS metrics + rating. Returns empty dict when
+    snapshot lacks 52w high/low data.
+
+    Output shape:
+    ```
+    {
+        'strike_abs': float,
+        'mos_vs_52w_lo_pct':      float,  # (strike - lo) / lo
+        'mos_in_52w_range_pct':   float,  # (strike - lo) / (hi - lo), 0-1
+        'mos_downside_at_lo_pct': float,  # (lo - strike) / strike, negative
+        'rating': str,                    # DEEP_VALUE/DECENT/MEDIOCRE/NO_MARGIN
+    }
+    ```
+
+    Rating bands (per §6.5):
+    - DEEP_VALUE: strike in ≤25% of 52w range
+    - DECENT:     25-50%
+    - MEDIOCRE:   50-75%
+    - NO_MARGIN:  >75% (near 52w high)
+    """
+    if s.high_52w is None or s.low_52w is None or s.high_52w <= s.low_52w:
+        return {}
+
+    strike_abs = q.strike_pct * q.reference_spot
+    mos_vs_lo = (strike_abs - s.low_52w) / s.low_52w
+    mos_in_range = (strike_abs - s.low_52w) / (s.high_52w - s.low_52w)
+    mos_downside = (s.low_52w - strike_abs) / strike_abs
+
+    if mos_in_range <= 0.25:
+        rating = "DEEP_VALUE"
+    elif mos_in_range <= 0.50:
+        rating = "DECENT"
+    elif mos_in_range <= 0.75:
+        rating = "MEDIOCRE"
+    else:
+        rating = "NO_MARGIN"
+
+    return {
+        "strike_abs": strike_abs,
+        "mos_vs_52w_lo_pct": mos_vs_lo,
+        "mos_in_52w_range_pct": mos_in_range,
+        "mos_downside_at_lo_pct": mos_downside,
+        "rating": rating,
+    }
+
+
+# §10 alternatives menu — instrument templates surfaced when AQ is the
+# wrong instrument for trader's stated goal OR when verdict/MoS is bad.
+# Kept as module-level constant so the orchestrator can hot-reload pricing
+# inputs without touching the surface logic.
+_ALTERNATIVES_MENU: list[dict[str, Any]] = [
+    {
+        "name": "Direct Stock",
+        "tag": "direct_stock",
+        "best_for_goal": ["long_term_core_holding"],
+        "capital_pct_of_spot": 1.00,
+        "upside": "unlimited, 1× delta",
+        "downside": "100% to zero",
+        "markup": "0 (commission only)",
+        "exit_liquidity": "anytime",
+        "vs_aq_summary": (
+            "No strike discount but full upside retained + anytime exit. "
+            "Best for long-term core holdings (M7 framework)."
+        ),
+    },
+    {
+        "name": "Deep-ITM LEAPS Call",
+        "tag": "itm_leaps_call",
+        "best_for_goal": ["leveraged_upside", "strong_bullish"],
+        "capital_pct_of_spot": 0.60,
+        "upside": "~85-95% of stock delta (near 1:1)",
+        "downside": "capped at premium paid",
+        "markup": "listed market (no PB markup)",
+        "exit_liquidity": "listed market",
+        "vs_aq_summary": (
+            "Leveraged upside with defined max loss. Saves 30-50% capital "
+            "vs direct stock; AQ excluded because KO caps upside."
+        ),
+    },
+    {
+        "name": "Risk Reversal",
+        "tag": "risk_reversal",
+        "best_for_goal": ["range_bound_bullish", "zero_cost_synthetic_long"],
+        "capital_pct_of_spot": None,  # margin-only
+        "upside": "unlimited, 1× delta above call strike",
+        "downside": "100% to put strike (trader-chosen)",
+        "markup": "listed market (no PB markup)",
+        "exit_liquidity": "listed market",
+        "vs_aq_summary": (
+            "Synthetic long at near-zero cost. Trader picks downside strike, "
+            "not PB. AQ excluded because doubling tail adds risk with "
+            "no upside benefit."
+        ),
+    },
+    {
+        "name": "CSP Ladder",
+        "tag": "csp_ladder",
+        "best_for_goal": ["aq_like_accumulation", "bullish_discount_entry"],
+        "capital_pct_of_spot": 1.00,  # cash collateral
+        "upside": "premium income + shares at chosen strikes",
+        "downside": "assigned at strike (trader-chosen)",
+        "markup": "listed market (no PB markup)",
+        "exit_liquidity": "weekly/monthly roll",
+        "vs_aq_summary": (
+            "The real listed-market replacement for AQ. Trader dictates "
+            "strike + DTE, no KO retention, no doubling, premium kept "
+            "entirely. AQ excluded because PB dictates strike."
+        ),
+    },
+    {
+        "name": "Stock + OTM Call",
+        "tag": "stock_plus_otm_call",
+        "best_for_goal": ["leveraged_upside", "strong_bullish"],
+        "capital_pct_of_spot": 1.03,  # stock + small premium
+        "upside": "1× stock delta + leveraged call kicker",
+        "downside": "100% stock loss + call premium loss",
+        "markup": "listed market (no PB markup)",
+        "exit_liquidity": "anytime (stock) + listed (call)",
+        "vs_aq_summary": (
+            "Full upside + leverage. AQ excluded because PB markup + KO caps profit."
+        ),
+    },
+]
+
+
+def _surface_alternatives(
+    q: Quote, decision: str, mos_rating: str | None
+) -> list[dict[str, Any]]:
+    """Surface §10 upside-exposure alternatives when AQ is the wrong tool.
+
+    Triggers when ANY of:
+    - quote.goal == 'upside_exposure' (explicit ask)
+    - decision in ('REFUSE', 'COUNTER') AND mos_rating in ('MEDIOCRE', 'NO_MARGIN')
+    - decision in ('REFUSE',) (always surface on hard refuse so trader has
+      a clear list of better-fit instruments)
+
+    Suppresses when:
+    - quote.goal == 'forced_accumulation' (explicit ask for AQ semantics)
+
+    Returns a copy of the alternatives menu (callers should not mutate).
+    """
+    if q.goal == "forced_accumulation":
+        return []
+
+    should_surface = (
+        q.goal == "upside_exposure"
+        or decision == "REFUSE"
+        or (decision == "COUNTER" and mos_rating in ("MEDIOCRE", "NO_MARGIN"))
+    )
+
+    if not should_surface:
+        return []
+
+    # Return shallow copies so callers can attach concrete pricing without
+    # mutating the module-level template.
+    return [dict(alt) for alt in _ALTERNATIVES_MENU]
 
 
 def _all_earnings_dates_in_tenor(s: Snapshot, tenor_months: int) -> list[str]:
