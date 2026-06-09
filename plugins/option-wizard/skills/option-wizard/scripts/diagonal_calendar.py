@@ -525,3 +525,75 @@ def build_diagonal_calendar(
         "pricing_source": _pricing_source([long_leg, short_leg]),
         "regime_check": _regime_check(mode, snapshot),
     }
+
+
+def build_short_leg_roll(
+    existing_position: dict[str, Any],
+    new_dte_short: int,
+    snapshot: dict[str, Any],
+    days_elapsed: int = 1,
+) -> dict[str, Any]:
+    """Roll short leg on expiry-day −1h.
+
+    Returns action_required ∈
+      {'roll_short', 'close_all_long_dte_too_short', 'switch_mode'}.
+    Per hard rule #4 (21 DTE), surface 'close_all_long_dte_too_short' when
+    long-leg DTE remaining < 21.
+    """
+    mode = existing_position["mode"]
+    spot_now = snapshot.get("spot", existing_position["spot"])
+    long_dte_remaining = existing_position["dte_long"] - days_elapsed - new_dte_short
+
+    old_short_leg = next(l for l in existing_position["legs"] if l["action"] == "sell")
+    old_long_leg = next(l for l in existing_position["legs"] if l["action"] == "buy")
+    ks_old, kl = old_short_leg["strike"], old_long_leg["strike"]
+
+    iv_short_new = float(snapshot["iv_atm_short"])
+    t_new_short = new_dte_short / 365.0
+
+    # Mark current short leg close (cost to buy back); use a tiny time-to-expiry
+    # since the leg is about to expire
+    old_short_mark = _bs_put(
+        spot_now, ks_old, max(t_new_short / 2, 1 / 365), _R, iv_short_new
+    )
+    short_credit_orig = old_short_leg["limit_price"]
+    close_pl = (short_credit_orig - old_short_mark) * old_short_leg["qty"] * 100
+
+    # Pick new short strike at default Δ for this mode
+    deltas = DEFAULT_DELTAS[mode]
+    k_short_new = _strike_for_put_delta(
+        spot_now, deltas["short"], t_new_short, iv_short_new
+    )
+    new_short_mark = _bs_put(spot_now, k_short_new, t_new_short, _R, iv_short_new)
+    new_credit = new_short_mark * old_short_leg["qty"] * 100
+
+    net_credit_for_roll = round(close_pl + new_credit, 2)
+
+    # Action decision priority: 21-DTE close > mode-switch > normal roll
+    if long_dte_remaining < 21:
+        action = "close_all_long_dte_too_short"
+        switch_recommendation = None
+    elif mode == "calendar" and (kl - spot_now) >= 5:
+        # Calendar drifted ITM by ≥ 1 RUT strike width
+        action = "switch_mode"
+        switch_recommendation = "protective"
+    else:
+        action = "roll_short"
+        switch_recommendation = None
+
+    return {
+        "close_old_short_leg": {
+            "strike": ks_old,
+            "mark_close": round(old_short_mark, 2),
+            "pl_dollar": round(close_pl, 2),
+        },
+        "open_new_short_leg": {
+            "strike": round(k_short_new, 2),
+            "mark_open": round(new_short_mark, 2),
+            "target_delta": deltas["short"],
+        },
+        "net_credit_for_roll": net_credit_for_roll,
+        "long_leg_dte_remaining": long_dte_remaining,
+        "action_required": action,
+        "switch_mode_recommendation": switch_recommendation,
+    }

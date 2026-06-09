@@ -338,6 +338,64 @@ def test_regime_check_no_warning_when_match():
     assert out["regime_check"]["warning"] is None
 
 
+# --- Task 9 — build_short_leg_roll ---
+
+from scripts.diagonal_calendar import build_short_leg_roll
+
+
+def test_roll_triggers_close_when_long_dte_too_short():
+    """Long leg DTE remaining < 21 → action_required = 'close_all_long_dte_too_short'."""
+    pos = build_diagonal_calendar(
+        spot=2300.0,
+        mode="calendar",
+        snapshot=RUT_SNAPSHOT_BSM,
+        dte_long=24,
+        dte_short=1,
+    )
+    # 4 days elapsed: long_dte_remaining_when_roll_done = 24 - 4 - 1 = 19 < 21
+    roll = build_short_leg_roll(
+        existing_position=pos,
+        new_dte_short=1,
+        snapshot=RUT_SNAPSHOT_BSM,
+        days_elapsed=4,
+    )
+    assert roll["action_required"] == "close_all_long_dte_too_short"
+
+
+def test_roll_returns_close_old_and_open_new():
+    pos = build_diagonal_calendar(
+        spot=2300.0, mode="calendar", snapshot=RUT_SNAPSHOT_BSM
+    )
+    snap_after = {**RUT_SNAPSHOT_BSM, "iv_atm_short": 0.30}
+    roll = build_short_leg_roll(
+        existing_position=pos,
+        new_dte_short=1,
+        snapshot=snap_after,
+        days_elapsed=1,
+    )
+    assert "close_old_short_leg" in roll
+    assert "open_new_short_leg" in roll
+    assert roll["action_required"] == "roll_short"
+
+
+def test_roll_recommends_mode_switch_on_drift():
+    """Calendar mode but short put ITM by 1+ RUT strike width →
+    switch_mode_recommendation = 'protective'."""
+    pos = build_diagonal_calendar(
+        spot=2300.0, mode="calendar", snapshot=RUT_SNAPSHOT_BSM
+    )
+    # Spot dropped enough to put calendar K (≈ 2185) above spot by ≥ 5
+    snap_after = {**RUT_SNAPSHOT_BSM, "spot": 2170.0}
+    roll = build_short_leg_roll(
+        existing_position=pos,
+        new_dte_short=1,
+        snapshot=snap_after,
+        days_elapsed=1,
+    )
+    assert roll["action_required"] == "switch_mode"
+    assert roll["switch_mode_recommendation"] == "protective"
+
+
 @pytest.mark.parametrize("mode", ["calendar", "protective", "aggressive"])
 def test_roll_matrix_non_monotonic_shape(mode):
     """Diagonal calendar P/L is GENERALLY non-monotonic in spot — typically has a
