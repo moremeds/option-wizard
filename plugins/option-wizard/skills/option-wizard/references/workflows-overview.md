@@ -38,7 +38,7 @@ into the linked deep-reference file for the per-step detail.
 
 ---
 
-## Workflow 2 — 分析指数/大盘 (SPY / QQQ / SPX / IWM macro view)
+## Workflow 2a — 分析指数/大盘 macro hedge (SPY / QQQ / SPX / IWM)
 
 **Spine:** same `analysis-runbook.md`, with these substitutions:
 
@@ -52,6 +52,26 @@ into the linked deep-reference file for the per-step detail.
 **Not applicable:** FCN hard rule #5 (FCN never routes here).
 
 **Output:** either hedge recommendation + preflight, or explicit "no hedge yet" conditions (e.g., "fire when SPX touches 200DMA").
+
+---
+
+## Workflow 2b — Index premium selling (QQQ/SPY CSP + RUT put diagonal)
+
+**Spine:** same 8-layer `analysis-runbook.md` data pull (L0–L5 shared with Workflow 2a) with these L6–L7 substitutions:
+
+| Layer | Difference from Workflow 1 |
+|---|---|
+| L0 | Compute net premium short notional vs NLV. > 25% → block new sells; surface as "cap reached" rather than recommend new structure |
+| L1 | VRP label + IV rank for underlying (QQQ / SPY / RUT); CHEAP vol → no sell |
+| L2 | IV term curve across short-leg and long-leg DTEs (diagonal). Contango deepening = vega-positive tailwind for calendar mode |
+| L3 | TV: spot, 200DMA, RSI(14); directional bias only — never primary trigger |
+| L4 | UW `flow_per_expiry` on 0DTE chain → input to `entry_timing.py` |
+| L5 | FOMC / CPI / NFP clock — abort if major event within short-leg DTE |
+| L6 | Pick structure from `strategies.md` regime matrix "Index premium sell" row; for RUT diagonal, regime_check warns on mode mismatch but does not abort |
+| L7 | Preflight via `scripts.ib_order::build_preflight`; for diagonal, call `scripts.diagonal_calendar::build_diagonal_calendar` first to produce legs |
+| L7+ | **Entry timing gate (new step)** — `scripts.entry_timing::decide(snapshot, mode)` returns `enter_now` / `wait_eod` / `wait_minutes` / `abort`. Show decision + reason BEFORE preflight YES/NO |
+
+**Output:** preflight ready for IB submission, OR explicit "wait until X" / "abort because Y" with reason.
 
 ---
 
@@ -218,7 +238,9 @@ Trader request
 │
 ├─ "PB 给我报了 ... AQ / DQ" / "evaluate aq quote" / "evaluate dq quote" → Workflow 5
 │
-├─ "SPX 大盘对冲" / "size spx hedge" → Workflow 2 (L0 trigger + L7 macro hedge)
+├─ "SPX 大盘对冲" / "size spx hedge" → Workflow 2a (L0 trigger + L7 macro hedge)
+│
+├─ "QQQ CSP" / "SPY put" / "RUT diagonal" / "sell index premium" → Workflow 2b
 │
 ├─ "复盘" / "weekly review" / "monthly review" → Workflow 6
 │
