@@ -90,11 +90,11 @@ All modes: long 45DTE put @ Kl + short 1-2DTE put @ Ks. Max loss at
 short-leg expiry = `max((Ks − Kl) × 100, 0) − net credit` (calendar
 mode collapses to long put extrinsic decay).
 
-| Mode | Strike layout | Default Δ | Regime fit | Greeks |
+| Mode | Strike layout | Default Δ | Regime fit | Greeks at default Δ |
 |---|---|---|---|---|
-| **calendar** | Ks = Kl | both 0.30 | NEUTRAL vol + expected IV term contango deepening | θ+, ν+, γ ~ 0 |
-| **protective** | Ks < Kl | Kl 0.30, Ks 0.15 | bearish bias + RICH vol | θ+, ν+, Δ slightly negative |
-| **aggressive** | Ks > Kl | Ks 0.30, Kl 0.15 | bullish RICH vol; VIX < 25 hard limit | θ++, ν+, Δ slightly positive |
+| **calendar** | Ks = Kl | long 0.30 (short Δ unused) | NEUTRAL vol + expected IV term contango deepening | ν+ (long-leg vega), **θ NEGATIVE** at default Δ (short 1-DTE at 5% OTM has near-zero theta; long-leg theta dominates). Override `target_deltas={long:0.45, short:0.45}` for theta-positive ATM calendar. |
+| **protective** | Ks < Kl | Kl 0.30 (Ks anchored 2.5% below Kl) | bearish bias + RICH vol | θ+ (mild), ν+, Δ slightly negative |
+| **aggressive** | Ks > Kl | Kl 0.15, Ks 0.30 | bullish RICH vol; VIX < 25 hard limit (enforced via `entry_timing.decide`, NOT in pricer) | θ++, ν+, Δ slightly positive |
 
 - **Roll rule:** Short leg rolled at expiry-day −1h to next 1-2DTE
   same-mode strike. Every 7 rolls (≈ 2 weeks) re-check long leg DTE; if

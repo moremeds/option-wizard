@@ -1,16 +1,31 @@
 """Build long-45DTE put + short-1to2DTE put diagonal calendar on RUT.
 
 Three modes:
-  - calendar   (Ks = Kl)  — vega-positive theta income, NEUTRAL vol
-  - protective (Ks < Kl)  — bearish bias, RICH vol
-  - aggressive (Ks > Kl)  — bullish RICH vol, VIX < 25 hard limit
+  - calendar   (Ks = Kl)  — vega-POSITIVE; theta sign depends on Δ.
+                            At default long Δ=0.30 (K ~5% OTM), short 1-DTE
+                            has near-zero theta → NET THETA NEGATIVE.
+                            For theta-positive 'income calendar', override
+                            target_deltas={long:0.45, short:0.45} to push K
+                            toward ATM where short 1-DTE has meaningful theta.
+                            Regime fit: NEUTRAL vol + expected IV term
+                            contango deepening (vega play, not theta play).
+  - protective (Ks < Kl)  — bearish bias, RICH vol. Ks anchored at
+                            Kl × (1 - 0.025) because Δ-only selection at
+                            1-2 DTE produces Ks > Kl (math broken).
+  - aggressive (Ks > Kl)  — bullish RICH vol; VIX < 25 hard limit
+                            (enforced in scripts.entry_timing.decide,
+                            NOT in this pricer — orchestrator must gate).
 
 Defined-risk in all three: max loss at short-leg expiry =
-max((Ks - Kl) * 100, 0) - net_credit (calendar collapses to long put
-extrinsic decay; protective offsets dollar-for-dollar in [Ks, Kl] range).
+max((Ks - Kl) * 100, 0) - net_credit + discount_carry, where
+discount_carry = Kl·(1 - exp(-r·T_remain))·100 (long put PV at S=0).
+Calendar collapses to net_debit + discount_carry; protective offsets
+dollar-for-dollar in [Ks, Kl] range; aggressive adds width term.
 
 Chain-vs-BSM fallback follows scripts.macro_hedge pattern using shared
 scripts._market helpers; pricing_source ∈ {chain, mixed, bsm}.
+Chain source ∈ {UW, IB, TV} — orchestrator transforms its native shape
+into nested {expiry: {strike_pct: {right: {mid, iv, greeks}}}}.
 """
 
 from __future__ import annotations
@@ -419,6 +434,21 @@ def build_diagonal_calendar(
       calendar:   Ks == Kl
       protective: Ks < Kl  (anchor: Kl × (1 - SHORT_STRIKE_OFFSET_PCT))
       aggressive: Ks > Kl  (Δ-based; natural with 0.30 short + 0.15 long Δs)
+
+    ⚠️ Calendar mode net theta: at default `target_deltas` (long Δ=0.30 →
+    K ~5% OTM), short 1-DTE put at the same K is near-worthless and has
+    negligible theta. Long-leg theta dominates → NET THETA NEGATIVE.
+    The trade-off is vega-positive (long-leg vega > short-leg vega), so
+    you profit when IV term contango deepens. For a theta-positive
+    'income calendar' (the classic calendar income picture), override
+    target_deltas={"long": 0.45, "short": 0.45} — pushes K toward ATM
+    where short 1-DTE has meaningful theta to farm. See module docstring.
+
+    ⚠️ Aggressive mode VIX gate is NOT enforced here — orchestrator MUST
+    call scripts.entry_timing.decide(snapshot, mode="rut_aggressive") FIRST
+    and only build the structure on `enter_now`. Bypassing decide() means
+    the VIX < 25 hard limit can fire on a position that should have been
+    refused.
     """
     if mode not in DEFAULT_DELTAS:
         raise ValueError(
