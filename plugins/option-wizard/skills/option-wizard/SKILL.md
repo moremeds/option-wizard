@@ -89,6 +89,7 @@ Chinese:
 - "评估这个 accumulator 报价"
 - "decumulator 怎么 counter"
 - "<TICKER> 怎么做 sell put / covered call / jade lizard"
+- "QQQ CSP" / "SPY 卖 put" / "RUT diagonal" / "卖 index premium"
 - "我账户里这些仓位有没有问题"
 - "SPX 大盘对冲"
 - "<TICKER> 现在该 close 还是 roll"
@@ -101,6 +102,7 @@ English:
 - "negotiate accumulator"
 - "evaluate <ticker> for <structure>"
 - "size spx hedge"
+- "qqq csp" / "spy put" / "rut diagonal" / "sell index premium"
 - "review positions"
 - "weekly review" / "monthly review" / "review my recent calls"
 
@@ -125,6 +127,7 @@ points into specific layers without re-reading the whole runbook.
 | FCN / ELN quote evaluation ("PB 给我报了 X% coupon on Y") | `references/fcn-framework.md`; `scripts.fair_coupon::analyze_fcn`. Output is the 8-item PB checklist + 70/75/80/85% strike ladder + bilingual counter-offer email — do NOT route through IB (hard rule #5) |
 | AQ/DQ quote evaluation ("PB 给我报了 AQ", "evaluate aq quote") | `references/aq-dq-framework.md`; `scripts.fair_aq_dq::analyze_quote` + `optimize_terms` + `build_counter_offer_email`. Output: 6-refusal-check → 8-item PB checklist → fair-value breakdown w/ provenance → Pareto frontier → bilingual email. Do NOT route through IB (hard rule #5). |
 | SPX macro hedge sizing | `scripts.macro_hedge::build_macro_hedge`. Respect the 1.5% NLV annualized cost cap (hard rule #5). Trigger heuristics in `references/strategies.md` §"Macro hedge trigger heuristics" |
+| Index premium selling (QQQ/SPY CSP or RUT put diagonal) | `references/index-premium-selling.md`; `scripts.diagonal_calendar::build_diagonal_calendar` for RUT 3-mode structures; `scripts.entry_timing::decide` for morning-vs-EOD; CSP uses `scripts.ib_order::build_preflight` directly. Threshold calibration via `scripts.entry_timing::calibrate` reading the audit log |
 | Position book review ("我账户里这些仓位有没有问题") | Pull **every configured broker** — IB MCP primary (`get_account_summary` + `get_account_positions` + `get_account_orders`), plus any secondary brokers documented in `private/trader-profile.md` using the pull command(s) specified there (e.g., a CLI script, MCP server, or Python wrapper the user provides). Translate non-IB positions into the IB-shape dict (`contract_description` / `position` / `market_price`) before feeding into `scripts.defined_risk_audit::audit_book` and `scripts.manage_positions` (orchestrator CLI: `.venv/bin/python -m scripts.manage_positions --audit-only --no-email`). Report which broker(s) succeeded and any pull-time data gaps. Output follows §"Book-review output structure" — action items consolidated at the END of the report, not drilled into mid-flow. |
 | 21 DTE review on short-premium positions | `scripts.evaluate_position`; hard rule #4 — surfaces in the Action items section at the end of the book review (close / roll / hold-and-accept-gamma). Trader picks from the menu; only then expand into hard-rule-#3 preflight. |
 | Pre-submission preflight + YES/NO gate | `references/execution.md`; `scripts.ib_order::build_preflight`. Hard rule #3 — must show legs + mid + max loss + max gain + breakeven + margin + P/L matrix (spot ±5/10/20%) + account verification + UW regime check + liquidity + catalyst clock before exactly one YES/NO question |
@@ -342,6 +345,31 @@ out = build_macro_hedge(portfolio_notional=10_000_000, hedge_horizon_days=70,
 print(out["pricing_source"], out["cost_dollar"])
 for leg in out["legs"]:
     print(leg["action"], leg["strike"], leg["limit_price"], leg["mid_source"])
+'
+
+# Diagonal calendar (RUT 3-mode pricer with chain-vs-BSM fallback)
+.venv/bin/python -c '
+from scripts.diagonal_calendar import build_diagonal_calendar
+snap = {"iv_atm_short": 0.28, "iv_atm_long": 0.30,
+        "iv_rank": 35, "vrp_label": "NEUTRAL"}
+out = build_diagonal_calendar(spot=2300.0, mode="calendar", snapshot=snap)
+print(out["mode"], out["net_debit_dollar"], out["regime_check"]["matches_chosen_mode"])
+for leg in out["legs"]:
+    print(leg["action"], leg["strike"], leg["limit_price"], leg["mid_source"])
+print("roll matrix at -5%:", [r for r in out["roll_matrix"] if r["spot_scenario"] == -0.05])
+'
+
+# Entry timing decision (morning vs EOD vs abort)
+.venv/bin/python -c '
+from datetime import datetime, timezone
+from scripts.entry_timing import decide
+snap = {"spot": 2300.0, "time_et": "10:00",
+        "snapshot_taken_at": datetime.now(timezone.utc).isoformat(),
+        "vix": 14.2, "vix1d": 13.8, "vix9d": 14.0,
+        "premarket_gap": 0.003, "gex_flip": 2250.0, "net_dealer_gex": 1.0e9,
+        "odte_put_premium": 5.0e6, "odte_call_premium": 4.0e6,
+        "is_fomc_day": False, "is_monday_open": False, "is_opex_friday": False}
+print(decide(snap, mode="rut_calendar"))
 '
 
 # IB order preflight (no submission)
