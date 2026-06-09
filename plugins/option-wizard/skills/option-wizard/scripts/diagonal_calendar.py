@@ -43,6 +43,12 @@ from scripts._market import (
 
 Mode = Literal["calendar", "protective", "aggressive"]
 
+# Hard rule #2: only UW, IB, and TV are valid chain sources. Anything else
+# (Yahoo, scraped Google Finance, custom Tastytrade exports, etc.) violates
+# source discipline and must be rejected at the boundary — silent acceptance
+# means a downstream "pricing_source: chain" tag that lies about provenance.
+ALLOWED_CHAIN_SOURCES: frozenset[str] = frozenset({"UW", "IB", "TV"})
+
 # Strike-selection policy per mode. Δ-only selection across 1-2DTE short
 # + 45DTE long is mathematically broken for `calendar` (same Δ → different
 # K across DTEs) and `protective` (1DTE 0.15Δ K ≈ 1.5% OTM, 45DTE 0.30Δ K
@@ -281,11 +287,16 @@ def _regime_check(mode: str, snapshot: dict) -> dict[str, Any]:
 
 
 def _pricing_source(legs: list[dict]) -> str:
-    """Roll up per-leg mid_source to top-level pricing_source."""
+    """Roll up per-leg mid_source to top-level pricing_source.
+
+    chain  = all legs priced from a single allowed chain source
+    mixed  = some legs from a chain source, some from fallback BSM
+    bsm    = all legs from BSM (no chain provided or no listed strike hit)
+    """
     sources = {leg["mid_source"] for leg in legs}
-    if sources in ({"UW"}, {"IB"}):
+    if len(sources) == 1 and next(iter(sources)) in ALLOWED_CHAIN_SOURCES:
         return "chain"
-    if "fallback" in sources and len(sources) > 1:
+    if sources & ALLOWED_CHAIN_SOURCES and "fallback" in sources:
         return "mixed"
     return "bsm"
 
@@ -454,6 +465,27 @@ def build_diagonal_calendar(
         raise ValueError(
             f"unknown mode {mode!r}; expected one of {list(DEFAULT_DELTAS)}"
         )
+
+    # Hard rule #2 boundary check: when a chain is provided, its source must
+    # be tagged AND must be one of UW / IB / TV. Pre-patch, _resolve_chain_expiries
+    # silently defaulted chain_source to "UW" when the field was missing — a
+    # downstream "mid_source: UW" tag that could not be audited. Reject at
+    # the entry point so pricing_source provenance is always trustworthy.
+    if snapshot.get("chain") is not None:
+        chain_source = snapshot.get("chain_source")
+        if chain_source is None:
+            raise ValueError(
+                "snapshot['chain'] provided but snapshot['chain_source'] missing; "
+                f"per hard rule #2 caller must tag chain with chain_source ∈ "
+                f"{sorted(ALLOWED_CHAIN_SOURCES)}"
+            )
+        if chain_source not in ALLOWED_CHAIN_SOURCES:
+            raise ValueError(
+                f"chain_source {chain_source!r} not in "
+                f"{sorted(ALLOWED_CHAIN_SOURCES)} — per hard rule #2, only UW / "
+                "IB / TV are allowed. Yahoo, custom exports, etc. are forbidden."
+            )
+
     deltas = target_deltas or DEFAULT_DELTAS[mode]
 
     iv_short = float(snapshot["iv_atm_short"])

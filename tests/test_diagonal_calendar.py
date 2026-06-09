@@ -411,3 +411,75 @@ def test_roll_matrix_non_monotonic_shape(mode):
     assert sign_changes <= 2, (
         f"{mode} roll matrix has {sign_changes} sign changes; expected ≤ 2. P/L: {pls}"
     )
+
+
+# --- Patch #3 — chain source validation (hard rule #2 boundary check) ---
+
+
+def test_bsm_only_path_does_not_require_chain_source():
+    """When snapshot has no chain, BSM-only path must work without chain_source
+    being set — backward compat for callers that only pass IV inputs."""
+    out = build_diagonal_calendar(
+        spot=2300.0, mode="calendar", snapshot=RUT_SNAPSHOT_BSM
+    )
+    assert out["pricing_source"] == "bsm"
+    assert "chain_source" not in RUT_SNAPSHOT_BSM
+
+
+def test_chain_provided_with_uw_source_passes():
+    """UW chain_source is allowed (existing RUT_SNAPSHOT_CHAIN flow)."""
+    out = build_diagonal_calendar(
+        spot=2300.0, mode="calendar", snapshot=RUT_SNAPSHOT_CHAIN
+    )
+    assert out["pricing_source"] in ("chain", "mixed")
+
+
+def test_chain_provided_with_ib_source_passes():
+    snap = {**RUT_SNAPSHOT_CHAIN, "chain_source": "IB"}
+    out = build_diagonal_calendar(spot=2300.0, mode="calendar", snapshot=snap)
+    assert out["pricing_source"] in ("chain", "mixed")
+
+
+def test_chain_provided_with_tv_source_passes():
+    """TradingView chain is the third allowed source (added by c6acdb1)."""
+    snap = {**RUT_SNAPSHOT_CHAIN, "chain_source": "TV"}
+    out = build_diagonal_calendar(spot=2300.0, mode="calendar", snapshot=snap)
+    assert out["pricing_source"] in ("chain", "mixed")
+
+
+def test_chain_provided_with_yahoo_source_raises():
+    """Per hard rule #2, Yahoo is forbidden as a price/options data source."""
+    snap = {**RUT_SNAPSHOT_CHAIN, "chain_source": "Yahoo"}
+    with pytest.raises(ValueError, match="chain_source 'Yahoo' not in"):
+        build_diagonal_calendar(spot=2300.0, mode="calendar", snapshot=snap)
+
+
+def test_chain_provided_with_custom_source_raises():
+    """Any unrecognized provider must be rejected."""
+    snap = {**RUT_SNAPSHOT_CHAIN, "chain_source": "MyCustomExport"}
+    with pytest.raises(ValueError, match="not in"):
+        build_diagonal_calendar(spot=2300.0, mode="calendar", snapshot=snap)
+
+
+def test_chain_provided_without_source_raises():
+    """Pre-patch, missing chain_source silently defaulted to 'UW' in
+    _resolve_chain_expiries. Now it must raise — the orchestrator is
+    responsible for tagging."""
+    snap = {**RUT_SNAPSHOT_CHAIN}
+    del snap["chain_source"]
+    with pytest.raises(ValueError, match="chain_source.*missing"):
+        build_diagonal_calendar(spot=2300.0, mode="calendar", snapshot=snap)
+
+
+def test_chain_provided_with_empty_string_source_raises():
+    """Empty string is not in the allowed set."""
+    snap = {**RUT_SNAPSHOT_CHAIN, "chain_source": ""}
+    with pytest.raises(ValueError, match="not in"):
+        build_diagonal_calendar(spot=2300.0, mode="calendar", snapshot=snap)
+
+
+def test_allowed_chain_sources_set():
+    """Registry test: ALLOWED_CHAIN_SOURCES tracks hard rule #2."""
+    from scripts.diagonal_calendar import ALLOWED_CHAIN_SOURCES
+
+    assert ALLOWED_CHAIN_SOURCES == frozenset({"UW", "IB", "TV"})
