@@ -40,3 +40,215 @@ def test_strike_for_put_delta_invalid_target_raises():
         _strike_for_put_delta(spot=2300.0, target_abs=0.0, t_years=0.1, iv=0.28)
     with pytest.raises(ValueError, match="target_abs"):
         _strike_for_put_delta(spot=2300.0, target_abs=1.5, t_years=0.1, iv=0.28)
+
+
+# --- Tasks 5+6+7 — mode dispatch, max_loss, breakevens, greeks, roll matrix ---
+
+from scripts.diagonal_calendar import build_diagonal_calendar
+
+RUT_SNAPSHOT_BSM = {
+    "iv_atm_short": 0.28,
+    "iv_atm_long": 0.30,
+    "iv_rank": 35,
+    "vrp_label": "NEUTRAL",
+}
+
+
+def test_calendar_mode_same_strike():
+    out = build_diagonal_calendar(
+        spot=2300.0, mode="calendar", snapshot=RUT_SNAPSHOT_BSM
+    )
+    assert out["mode"] == "calendar"
+    assert len(out["legs"]) == 2
+    long_leg = next(l for l in out["legs"] if l["action"] == "buy")
+    short_leg = next(l for l in out["legs"] if l["action"] == "sell")
+    assert long_leg["strike"] == pytest.approx(short_leg["strike"], rel=1e-6), (
+        "calendar mode requires Ks == Kl"
+    )
+
+
+def test_protective_strike_invariant_ks_below_kl():
+    """Protective mode MUST produce Ks < Kl regardless of default Δs."""
+    out = build_diagonal_calendar(
+        spot=2300.0, mode="protective", snapshot=RUT_SNAPSHOT_BSM
+    )
+    long_leg = next(l for l in out["legs"] if l["action"] == "buy")
+    short_leg = next(l for l in out["legs"] if l["action"] == "sell")
+    assert short_leg["strike"] < long_leg["strike"]
+
+
+def test_aggressive_mode_short_above_long():
+    out = build_diagonal_calendar(
+        spot=2300.0, mode="aggressive", snapshot=RUT_SNAPSHOT_BSM
+    )
+    long_leg = next(l for l in out["legs"] if l["action"] == "buy")
+    short_leg = next(l for l in out["legs"] if l["action"] == "sell")
+    assert short_leg["strike"] > long_leg["strike"], "aggressive: Ks > Kl"
+
+
+def test_unknown_mode_raises():
+    with pytest.raises(ValueError, match="mode"):
+        build_diagonal_calendar(
+            spot=2300.0, mode="butterfly", snapshot=RUT_SNAPSHOT_BSM
+        )
+
+
+def test_pricing_source_bsm_when_no_chain():
+    out = build_diagonal_calendar(
+        spot=2300.0, mode="calendar", snapshot=RUT_SNAPSHOT_BSM
+    )
+    assert out["pricing_source"] == "bsm"
+    for leg in out["legs"]:
+        assert leg["mid_source"] == "fallback"
+
+
+def test_calendar_net_debit_positive():
+    """Calendar mode (Ks=Kl): long 45DTE >> short 1DTE premium at same K → net debit."""
+    out = build_diagonal_calendar(
+        spot=2300.0, mode="calendar", snapshot=RUT_SNAPSHOT_BSM
+    )
+    assert out["net_debit_dollar"] > 0, "calendar should be net debit (long > short)"
+
+
+def test_calendar_max_loss_close_to_net_debit():
+    """Calendar max loss = net_debit + Kl(1-DF)*100 discount-carry term.
+    Worst case is S=0: long pays Kl·DF, short pays Kl. Extra loss = Kl(1-DF).
+    For RUT Kl ≈ 2185, 44d at 4%: ≈ $1,050. Test bound: net_debit ≤ max_loss
+    ≤ net_debit + 1% of strike notional."""
+    out = build_diagonal_calendar(
+        spot=2300.0, mode="calendar", snapshot=RUT_SNAPSHOT_BSM
+    )
+    long_leg = next(l for l in out["legs"] if l["action"] == "buy")
+    discount_carry_ceiling = long_leg["strike"] * 0.01 * 100
+    assert (
+        out["net_debit_dollar"]
+        <= out["max_loss_dollar"]
+        <= out["net_debit_dollar"] + discount_carry_ceiling
+    )
+
+
+def test_protective_max_loss_close_to_net_debit():
+    """Protective max loss ≈ net_debit (S > Kl worst case, both worthless).
+    Width (Kl - Ks) does NOT add — when S < Ks both legs are ITM and offset
+    in [Ks, Kl] range. Discount-carry correction can add a small term."""
+    out = build_diagonal_calendar(
+        spot=2300.0, mode="protective", snapshot=RUT_SNAPSHOT_BSM
+    )
+    long_leg = next(l for l in out["legs"] if l["action"] == "buy")
+    short_leg = next(l for l in out["legs"] if l["action"] == "sell")
+    width_dollars = (long_leg["strike"] - short_leg["strike"]) * 100
+    # Must be ≪ width (would be off by ~$5,000+ if width term incorrectly added)
+    assert out["max_loss_dollar"] < out["net_debit_dollar"] + width_dollars * 0.5
+
+
+def test_aggressive_max_loss_width_plus_debit_plus_discount_carry():
+    """Aggressive max loss = (Ks - Kl·DF)*100 + net_debit
+       = (Ks - Kl)*100 + Kl(1-DF)*100 + net_debit.
+    The Kl(1-DF) term ADDS to the naive width formula (worst case S→0,
+    long pays Kl·DF, short pays Ks). Test bounds:
+      lower = (Ks-Kl)*100 + net_debit  (no discount carry edge case)
+      upper = (Ks-Kl)*100 + net_debit + Kl*1%*100  (full discount carry)"""
+    out = build_diagonal_calendar(
+        spot=2300.0, mode="aggressive", snapshot=RUT_SNAPSHOT_BSM
+    )
+    long_leg = next(l for l in out["legs"] if l["action"] == "buy")
+    short_leg = next(l for l in out["legs"] if l["action"] == "sell")
+    width = short_leg["strike"] - long_leg["strike"]
+    lower_bound = width * 100 + out["net_debit_dollar"]
+    upper_bound = lower_bound + long_leg["strike"] * 0.01 * 100
+    assert lower_bound <= out["max_loss_dollar"] <= upper_bound
+
+
+def test_net_greeks_keys_present():
+    """Net greeks dict has all 4 keys with finite values.
+
+    NOTE: at default Δs (calendar long=0.30, short Δ unused with Ks=Kl),
+    K lands ~5% OTM for both legs. Short 1-DTE at 5% OTM is near-worthless,
+    so its positive theta (from being short) is tiny. Long 45-DTE put's
+    negative theta dominates → NET theta is NEGATIVE for default-Δ calendar.
+    Trader who wants theta-positive calendar must override target_deltas
+    to push K closer to ATM (e.g., long Δ ~0.45-0.50)."""
+    out = build_diagonal_calendar(
+        spot=2300.0, mode="calendar", snapshot=RUT_SNAPSHOT_BSM
+    )
+    for k in ("delta", "gamma", "theta_daily", "vega"):
+        assert k in out["net_greeks_entry"]
+        assert isinstance(out["net_greeks_entry"][k], (int, float))
+    # Long-leg vega should dominate → net vega POSITIVE for calendar
+    assert out["net_greeks_entry"]["vega"] > 0, (
+        "calendar long-leg vega should dominate; positive net vega is the edge"
+    )
+
+
+def test_calendar_atm_overrides_positive_theta():
+    """When trader overrides target_deltas to push K toward ATM (long Δ 0.50),
+    short 1-DTE is closer to ATM, has meaningful theta. Net theta SHOULD then
+    flip positive (the classic 'calendar income' picture)."""
+    out = build_diagonal_calendar(
+        spot=2300.0,
+        mode="calendar",
+        snapshot=RUT_SNAPSHOT_BSM,
+        target_deltas={"long": 0.50, "short": 0.50},
+    )
+    assert out["net_greeks_entry"]["theta_daily"] > 0, (
+        f"ATM calendar should be theta-positive; got {out['net_greeks_entry']['theta_daily']}"
+    )
+
+
+def test_breakevens_dict_shape():
+    out = build_diagonal_calendar(
+        spot=2300.0, mode="calendar", snapshot=RUT_SNAPSHOT_BSM
+    )
+    assert "breakevens_at_short_expiry" in out
+    assert "lower" in out["breakevens_at_short_expiry"]
+    assert "upper" in out["breakevens_at_short_expiry"]
+
+
+def test_roll_matrix_has_seven_scenarios():
+    out = build_diagonal_calendar(
+        spot=2300.0, mode="calendar", snapshot=RUT_SNAPSHOT_BSM
+    )
+    assert len(out["roll_matrix"]) == 7
+    scenarios = [r["spot_scenario"] for r in out["roll_matrix"]]
+    assert scenarios == [-0.10, -0.05, -0.02, 0.0, 0.02, 0.05, 0.10]
+
+
+def test_roll_matrix_protective_higher_pl_on_crash():
+    """For protective, net_pl should be higher at -10% than at 0% (long pays off)."""
+    out = build_diagonal_calendar(
+        spot=2300.0, mode="protective", snapshot=RUT_SNAPSHOT_BSM
+    )
+    rows = out["roll_matrix"]
+    pl_down10 = next(r["net_pl"] for r in rows if r["spot_scenario"] == -0.10)
+    pl_flat = next(r["net_pl"] for r in rows if r["spot_scenario"] == 0.0)
+    assert pl_down10 > pl_flat
+
+
+def test_roll_matrix_short_put_pl_at_credit_above_strike():
+    """If spot at short expiry > short strike Ks, short_put_pl ≈ credit received."""
+    out = build_diagonal_calendar(
+        spot=2300.0, mode="protective", snapshot=RUT_SNAPSHOT_BSM
+    )
+    short_leg = next(l for l in out["legs"] if l["action"] == "sell")
+    ks = short_leg["strike"]
+    short_credit = short_leg["limit_price"] * 100
+    up_row = next(r for r in out["roll_matrix"] if r["spot_scenario"] == 0.10)
+    assert up_row["spot_at_expiry"] > ks
+    assert up_row["short_put_pl"] == pytest.approx(short_credit, abs=1.0)
+
+
+@pytest.mark.parametrize("mode", ["calendar", "protective", "aggressive"])
+def test_roll_matrix_non_monotonic_shape(mode):
+    """Diagonal calendar P/L is GENERALLY non-monotonic in spot — typically has a
+    profit zone near the strike cluster with two breakevens flanking it. Expect
+    ≤ 2 sign changes in net_pl across the 7 spot scenarios."""
+    out = build_diagonal_calendar(spot=2300.0, mode=mode, snapshot=RUT_SNAPSHOT_BSM)
+    pls = [r["net_pl"] for r in out["roll_matrix"]]
+    sign_changes = sum(
+        1
+        for i in range(1, len(pls))
+        if (pls[i - 1] > 0 and pls[i] < 0) or (pls[i - 1] < 0 and pls[i] > 0)
+    )
+    assert sign_changes <= 2, (
+        f"{mode} roll matrix has {sign_changes} sign changes; expected ≤ 2. P/L: {pls}"
+    )
