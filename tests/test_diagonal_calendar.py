@@ -237,6 +237,107 @@ def test_roll_matrix_short_put_pl_at_credit_above_strike():
     assert up_row["short_put_pl"] == pytest.approx(short_credit, abs=1.0)
 
 
+# --- Task 8 — chain path + regime_check + snap-to-listed ---
+
+RUT_SNAPSHOT_CHAIN = {
+    "iv_atm_short": 0.28,
+    "iv_atm_long": 0.30,
+    "iv_rank": 35,
+    "vrp_label": "NEUTRAL",
+    "chain_source": "UW",
+    "spot_timestamp": "2026-06-09T10:00:00Z",
+    "chain_timestamps": {
+        "2026-06-10": "2026-06-09T10:00:00Z",
+        "2026-07-24": "2026-06-09T10:00:00Z",
+    },
+    "chain": {
+        # 1-DTE
+        "2026-06-10": {
+            1.00: {"put": {"mid": 9.50, "iv": 0.28}},
+            0.99: {"put": {"mid": 4.20, "iv": 0.30}},
+            0.97: {"put": {"mid": 1.80, "iv": 0.33}},
+            0.95: {"put": {"mid": 0.50, "iv": 0.35}},
+        },
+        # 45-DTE
+        "2026-07-24": {
+            1.00: {"put": {"mid": 38.00, "iv": 0.30}},
+            0.95: {"put": {"mid": 18.50, "iv": 0.32}},
+            0.93: {"put": {"mid": 12.20, "iv": 0.33}},
+        },
+    },
+}
+
+
+def test_chain_path_used_when_available():
+    out = build_diagonal_calendar(
+        spot=2300.0, mode="calendar", snapshot=RUT_SNAPSHOT_CHAIN
+    )
+    assert out["pricing_source"] in ("chain", "mixed")
+    sources = {leg["mid_source"] for leg in out["legs"]}
+    assert "UW" in sources or "IB" in sources
+
+
+def test_chain_path_consumes_greeks_when_provided():
+    """When chain leg includes a greeks dict, the leg's greeks_source must be
+    the chain source (UW/IB), NOT 'bsm_fallback'. Per hard rule #2."""
+    snap = {
+        **RUT_SNAPSHOT_CHAIN,
+        "chain": {
+            "2026-06-10": {
+                0.95: {
+                    "put": {
+                        "mid": 0.50,
+                        "iv": 0.35,
+                        "greeks": {
+                            "delta": -0.10,
+                            "gamma": 0.001,
+                            "theta": -0.05,
+                            "vega": 0.05,
+                        },
+                    }
+                },
+            },
+            "2026-07-24": {
+                0.95: {
+                    "put": {
+                        "mid": 18.50,
+                        "iv": 0.32,
+                        "greeks": {
+                            "delta": -0.30,
+                            "gamma": 0.002,
+                            "theta": -0.10,
+                            "vega": 0.50,
+                        },
+                    }
+                },
+            },
+        },
+    }
+    out = build_diagonal_calendar(spot=2300.0, mode="calendar", snapshot=snap)
+    long_leg = next(l for l in out["legs"] if l["action"] == "buy")
+    assert long_leg["greeks_source"] == "UW", (
+        f"long leg should consume chain greeks; got {long_leg['greeks_source']}"
+    )
+    # Verify the actual greek value came from chain, not BSM (delta = -0.30)
+    assert long_leg["greeks"]["delta"] == pytest.approx(-0.30)
+
+
+def test_regime_check_warns_on_mismatch():
+    """Aggressive mode + CHEAP VRP → regime_check.warning populated."""
+    cheap_snap = {**RUT_SNAPSHOT_BSM, "iv_rank": 12, "vrp_label": "CHEAP"}
+    out = build_diagonal_calendar(spot=2300.0, mode="aggressive", snapshot=cheap_snap)
+    assert out["regime_check"]["matches_chosen_mode"] is False
+    assert out["regime_check"]["warning"] is not None
+
+
+def test_regime_check_no_warning_when_match():
+    out = build_diagonal_calendar(
+        spot=2300.0, mode="calendar", snapshot=RUT_SNAPSHOT_BSM
+    )
+    assert out["regime_check"]["matches_chosen_mode"] is True
+    assert out["regime_check"]["warning"] is None
+
+
 @pytest.mark.parametrize("mode", ["calendar", "protective", "aggressive"])
 def test_roll_matrix_non_monotonic_shape(mode):
     """Diagonal calendar P/L is GENERALLY non-monotonic in spot — typically has a

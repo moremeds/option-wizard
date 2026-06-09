@@ -20,6 +20,12 @@ from typing import Any, Literal
 
 from scipy.stats import norm
 
+from scripts._market import (
+    chain_leg_provenance,
+    fallback_provenance,
+    read_chain_mid,
+)
+
 Mode = Literal["calendar", "protective", "aggressive"]
 
 # Strike-selection policy per mode. Δ-only selection across 1-2DTE short
@@ -115,6 +121,158 @@ def _build_leg_bsm(
         "greeks": greeks,
         "greeks_source": "bsm",
     }
+
+
+def _read_chain_greeks(chain: dict, expiry: str, strike_pct: float) -> dict | None:
+    """Read greeks dict from chain[expiry][matching_strike_pct]['put'] if
+    present. Uses same 0.005 tolerance as read_chain_mid. Returns None if
+    not provided — caller falls back to BSM recompute."""
+    expiry_chain = chain.get(expiry, {})
+    for k_pct, payload in expiry_chain.items():
+        if abs(k_pct - strike_pct) <= 0.005:
+            put_leg = payload.get("put", {})
+            g = put_leg.get("greeks")
+            if g and all(k in g for k in ("delta", "gamma", "theta", "vega")):
+                return g
+    return None
+
+
+def _build_leg_chain_first(
+    *,
+    spot: float,
+    strike: float,
+    action: str,
+    qty: int,
+    t_years: float,
+    iv: float,
+    chain: dict | None,
+    chain_source: str,
+    chain_expiry: str | None,
+    chain_timestamp: str | None,
+) -> dict[str, Any]:
+    """Build leg with chain mid + chain greeks if available, BSM fallback otherwise.
+
+    Per hard rule #2 'if a source serves it directly, never recompute':
+    when chain provides greeks, USE them. BSM recompute only when chain
+    leg lacks greeks (mid + iv but no delta/gamma/theta/vega)."""
+    if chain and chain_expiry:
+        strike_pct = round(strike / spot, 4)
+        mid = read_chain_mid(chain, chain_expiry, strike_pct, "put")
+        if mid is not None:
+            provenance = chain_leg_provenance(
+                value=mid,
+                chain_source=chain_source,
+                expiry=chain_expiry,
+                strike_pct=strike_pct,
+                right="put",
+                field="mid",
+                timestamp=chain_timestamp,
+            )
+            chain_greeks = _read_chain_greeks(chain, chain_expiry, strike_pct)
+            if chain_greeks is not None:
+                greeks = chain_greeks
+                greeks_source = chain_source
+            else:
+                greeks = _bs_put_greeks(spot, strike, t_years, _R, iv)
+                greeks_source = "bsm_fallback"
+            return {
+                "right": "put",
+                "action": action,
+                "strike": strike,
+                "qty": qty,
+                "limit_price": round(mid, 2),
+                "mid_source": chain_source,
+                "mid_provenance": provenance,
+                "greeks": greeks,
+                "greeks_source": greeks_source,
+            }
+    return _build_leg_bsm(
+        spot=spot, strike=strike, action=action, qty=qty, t_years=t_years, iv=iv
+    )
+
+
+def _resolve_chain_expiries(
+    snapshot: dict, dte_short: int, dte_long: int
+) -> tuple[dict | None, str, str | None, str | None, str | None, str | None]:
+    """Return (chain, chain_source, short_expiry, short_ts, long_expiry, long_ts)
+    or (None, ..., None, None, None, None) if no chain. Picks nearest listed
+    expiry by sorted iso key (caller builds chain with exactly the expiries
+    we want priced)."""
+    chain = snapshot.get("chain")
+    chain_source = snapshot.get("chain_source", "UW")
+    if not chain:
+        return None, chain_source, None, None, None, None
+    timestamps = snapshot.get("chain_timestamps", {})
+    sorted_expiries = sorted(chain.keys())
+    if len(sorted_expiries) < 2:
+        return None, chain_source, None, None, None, None
+    short_expiry = sorted_expiries[0]
+    long_expiry = sorted_expiries[-1]
+    return (
+        chain,
+        chain_source,
+        short_expiry,
+        timestamps.get(short_expiry),
+        long_expiry,
+        timestamps.get(long_expiry),
+    )
+
+
+def _snap_to_listed_strike(target_k: float, spot: float, expiry_chain: dict) -> float:
+    """Given a theoretical strike K_theo, find the listed strike (in $) closest
+    to it from the chain's strike grid. Chain keys are strike_pct floats."""
+    if not expiry_chain:
+        return target_k
+    listed_dollars = [k_pct * spot for k_pct in expiry_chain.keys()]
+    return min(listed_dollars, key=lambda k: abs(k - target_k))
+
+
+_REGIME_MODE_TABLE = {
+    # (vrp_label, iv_rank_bucket) → recommended mode (or None = no sell)
+    ("RICH", "high"): "aggressive",
+    ("RICH", "mid"): "protective",
+    ("NEUTRAL", "high"): "calendar",
+    ("NEUTRAL", "mid"): "calendar",
+    ("NEUTRAL", "low"): "calendar",
+    ("CHEAP", "high"): None,
+    ("CHEAP", "mid"): None,
+    ("CHEAP", "low"): None,
+}
+
+
+def _regime_check(mode: str, snapshot: dict) -> dict[str, Any]:
+    """Compare chosen mode against regime recommendation. Warns but does not abort."""
+    vrp = snapshot.get("vrp_label", "NEUTRAL")
+    iv_rank = snapshot.get("iv_rank", 50)
+    bucket = "high" if iv_rank >= 60 else "mid" if iv_rank >= 30 else "low"
+    recommended = _REGIME_MODE_TABLE.get((vrp, bucket))
+    matches = recommended == mode
+    warning = None
+    if not matches and recommended is not None:
+        warning = (
+            f"VRP={vrp} + IV rank {iv_rank} ({bucket}) suggests {recommended!r} mode; "
+            f"chose {mode!r} — proceeds but accept lower expected edge"
+        )
+    elif recommended is None:
+        warning = (
+            f"VRP={vrp} indicates no sell-premium regime; chose {mode!r} — "
+            f"consider deferring entry until VRP turns NEUTRAL or RICH"
+        )
+    return {
+        "recommended_mode_for_regime": recommended,
+        "matches_chosen_mode": matches,
+        "warning": warning,
+    }
+
+
+def _pricing_source(legs: list[dict]) -> str:
+    """Roll up per-leg mid_source to top-level pricing_source."""
+    sources = {leg["mid_source"] for leg in legs}
+    if sources in ({"UW"}, {"IB"}):
+        return "chain"
+    if "fallback" in sources and len(sources) > 1:
+        return "mixed"
+    return "bsm"
 
 
 def _net_debit_dollar(legs: list[dict]) -> float:
@@ -253,7 +411,10 @@ def build_diagonal_calendar(
 ) -> dict[str, Any]:
     """Build a put diagonal calendar (long Kl 45DTE + short Ks 1-2DTE).
 
-    BSM-only path (chain support added later via _build_leg_chain_first).
+    Chain-first: if snapshot contains 'chain', pulls mid + greeks from listed
+    strikes (snap-to-listed). Falls back to BSM mid + recomputed greeks per
+    leg when chain missing. pricing_source ∈ {chain, mixed, bsm}.
+
     Mode-specific Ks selection enforces invariants:
       calendar:   Ks == Kl
       protective: Ks < Kl  (anchor: Kl × (1 - SHORT_STRIKE_OFFSET_PCT))
@@ -278,6 +439,31 @@ def build_diagonal_calendar(
     else:  # aggressive
         k_short = _strike_for_put_delta(spot, deltas["short"], t_short, iv_short)
 
+    (
+        chain,
+        chain_source,
+        short_expiry,
+        short_ts,
+        long_expiry,
+        long_ts,
+    ) = _resolve_chain_expiries(snapshot, dte_short, dte_long)
+
+    # Snap to nearest listed strike when chain available
+    if chain:
+        if long_expiry and long_expiry in chain:
+            k_long = _snap_to_listed_strike(k_long, spot, chain[long_expiry])
+        if short_expiry and short_expiry in chain:
+            k_short = _snap_to_listed_strike(k_short, spot, chain[short_expiry])
+        # Re-enforce mode invariants after snapping
+        if mode == "calendar" and abs(k_short - k_long) > 1e-6:
+            # If expiries have different listed grids, snap short to long's K
+            if short_expiry and short_expiry in chain:
+                k_short = _snap_to_listed_strike(k_long, spot, chain[short_expiry])
+        if mode == "protective" and not k_short < k_long:
+            k_short = k_long * (1 - SHORT_STRIKE_OFFSET_PCT["protective"])
+            if short_expiry and short_expiry in chain:
+                k_short = _snap_to_listed_strike(k_short, spot, chain[short_expiry])
+
     if mode == "protective" and not k_short < k_long:
         raise ValueError(
             f"protective mode invariant violated: Ks={k_short:.2f} not < Kl={k_long:.2f}"
@@ -287,11 +473,29 @@ def build_diagonal_calendar(
             f"aggressive mode invariant violated: Ks={k_short:.2f} not > Kl={k_long:.2f}"
         )
 
-    long_leg = _build_leg_bsm(
-        spot=spot, strike=k_long, action="buy", qty=qty, t_years=t_long, iv=iv_long
+    long_leg = _build_leg_chain_first(
+        spot=spot,
+        strike=k_long,
+        action="buy",
+        qty=qty,
+        t_years=t_long,
+        iv=iv_long,
+        chain=chain,
+        chain_source=chain_source,
+        chain_expiry=long_expiry,
+        chain_timestamp=long_ts,
     )
-    short_leg = _build_leg_bsm(
-        spot=spot, strike=k_short, action="sell", qty=qty, t_years=t_short, iv=iv_short
+    short_leg = _build_leg_chain_first(
+        spot=spot,
+        strike=k_short,
+        action="sell",
+        qty=qty,
+        t_years=t_short,
+        iv=iv_short,
+        chain=chain,
+        chain_source=chain_source,
+        chain_expiry=short_expiry,
+        chain_timestamp=short_ts,
     )
 
     net_debit = _net_debit_dollar([long_leg, short_leg])
@@ -318,5 +522,6 @@ def build_diagonal_calendar(
         "breakevens_at_short_expiry": breakevens,
         "net_greeks_entry": net_greeks,
         "roll_matrix": roll_matrix,
-        "pricing_source": "bsm",
+        "pricing_source": _pricing_source([long_leg, short_leg]),
+        "regime_check": _regime_check(mode, snapshot),
     }
