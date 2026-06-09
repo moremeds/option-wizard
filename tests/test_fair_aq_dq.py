@@ -14,6 +14,7 @@ from scripts.fair_aq_dq import (
     Snapshot,
     _accumulation_pv,
     _all_earnings_dates_in_tenor,
+    _check_refusal_full,
     _check_refusal_red_lines,
     _compute_scenarios,
     _doubling_tail_leg_pv,
@@ -1181,3 +1182,421 @@ def test_googl_aq_end_to_end_refuses_on_concentration_or_ers():
     assert "ko_during_guarantee" in v.scenarios
     assert v.scenarios["ko_during_guarantee"]["shares"] == pytest.approx(80.0)
     assert v.mode == "implicit_yield_aq"  # AQ without quoted yield
+
+
+# ─── R0 mean-reversion pre-filter (framework §6) ───────────────
+
+
+def _mock_snapshot_with_52w(
+    high_52w: float | None = 240.0,
+    low_52w: float | None = 160.0,
+    avg_er_max_move_pct: float | None = None,
+    **overrides,
+) -> Snapshot:
+    """Snapshot factory with the new R0 / MoS / R6-graduated fields populated."""
+    s = _mock_snapshot(**overrides)
+    s.high_52w = high_52w
+    s.low_52w = low_52w
+    s.avg_er_max_move_pct = avg_er_max_move_pct
+    return s
+
+
+def test_r0_refuses_when_52w_ratio_above_3x():
+    """INTC-like case: 52w hi $130 / lo $19 = 6.84× — hard refuse on R0."""
+    q = _mock_quote()
+    s = _mock_snapshot_with_52w(high_52w=130.0, low_52w=19.0)
+    result = _check_refusal_red_lines(q, s, nlv_usd=10_000_000.0)
+    assert any("R0" in r and "ratio" in r.lower() for r in result)
+
+
+def test_r0_passes_when_52w_ratio_below_3x():
+    """LLY-like case: 52w hi $1183 / lo $624 = 1.90× — passes R0."""
+    q = _mock_quote()
+    s = _mock_snapshot_with_52w(high_52w=1183.0, low_52w=624.0)
+    result = _check_refusal_red_lines(q, s, nlv_usd=10_000_000.0)
+    assert not any("R0" in r for r in result)
+
+
+def test_r0_skipped_when_52w_data_missing():
+    """No 52w data → R0 is skipped silently, no false refusal."""
+    q = _mock_quote()
+    s = _mock_snapshot_with_52w(high_52w=None, low_52w=None)
+    full = _check_refusal_full(q, s, nlv_usd=10_000_000.0)
+    assert full["r0_passed"] is None
+    assert full["r0_ratio"] is None
+    assert not any("R0" in r for r in full["reasons"])
+
+
+def test_r0_flags_extreme_for_ratio_above_5x():
+    """ratio > 5× should mention extreme severity in the reason text."""
+    q = _mock_quote()
+    s = _mock_snapshot_with_52w(high_52w=130.0, low_52w=19.0)  # 6.84×
+    result = _check_refusal_red_lines(q, s, nlv_usd=10_000_000.0)
+    assert any("extreme" in r.lower() for r in result if "R0" in r)
+
+
+def test_r0_flags_speculative_for_ratio_3_to_5x():
+    """3× < ratio ≤ 5× should mention speculative severity."""
+    q = _mock_quote()
+    s = _mock_snapshot_with_52w(high_52w=372.0, low_52w=85.0)  # 4.38× (ALAB-like)
+    result = _check_refusal_red_lines(q, s, nlv_usd=10_000_000.0)
+    assert any("speculative" in r.lower() for r in result if "R0" in r)
+
+
+# ─── R6 graduated check (framework §6.2) ───────────────────────
+
+
+def test_r6_graduated_r6a_refuse_when_er_exceeds_ko_distance():
+    """avg_ER_move 12% > KO_distance 5% → R6a REFUSE."""
+    q = _mock_quote(
+        ko_pct=1.05,  # 5% KO distance
+        tenor_months=12,
+    )
+    s = _mock_snapshot_with_52w(
+        high_52w=240.0,
+        low_52w=160.0,
+        avg_er_max_move_pct=0.12,
+    )
+    s.earnings_date_iso = "2026-09-15"  # in middle 50% of 12M
+    s.earnings_dates_iso = None
+    full = _check_refusal_full(q, s, nlv_usd=10_000_000.0)
+    assert full["r6_status"] == "REFUSE_R6a"
+    assert any("R6a" in r for r in full["reasons"])
+
+
+def test_r6_graduated_r6b_caution_when_er_in_borderline_band():
+    """0.5×KO ≤ avg_ER ≤ KO → R6b CAUTION (warning, NOT refusal)."""
+    q = _mock_quote(ko_pct=1.10, tenor_months=12)  # 10% KO distance
+    s = _mock_snapshot_with_52w(
+        high_52w=240.0,
+        low_52w=160.0,
+        avg_er_max_move_pct=0.07,  # ER move 7% > 5%, < 10% → CAUTION
+    )
+    s.earnings_date_iso = "2026-09-15"
+    s.earnings_dates_iso = None
+    full = _check_refusal_full(q, s, nlv_usd=10_000_000.0)
+    assert full["r6_status"] == "CAUTION"
+    # CAUTION should NOT add a hard refusal
+    assert not any("R6a" in r or "R6:" in r for r in full["reasons"])
+    # But should add a warning
+    assert any("R6b" in w for w in full["warnings"])
+
+
+def test_r6_graduated_r6c_pass_when_er_well_below_half_ko():
+    """avg_ER < 0.5×KO → R6c PASS, no refusal or warning."""
+    q = _mock_quote(ko_pct=1.10, tenor_months=12)  # 10% KO distance
+    s = _mock_snapshot_with_52w(
+        high_52w=240.0,
+        low_52w=160.0,
+        avg_er_max_move_pct=0.03,  # 3% << 5% → PASS
+    )
+    s.earnings_date_iso = "2026-09-15"
+    s.earnings_dates_iso = None
+    full = _check_refusal_full(q, s, nlv_usd=10_000_000.0)
+    assert full["r6_status"] == "PASS"
+    assert not any("R6" in r for r in full["reasons"])
+
+
+def test_r6_legacy_binary_when_use_legacy_r6_true():
+    """quote.use_legacy_r6=True → binary 'ANY ER in middle 50% → REFUSE'."""
+    q = _mock_quote(
+        ko_pct=1.10,
+        tenor_months=12,
+        use_legacy_r6=True,
+    )
+    s = _mock_snapshot_with_52w(
+        high_52w=240.0,
+        low_52w=160.0,
+        avg_er_max_move_pct=0.03,  # would pass graduated R6
+    )
+    s.earnings_date_iso = "2026-09-15"  # in middle 50%
+    s.earnings_dates_iso = None
+    full = _check_refusal_full(q, s, nlv_usd=10_000_000.0)
+    assert full["r6_status"] == "LEGACY_BINARY"
+    assert any("R6" in r and "legacy" in r.lower() for r in full["reasons"])
+
+
+def test_r6_legacy_binary_when_avg_er_move_missing():
+    """avg_er_max_move_pct unset → fallback to legacy binary."""
+    q = _mock_quote(ko_pct=1.10, tenor_months=12)
+    s = _mock_snapshot_with_52w(
+        high_52w=240.0,
+        low_52w=160.0,
+        avg_er_max_move_pct=None,
+    )
+    s.earnings_date_iso = "2026-09-15"
+    s.earnings_dates_iso = None
+    full = _check_refusal_full(q, s, nlv_usd=10_000_000.0)
+    assert full["r6_status"] == "LEGACY_BINARY"
+
+
+def test_r6d_doubling_tail_warning_fires():
+    """avg_ER > 30% × strike discount → R6d doubling-tail warning."""
+    q = _mock_quote(
+        strike_pct=0.85,  # 15% strike discount
+        ko_pct=1.10,
+        tenor_months=12,
+    )
+    s = _mock_snapshot_with_52w(
+        high_52w=240.0,
+        low_52w=160.0,
+        avg_er_max_move_pct=0.06,  # 6% > 30% × 15% = 4.5%; R6b CAUTION territory
+    )
+    s.earnings_date_iso = "2026-09-15"
+    s.earnings_dates_iso = None
+    full = _check_refusal_full(q, s, nlv_usd=10_000_000.0)
+    assert full["r6_doubling_tail_warning"] is True
+    assert any("R6d" in w for w in full["warnings"])
+
+
+# ─── Margin of Safety analytical layer (framework §6.5) ────────
+
+
+def test_mos_computed_when_52w_data_present():
+    """MoS dict populated with all required keys."""
+    from scripts.fair_aq_dq import _compute_mos
+
+    q = _mock_quote(strike_pct=0.83, spot=1149.0)
+    s = _mock_snapshot_with_52w(high_52w=1183.0, low_52w=624.0)
+    mos = _compute_mos(q, s)
+    assert set(mos.keys()) == {
+        "strike_abs",
+        "mos_vs_52w_lo_pct",
+        "mos_in_52w_range_pct",
+        "mos_downside_at_lo_pct",
+        "rating",
+    }
+    assert mos["strike_abs"] == pytest.approx(0.83 * 1149.0)
+    # strike $953.67 vs 52w lo $624 → mos_vs_lo ≈ +52.8%
+    assert mos["mos_vs_52w_lo_pct"] == pytest.approx((953.67 - 624.0) / 624.0, abs=0.01)
+
+
+def test_mos_skipped_when_52w_data_missing():
+    """No 52w data → empty dict, no crash."""
+    from scripts.fair_aq_dq import _compute_mos
+
+    q = _mock_quote()
+    s = _mock_snapshot_with_52w(high_52w=None, low_52w=None)
+    mos = _compute_mos(q, s)
+    assert mos == {}
+
+
+def test_mos_rating_deep_value_in_lower_25pct():
+    """Strike at 20% of 52w range → DEEP_VALUE."""
+    from scripts.fair_aq_dq import _compute_mos
+
+    # 52w range $100-200, strike $120 → percentile 20%
+    q = _mock_quote(spot=200.0, strike_pct=0.60)  # strike abs = $120
+    s = _mock_snapshot_with_52w(high_52w=200.0, low_52w=100.0)
+    mos = _compute_mos(q, s)
+    assert mos["rating"] == "DEEP_VALUE"
+
+
+def test_mos_rating_no_margin_above_75pct():
+    """Strike at 90% of 52w range → NO_MARGIN."""
+    from scripts.fair_aq_dq import _compute_mos
+
+    # 52w range $100-200, strike $190 (95% of range)
+    q = _mock_quote(spot=200.0, strike_pct=0.95)  # strike abs = $190
+    s = _mock_snapshot_with_52w(high_52w=200.0, low_52w=100.0)
+    mos = _compute_mos(q, s)
+    assert mos["rating"] == "NO_MARGIN"
+
+
+def test_mos_downside_negative_means_paper_loss():
+    """If revisit 52w lo, trader is underwater → mos_downside_at_lo_pct < 0."""
+    from scripts.fair_aq_dq import _compute_mos
+
+    q = _mock_quote(spot=200.0, strike_pct=0.83)  # strike $166
+    s = _mock_snapshot_with_52w(high_52w=240.0, low_52w=100.0)
+    mos = _compute_mos(q, s)
+    # $100 vs $166 strike → -39.8%
+    assert mos["mos_downside_at_lo_pct"] < 0
+    assert mos["mos_downside_at_lo_pct"] == pytest.approx(
+        (100.0 - 166.0) / 166.0, abs=0.005
+    )
+
+
+# ─── §10 alternatives surface ──────────────────────────────────
+
+
+def test_alternatives_surface_when_goal_upside_exposure():
+    """Explicit goal=upside_exposure → always surface alternatives."""
+    from scripts.fair_aq_dq import _surface_alternatives
+
+    q = _mock_quote(goal="upside_exposure")
+    alts = _surface_alternatives(q, decision="ACCEPT_IF_MUST", mos_rating="DECENT")
+    assert len(alts) == 5  # 5 instruments in menu
+    assert {a["tag"] for a in alts} == {
+        "direct_stock",
+        "itm_leaps_call",
+        "risk_reversal",
+        "csp_ladder",
+        "stock_plus_otm_call",
+    }
+
+
+def test_alternatives_suppressed_when_goal_forced_accumulation():
+    """Explicit goal=forced_accumulation → never surface, even on REFUSE."""
+    from scripts.fair_aq_dq import _surface_alternatives
+
+    q = _mock_quote(goal="forced_accumulation")
+    alts = _surface_alternatives(q, decision="REFUSE", mos_rating="NO_MARGIN")
+    assert alts == []
+
+
+def test_alternatives_surface_on_refuse_when_goal_unspecified():
+    """Default behavior — REFUSE auto-surfaces alternatives."""
+    from scripts.fair_aq_dq import _surface_alternatives
+
+    q = _mock_quote(goal="unspecified")
+    alts = _surface_alternatives(q, decision="REFUSE", mos_rating=None)
+    assert len(alts) == 5
+
+
+def test_alternatives_surface_on_counter_with_bad_mos():
+    """COUNTER + MEDIOCRE/NO_MARGIN MoS → surface alternatives."""
+    from scripts.fair_aq_dq import _surface_alternatives
+
+    q = _mock_quote(goal="unspecified")
+    alts_mediocre = _surface_alternatives(q, "COUNTER", "MEDIOCRE")
+    alts_no_margin = _surface_alternatives(q, "COUNTER", "NO_MARGIN")
+    assert len(alts_mediocre) == 5
+    assert len(alts_no_margin) == 5
+
+
+def test_alternatives_suppressed_on_counter_with_good_mos():
+    """COUNTER + DEEP_VALUE/DECENT MoS → no surface needed."""
+    from scripts.fair_aq_dq import _surface_alternatives
+
+    q = _mock_quote(goal="unspecified")
+    assert _surface_alternatives(q, "COUNTER", "DEEP_VALUE") == []
+    assert _surface_alternatives(q, "COUNTER", "DECENT") == []
+
+
+def test_alternatives_returned_are_copies_not_shared_refs():
+    """Caller mutation must not affect the module-level template."""
+    from scripts.fair_aq_dq import _ALTERNATIVES_MENU, _surface_alternatives
+
+    q = _mock_quote(goal="upside_exposure")
+    alts = _surface_alternatives(q, "ACCEPT_IF_MUST", "DECENT")
+    alts[0]["name"] = "MUTATED"
+    # Module template should be unchanged
+    assert _ALTERNATIVES_MENU[0]["name"] == "Direct Stock"
+
+
+# ─── analyze_quote integration tests ───────────────────────────
+
+
+def test_analyze_quote_populates_r0_fields_when_52w_provided():
+    """analyze_quote should thread R0 result into Verdict."""
+    q = _mock_quote(
+        strike_pct=0.95,
+        ko_pct=1.05,
+        tenor_months=12,
+        pb_quoted_yield_pa=0.09,
+    )
+    s = _mock_snapshot_with_52w(high_52w=240.0, low_52w=160.0)
+    s.chain = _mock_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+    s.earnings_dates_iso = []  # explicit no ERs
+    v = analyze_quote(q, s, nlv_usd=100_000_000.0)
+    assert v.r0_passed is True
+    assert v.r0_ratio == pytest.approx(1.5, abs=0.001)
+
+
+def test_analyze_quote_r0_refuse_short_circuits():
+    """R0 trigger → REFUSE verdict with r0_passed=False."""
+    q = _mock_quote(tenor_months=6, pb_quoted_yield_pa=0.09)
+    s = _mock_snapshot_with_52w(high_52w=130.0, low_52w=19.0)  # 6.84×
+    s.earnings_dates_iso = []
+    v = analyze_quote(q, s, nlv_usd=100_000_000.0)
+    assert v.decision == "REFUSE"
+    assert v.r0_passed is False
+    assert v.r0_ratio > 5.0
+    # On hard REFUSE, alternatives should be surfaced
+    assert len(v.alternatives) == 5
+
+
+def test_analyze_quote_mos_populated_in_verdict():
+    """Verdict.mos should be populated when 52w data present."""
+    q = _mock_quote(
+        strike_pct=0.95,
+        ko_pct=1.05,
+        tenor_months=12,
+        pb_quoted_yield_pa=0.09,
+    )
+    s = _mock_snapshot_with_52w(high_52w=240.0, low_52w=160.0)
+    s.chain = _mock_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+    s.earnings_dates_iso = []
+    v = analyze_quote(q, s, nlv_usd=100_000_000.0)
+    assert v.mos != {}
+    assert "rating" in v.mos
+    assert v.mos["rating"] in ("DEEP_VALUE", "DECENT", "MEDIOCRE", "NO_MARGIN")
+
+
+def test_analyze_quote_alternatives_suppressed_for_forced_accumulation():
+    """goal=forced_accumulation → no alternatives even on REFUSE."""
+    q = _mock_quote(
+        tenor_months=6,
+        pb_quoted_yield_pa=0.09,
+        goal="forced_accumulation",
+    )
+    s = _mock_snapshot_with_52w(high_52w=130.0, low_52w=19.0)  # R0 will refuse
+    s.earnings_dates_iso = []
+    v = analyze_quote(q, s, nlv_usd=100_000_000.0)
+    assert v.decision == "REFUSE"
+    assert v.alternatives == []
+
+
+def test_analyze_quote_alternatives_surfaced_for_upside_exposure_goal():
+    """goal=upside_exposure → alternatives surface even on ACCEPT verdict."""
+    q = _mock_quote(
+        strike_pct=0.95,
+        ko_pct=1.05,
+        tenor_months=12,
+        pb_quoted_yield_pa=0.09,  # clean pricing
+        goal="upside_exposure",
+    )
+    s = _mock_snapshot_with_52w(high_52w=240.0, low_52w=160.0)
+    s.chain = _mock_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+    s.earnings_dates_iso = []
+    v = analyze_quote(q, s, nlv_usd=100_000_000.0)
+    # Verdict could be REFUSE/COUNTER/ACCEPT — alternatives surface either way
+    assert len(v.alternatives) == 5
+
+
+def test_analyze_quote_r6_status_populated():
+    """Verdict.r6_status should reflect graduated check outcome."""
+    q = _mock_quote(
+        ko_pct=1.10,
+        tenor_months=12,
+        pb_quoted_yield_pa=0.09,
+    )
+    s = _mock_snapshot_with_52w(
+        high_52w=240.0,
+        low_52w=160.0,
+        avg_er_max_move_pct=0.03,  # R6c PASS
+    )
+    s.chain = _mock_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+    s.earnings_date_iso = "2026-09-15"
+    s.earnings_dates_iso = None
+    v = analyze_quote(q, s, nlv_usd=100_000_000.0)
+    assert v.r6_status == "PASS"
+
+
+def test_backward_compat_no_new_fields_set_still_works():
+    """Old caller code that doesn't set goal/use_legacy_r6/52w fields must still work."""
+    q = _mock_quote(pb_quoted_yield_pa=0.09, tenor_months=12)  # no goal/use_legacy_r6
+    s = _mock_snapshot(iv_rank=60.0)  # no 52w/avg_er fields
+    s.chain = _mock_chain()
+    s.chain_timestamps = {"2027-06-18": "2026-06-05T10:00:00Z"}
+    s.earnings_dates_iso = []  # explicit no ERs
+    v = analyze_quote(q, s, nlv_usd=100_000_000.0)
+    assert v.r0_passed is None  # 52w data missing
+    assert v.r0_ratio is None
+    assert v.mos == {}
+    assert v.r6_status in ("PASS", "SKIPPED")  # no ER data
