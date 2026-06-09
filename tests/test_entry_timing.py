@@ -240,3 +240,17 @@ def test_calibrate_no_log_returns_empty():
     """calibrate on a non-existent log path returns zero counts (no crash)."""
     stats = calibrate(log_path="/tmp/__nonexistent_log__.jsonl")
     assert stats["total_decisions"] == 0
+
+
+def test_audit_log_path_resolves_within_skill_dir():
+    """AUDIT_LOG_PATH must live under the skill's references/private/market/
+    directory, not someone's hardcoded home path. Regression test for the
+    P1 bug where the constant pinned ~/projects/option-wizard/... — broke
+    audit logging for anyone not on that exact filesystem."""
+    from scripts.entry_timing import AUDIT_LOG_PATH
+
+    assert "/.worktrees/" in AUDIT_LOG_PATH or "/option-wizard/" in AUDIT_LOG_PATH
+    assert AUDIT_LOG_PATH.endswith("references/private/market/entry-timing-log.jsonl")
+    # The path must NOT contain ~/projects as a literal substring (i.e., must
+    # have been resolved via __file__, not via os.path.expanduser on a hardcoded string)
+    assert "~/projects" not in AUDIT_LOG_PATH

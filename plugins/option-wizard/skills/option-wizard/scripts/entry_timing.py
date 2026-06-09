@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 THRESHOLDS = {
@@ -32,9 +33,15 @@ THRESHOLDS = {
     "aggressive_mode_vix_cap": 25.0,
 }
 
-AUDIT_LOG_PATH = os.path.expanduser(
-    "~/projects/option-wizard/plugins/option-wizard/skills/option-wizard/"
-    "references/private/market/entry-timing-log.jsonl"
+# Resolve audit log path relative to this module so the file works across
+# users and machines (was: hardcoded ~/projects/option-wizard/... which only
+# worked for one user; the try/except in _write_audit_log silently swallowed
+# failures for everyone else, making calibrate() report 0 decisions forever).
+# Layout: <skill_root>/scripts/entry_timing.py → skill_root = parent.parent;
+#   AUDIT_LOG_PATH = <skill_root>/references/private/market/entry-timing-log.jsonl
+_SKILL_ROOT = Path(__file__).resolve().parent.parent
+AUDIT_LOG_PATH = str(
+    _SKILL_ROOT / "references" / "private" / "market" / "entry-timing-log.jsonl"
 )
 
 # Full set of threshold trigger names (kept in sync with branch labels in
