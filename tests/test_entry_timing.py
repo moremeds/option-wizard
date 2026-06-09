@@ -254,3 +254,199 @@ def test_audit_log_path_resolves_within_skill_dir():
     # The path must NOT contain ~/projects as a literal substring (i.e., must
     # have been resolved via __file__, not via os.path.expanduser on a hardcoded string)
     assert "~/projects" not in AUDIT_LOG_PATH
+
+
+# --- Patch #1 — catalyst-clock event gate (live-run gap from 2026-06-09) ---
+
+
+def test_event_clock_high_severity_tomorrow_aborts_csp():
+    """Live-run regression: CPI tomorrow must abort, not silently pass.
+    Pre-patch, only is_fomc_day was checked; today's CPI-tomorrow scenario
+    proceeded through to mode_window where the morning slot green-lit entry.
+    """
+    out = decide(
+        _snap(
+            next_event_name="CPI",
+            next_event_severity="HIGH",
+            next_event_days_away=1,
+        ),
+        mode="csp",
+    )
+    assert out["action"] == "abort"
+    assert out["triggered_threshold"] == "event_proximity_high_severity"
+    assert "CPI" in out["reason"]
+    assert "1d" in out["reason"]
+
+
+def test_event_clock_high_severity_two_days_aborts_at_threshold_boundary():
+    """event_proximity_days=2 — events 2d out must still abort."""
+    out = decide(
+        _snap(
+            next_event_name="NFP",
+            next_event_severity="HIGH",
+            next_event_days_away=2,
+        ),
+        mode="rut_calendar",
+    )
+    assert out["action"] == "abort"
+    assert out["triggered_threshold"] == "event_proximity_high_severity"
+
+
+def test_event_clock_high_severity_three_days_passes():
+    """Just outside the gate — should not abort here. Falls through to
+    other gates; with default snapshot the morning window for CSP fires."""
+    out = decide(
+        _snap(
+            next_event_name="FOMC",
+            next_event_severity="HIGH",
+            next_event_days_away=3,
+        ),
+        mode="csp",
+    )
+    assert out["triggered_threshold"] != "event_proximity_high_severity"
+
+
+def test_event_clock_medium_severity_does_not_abort():
+    """Only HIGH severity gates here. MEDIUM/LOW events flow through —
+    trader's discretion via the broader catalyst check."""
+    out = decide(
+        _snap(
+            next_event_name="Existing Home Sales",
+            next_event_severity="MEDIUM",
+            next_event_days_away=1,
+        ),
+        mode="csp",
+    )
+    assert out["triggered_threshold"] != "event_proximity_high_severity"
+
+
+def test_event_clock_missing_fields_does_not_crash():
+    """If orchestrator didn't compute the next-event triple, fall through
+    cleanly — don't crash and don't infer high severity."""
+    out = decide(_snap(), mode="csp")
+    assert out["triggered_threshold"] != "event_proximity_high_severity"
+
+
+def test_event_clock_today_zero_days_aborts():
+    """next_event_days_away=0 should also abort — defense in depth in case
+    is_fomc_day wasn't computed."""
+    out = decide(
+        _snap(
+            next_event_name="CPI",
+            next_event_severity="HIGH",
+            next_event_days_away=0,
+        ),
+        mode="csp",
+    )
+    assert out["action"] == "abort"
+    assert out["triggered_threshold"] == "event_proximity_high_severity"
+
+
+def test_event_clock_fires_before_day_specific_override():
+    """Event gate sits above day-override in the pipeline. If both could
+    fire (FOMC tomorrow + Monday open today), event gate wins because it's
+    more conservative (defer entirely vs wait 30min)."""
+    out = decide(
+        _snap(
+            next_event_name="FOMC Statement",
+            next_event_severity="HIGH",
+            next_event_days_away=1,
+            is_monday_open=True,
+            time_et="09:35",
+        ),
+        mode="csp",
+    )
+    assert out["triggered_threshold"] == "event_proximity_high_severity"
+
+
+# --- Patch #2 — IV term inversion gate ---
+
+
+def test_iv_term_inverted_with_event_soon_aborts():
+    """Inverted IV term + event within 5d = market explicitly pricing
+    event vol; abort regardless of mode."""
+    out = decide(
+        _snap(
+            iv_term_inverted=True,
+            next_event_name="CPI",
+            next_event_severity="MEDIUM",
+            next_event_days_away=3,
+        ),
+        mode="csp",
+    )
+    assert out["action"] == "abort"
+    assert out["triggered_threshold"] == "iv_term_inverted_event_pricing"
+
+
+def test_iv_term_inverted_alone_downgrades_morning_csp_to_eod():
+    """Inversion without near-term event: morning CSP downgrades to EOD."""
+    out = decide(_snap(iv_term_inverted=True, time_et="10:00"), mode="csp")
+    assert out["action"] == "wait_eod"
+    assert out["triggered_threshold"] == "iv_term_inverted_morning_downgrade"
+
+
+def test_iv_term_inverted_does_not_downgrade_eod_mode():
+    """RUT calendar already targets EOD; no downgrade needed. The gate
+    should let the existing EOD path own the decision."""
+    out = decide(_snap(iv_term_inverted=True, time_et="10:00"), mode="rut_calendar")
+    assert out["triggered_threshold"] != "iv_term_inverted_morning_downgrade"
+
+
+def test_iv_term_inverted_no_effect_when_false():
+    """Default snapshot has iv_term_inverted=False (missing key); pipeline
+    flows through normally."""
+    out = decide(_snap(time_et="10:00"), mode="csp")
+    assert out["triggered_threshold"] not in (
+        "iv_term_inverted_event_pricing",
+        "iv_term_inverted_morning_downgrade",
+    )
+
+
+def test_iv_term_inverted_with_high_severity_event_event_clock_wins():
+    """When BOTH event_clock fires (HIGH severity within 2d) AND IV inverted,
+    event_clock takes priority (more conservative; runs earlier in pipeline)."""
+    out = decide(
+        _snap(
+            iv_term_inverted=True,
+            next_event_name="CPI",
+            next_event_severity="HIGH",
+            next_event_days_away=1,
+        ),
+        mode="csp",
+    )
+    assert out["triggered_threshold"] == "event_proximity_high_severity"
+
+
+def test_iv_term_event_window_boundary():
+    """iv_term_inversion_event_window_days=5 — event 5d out still triggers
+    the event_pricing abort; 6d out does not."""
+    out_5d = decide(
+        _snap(
+            iv_term_inverted=True,
+            next_event_name="PPI",
+            next_event_severity="MEDIUM",
+            next_event_days_away=5,
+        ),
+        mode="csp",
+    )
+    assert out_5d["triggered_threshold"] == "iv_term_inverted_event_pricing"
+    out_6d = decide(
+        _snap(
+            iv_term_inverted=True,
+            next_event_name="PPI",
+            next_event_severity="MEDIUM",
+            next_event_days_away=6,
+        ),
+        mode="csp",
+    )
+    assert out_6d["triggered_threshold"] != "iv_term_inverted_event_pricing"
+
+
+def test_event_clock_and_iv_inversion_registered_in_all_trigger_names():
+    """calibrate() seeds with ALL_TRIGGER_NAMES; new triggers must be there
+    or never-fired reporting will be misleading."""
+    from scripts.entry_timing import ALL_TRIGGER_NAMES
+
+    assert "event_proximity_high_severity" in ALL_TRIGGER_NAMES
+    assert "iv_term_inverted_event_pricing" in ALL_TRIGGER_NAMES
+    assert "iv_term_inverted_morning_downgrade" in ALL_TRIGGER_NAMES

@@ -31,7 +31,29 @@ THRESHOLDS = {
     "gex_flip_proximity": 0.010,
     "odte_put_buyer_ratio": 3.0,
     "aggressive_mode_vix_cap": 25.0,
+    "event_proximity_days": 2,
+    "iv_term_inversion_event_window_days": 5,
 }
+
+# HIGH-severity scheduled macro events that move the whole tape (CPI / NFP /
+# FOMC / PPI / Fed Chair speeches). Selling premium within
+# THRESHOLDS["event_proximity_days"] of one of these = paying for the binary
+# print with no IV-crush edge. Orchestrator computes
+# (next_event_severity, next_event_days_away, next_event_name) from
+# unusual-whales:get_market_events and passes via the snapshot.
+HIGH_SEVERITY_EVENT_NAMES = (
+    "CPI",
+    "Core CPI",
+    "PPI",
+    "Core PPI",
+    "NFP",
+    "Non-Farm Payrolls",
+    "FOMC",
+    "FOMC Statement",
+    "FOMC Minutes",
+    "Fed Chair Powell",
+    "Fed Chair Speech",
+)
 
 # Resolve audit log path relative to this module so the file works across
 # users and machines (was: hardcoded ~/projects/option-wizard/... which only
@@ -63,6 +85,9 @@ ALL_TRIGGER_NAMES = (
     "opex_friday_pin_csp",
     "opex_friday_anchor_max_pain",
     "aggressive_mode_vix_cap",
+    "event_proximity_high_severity",
+    "iv_term_inverted_event_pricing",
+    "iv_term_inverted_morning_downgrade",
     "freshness_stale_snapshot",
     "freshness_missing_timestamp",
     "freshness_invalid_timestamp",
@@ -104,6 +129,96 @@ def _check_snapshot_freshness(snap: dict) -> dict | None:
                 "re-pull UW + TV"
             ),
             "triggered_threshold": "freshness_stale_snapshot",
+            "retry_at_iso": None,
+        }
+    return None
+
+
+def _step_event_clock(snap: dict) -> dict | None:
+    """ABORT if a HIGH-severity macro event is within event_proximity_days.
+
+    Live-run gap surfaced 2026-06-09: entry_timing only gated `is_fomc_day`
+    (today IS the FOMC presser), so a CPI scheduled for the next morning
+    silently passed. The day-specific override fires the day of an FOMC
+    presser; this gate fires the day(s) BEFORE any high-severity binary
+    print (CPI / NFP / PPI / FOMC / Fed Chair). Orchestrator computes the
+    next-event triple from unusual-whales:get_market_events.
+
+    Snapshot fields:
+      - next_event_name        : str | None (e.g., "CPI", "FOMC", "NFP")
+      - next_event_severity    : "HIGH" | "MEDIUM" | "LOW" | None
+      - next_event_days_away   : int | None (1 = tomorrow, 0 = today)
+
+    Today's catch is "tomorrow" — but 0 is also a fail-fast: the day's
+    presser handling lives in _day_specific_override, but if orchestrator
+    passes next_event_days_away=0 with severity HIGH we still want to abort
+    here in case the day-flag (is_fomc_day) wasn't computed.
+    """
+    sev = snap.get("next_event_severity")
+    days = snap.get("next_event_days_away")
+    name = snap.get("next_event_name", "HIGH-severity macro event")
+    if sev != "HIGH" or days is None:
+        return None
+    if days > THRESHOLDS["event_proximity_days"]:
+        return None
+    return {
+        "action": "abort",
+        "reason": (
+            f"{name} in {days}d (≤ {THRESHOLDS['event_proximity_days']}d "
+            "event_proximity gate) — selling premium into a binary print pays "
+            "for the move with no edge; defer entry until event passes"
+        ),
+        "triggered_threshold": "event_proximity_high_severity",
+        "retry_at_iso": None,
+    }
+
+
+def _step_iv_term_inversion(snap: dict, mode: str) -> dict | None:
+    """Gate inverted IV term structure (front-month richer than back-month).
+
+    Inverted term = market explicitly pricing event-driven vol concentration
+    in the front. Combined with a near-term event (≤ 5 trading days), it's
+    confirmation that selling premium pays for known vol. Alone, it's a
+    weaker signal — downgrade morning-window entries to EOD where the
+    event-IV has had more hours to crush.
+
+    Snapshot field:
+      - iv_term_inverted : bool — orchestrator sets True when
+        iv_atm_short > iv_atm_long (or per UW IV term structure response).
+
+    This gate sits below _step_event_clock so it never fires when event_clock
+    already aborted; standalone inversion still flows through.
+    """
+    if not snap.get("iv_term_inverted"):
+        return None
+    days = snap.get("next_event_days_away")
+    if days is not None and days <= THRESHOLDS["iv_term_inversion_event_window_days"]:
+        return {
+            "action": "abort",
+            "reason": (
+                f"IV term inverted (front > back) + event in {days}d — "
+                "market explicitly pricing event vol; defer until resolution"
+            ),
+            "triggered_threshold": "iv_term_inverted_event_pricing",
+            "retry_at_iso": None,
+        }
+    # Inversion without a flagged catalyst: downgrade morning entries to EOD.
+    # Mode-window decoding mirrors _step5_mode_window so we only downgrade
+    # modes that would otherwise enter in the morning.
+    time_et = snap.get("time_et", "10:00")
+    hour = int(time_et.split(":")[0])
+    minute = int(time_et.split(":")[1])
+    minutes_into_day = hour * 60 + minute
+    morning_end = 10 * 60 + 30
+    is_morning_mode = mode in ("csp", "rut_protective")
+    if is_morning_mode and minutes_into_day <= morning_end:
+        return {
+            "action": "wait_eod",
+            "reason": (
+                "IV term inverted; defer morning entry to EOD where event-driven "
+                "front-month IV has more time to normalize"
+            ),
+            "triggered_threshold": "iv_term_inverted_morning_downgrade",
             "retry_at_iso": None,
         }
     return None
@@ -368,10 +483,13 @@ def decide(snapshot: dict[str, Any], mode: str) -> dict[str, Any]:
 
     Side effect: appends JSONL line to AUDIT_LOG_PATH (best-effort).
     """
-    # Priority: freshness → day-specific override → mode hard limits →
+    # Priority: freshness → event clock (HIGH severity event within N days)
+    # → IV term inversion → day-specific override → mode hard limits →
     # vix gate → gap → gex → 0dte → mode window
     for step in (
         _check_snapshot_freshness,
+        _step_event_clock,
+        lambda s: _step_iv_term_inversion(s, mode),
         lambda s: _day_specific_override(s, mode),
         lambda s: _aggressive_mode_vix_check(s, mode),
         _step1_vix_gate,
