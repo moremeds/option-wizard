@@ -430,3 +430,40 @@ def calibrate(log_path: str | None = None) -> dict[str, Any]:
         "per_threshold_fire_count": fire_count,
         "tuning_hints": tuning_hints,
     }
+
+
+def _cli() -> None:
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="Entry timing decision tree")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    decide_p = sub.add_parser(
+        "decide", help="Run decision tree on a snapshot JSON file"
+    )
+    decide_p.add_argument("--snapshot", required=True, help="Path to snapshot JSON")
+    decide_p.add_argument(
+        "--mode",
+        required=True,
+        choices=["csp", "rut_calendar", "rut_protective", "rut_aggressive"],
+    )
+
+    cal_p = sub.add_parser("calibrate", help="Aggregate audit log thresholds")
+    cal_p.add_argument("--log", default=None)
+
+    args = parser.parse_args()
+    if args.cmd == "decide":
+        with open(args.snapshot) as f:
+            snap = json.load(f)
+        out = decide(snap, mode=args.mode)
+        json.dump(out, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    elif args.cmd == "calibrate":
+        stats = calibrate(log_path=args.log)
+        json.dump(stats, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    _cli()
