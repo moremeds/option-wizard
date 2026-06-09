@@ -11,6 +11,7 @@ combination of TV trend, gamma flip placement vs spot, and catalyst clock.
 | **RICH vol** (sell-premium favored) | Bull put spread, jade lizard (with veto check) | Iron condor, short strangle (if defined-risk via wings) | Bear call spread |
 | **NEUTRAL vol** | Bull put spread, CSP if IV rank ≥ 50 | Iron condor (wider), calendar | Bear call spread |
 | **CHEAP vol** (buy-premium favored) | Long call, call debit spread | Long calendar, diagonal | Long put, put debit spread |
+| **Index premium sell** (QQQ / SPY / RUT only) | QQQ/SPY CSP (IV rank ≥ 20 + VRP ≠ CHEAP); RUT diagonal aggressive mode (VIX < 25 hard limit) | RUT diagonal calendar mode; QQQ bull put spread | RUT diagonal protective mode |
 
 Every cell assumes defined risk. The "naked CSP" appearing in the neutral
 column is only allowed when cash on hand fully covers the assignment
@@ -39,6 +40,22 @@ notional (see `scripts/defined_risk_audit.py`).
   DTE, cash on hand covers full notional. Margin-secured shorts are
   **forbidden** under SKILL.md hard rule #1.
 
+### Cash-secured put on index ETF (QQQ / SPY / IWM)
+
+- **Legs:** Short 1 OTM put + cash reserve = strike × 100.
+- **Entry condition:** `IV rank ≥ 20 AND VRP ∈ {NEUTRAL, RICH}`. The
+  lower threshold than single-name CSP (≥ 50) is justified because the
+  sell-premium edge on indices is the VRP risk premium, not idio compensation.
+- **DTE:** 30-45.
+- **Δ target:** 0.20-0.30 (more OTM than single-name due to fatter index
+  tail).
+- **Strike anchor:** put wall from `scripts.gex_levels::compute_levels`
+  (not 200DMA).
+- **Sizing:** Single contract notional ≤ 5% NLV; total index CSP
+  notional ≤ 25% NLV.
+- **Refused:** SPX naked CSP (notional > $300k per contract); IWM when
+  bid-ask > $0.10 (use RUT options instead).
+
 ### Bull put spread (defined-risk CSP)
 
 - **Legs:** Short put at strike A, long put at strike B (B < A).
@@ -66,6 +83,28 @@ notional (see `scripts/defined_risk_audit.py`).
 - **When:** RICH or NEUTRAL vol, no directional view, ticker pinned
   between gamma flip and call wall. Target 30-45 DTE, ~16Δ on both
   short legs.
+
+### Put diagonal calendar (RUT — three modes)
+
+All modes: long 45DTE put @ Kl + short 1-2DTE put @ Ks. Max loss at
+short-leg expiry = `max((Ks − Kl) × 100, 0) − net credit` (calendar
+mode collapses to long put extrinsic decay).
+
+| Mode | Strike layout | Default Δ | Regime fit | Greeks |
+|---|---|---|---|---|
+| **calendar** | Ks = Kl | both 0.30 | NEUTRAL vol + expected IV term contango deepening | θ+, ν+, γ ~ 0 |
+| **protective** | Ks < Kl | Kl 0.30, Ks 0.15 | bearish bias + RICH vol | θ+, ν+, Δ slightly negative |
+| **aggressive** | Ks > Kl | Ks 0.30, Kl 0.15 | bullish RICH vol; VIX < 25 hard limit | θ++, ν+, Δ slightly positive |
+
+- **Roll rule:** Short leg rolled at expiry-day −1h to next 1-2DTE
+  same-mode strike. Every 7 rolls (≈ 2 weeks) re-check long leg DTE; if
+  < 21 DTE, close long leg (hard rule #4) and reopen full structure with
+  fresh 45DTE long.
+- **Mode-drift recovery:** Calendar mode short leg drifts ITM by ≥ 1
+  listed strike width (RUT typically $5) → switch to protective mode on
+  next roll.
+- **Pricer:** `scripts.diagonal_calendar::build_diagonal_calendar(spot,
+  mode, snapshot, ...)`.
 
 ### Collar
 
