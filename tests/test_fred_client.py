@@ -98,6 +98,41 @@ def test_hy_oas_signal_skips_missing_values(monkeypatch):
     assert all(isinstance(v, float) for _, v in sig["history"])
 
 
+def test_hy_oas_30d_pct_uses_midrank_in_flat_market(monkeypatch):
+    """Pass-2 C-MED2: percentile must use midrank so flat/clustered data
+    doesn't return 100% (the old `v <= current` rank gave 100 for any tie).
+
+    For 30 identical values: percentile should be 50 (median position),
+    NOT 100. The trend logic still says "flat" either way (mean_7 ==
+    mean_30), but the raw pct is exposed downstream via
+    add_fred_signals_to_snapshot and the orchestrator's regime gates."""
+    monkeypatch.setenv("FRED_API_KEY", "test_key")
+    values = [3.0] * 40
+    mock_obs = _make_mock_obs(values)
+    with patch.object(FREDClient, "observations", return_value=mock_obs):
+        sig = hy_oas_signal(today="2026-06-10")
+    # Flat data → midrank gives pct = 50 (every tie is half-weight).
+    assert sig["hy_oas_30d_pct"] == 50.0, (
+        f"Flat-data percentile should be 50 (midrank), got {sig['hy_oas_30d_pct']}"
+    )
+    # Trend still "flat" because mean_7 == mean_30
+    assert sig["hy_oas_trend"] == "flat"
+
+
+def test_hy_oas_30d_pct_centers_at_50_when_current_is_median(monkeypatch):
+    """Midrank: current at the median position of distinct values → pct ≈ 50."""
+    monkeypatch.setenv("FRED_API_KEY", "test_key")
+    # 30 values: 15 below current (2.5), current (3.0), 14 above (3.5)
+    values = [2.5] * 15 + [3.5] * 14 + [3.0]
+    mock_obs = _make_mock_obs(values)
+    with patch.object(FREDClient, "observations", return_value=mock_obs):
+        sig = hy_oas_signal(today="2026-06-10")
+    # Current=3.0: below=15, equal=1, midrank = (15 + 0.5)/30 * 100 = 51.67
+    assert 45 < sig["hy_oas_30d_pct"] < 55, (
+        f"Median-position percentile should be ≈50, got {sig['hy_oas_30d_pct']}"
+    )
+
+
 def test_hy_oas_signal_raises_when_no_valid_data(monkeypatch):
     monkeypatch.setenv("FRED_API_KEY", "test_key")
     with patch.object(FREDClient, "observations", return_value=[]):

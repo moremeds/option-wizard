@@ -44,6 +44,42 @@ from scripts._market import (
     read_chain_mid,
 )
 
+# ─── Empirical thresholds (Pass-6 confidence-calibration extraction) ────
+# These are RESEARCH artifacts, not BSM derivations. The values come from
+# references/research/2026-06-10-convex-macro-hedges.md §11 (7-event panel
+# 2011-2025). Move them here so the math layer has a single auditable
+# source of truth + the citation lives with the number, not orphaned in
+# error strings.
+#
+# WARNING: changing any value here changes the gate behavior of every
+# structure that fires its branch. Treat as load-bearing constants;
+# changes require backtest evidence, not "this looks better."
+
+# VIX9D / VIX ratio at which the short-end term structure has inverted
+# enough to mark a deployable vol-event entry. Anchored to 6/7 events at
+# T-5 (2011-08 US downgrade, 2018-02 vol-mageddon, 2018-10 Q4 drawdown,
+# 2020-03 COVID-1, 2022 Fed-hike cycle, 2024-08 JPY unwind; miss: 2015-08
+# China Black Monday — FX-driven, equity vol stayed compressed).
+VIX_TERM_INVERSION_RATIO = 1.04
+
+# VIX absolute level above which long-vol entry is past peak (COVID-2
+# precedent: VIX 35 → 80 was money-losing despite continued index decline
+# because entering long-vol at peak vol mean-reverts against you).
+VIX_CALL_LADDER_VIX_CEILING = 20.0
+
+# VVIX level above which fast-deleveraging regime activates IWM-outperforms
+# -SPX-as-hedge. COVID-1 hit 200+, JPY 2024 unwind hit 145-155, calm
+# regimes sit 90-110. 130 is the empirical threshold between "regular
+# correction" and "deleveraging cascade" per the 7-event panel.
+VVIX_FAST_DELEVERAGING_THRESHOLD = 130.0
+
+# Projected-annualized carry above which put_spread / iwm_putspread are
+# REFUSED unless caller passes tactical_window_days explicitly. 5% is the
+# trader's risk budget for tactical (1-3 week) deployments — anything
+# higher should be a standing hedge using long_put with target_delta=0.05
+# instead.
+TACTICAL_CARRY_CEILING = 0.05
+
 # ─── Black-Scholes pricing ─────────────────────────────────
 
 
@@ -91,8 +127,6 @@ def _solve_strike_for_put_delta(
     t_years: float,
     r: float,
     sigma: float,
-    *,
-    strike_step: float = 1.0,
 ) -> float:
     """Find OTM put strike whose |delta| matches target. Returns strike.
 
@@ -113,7 +147,18 @@ def _solve_strike_for_put_delta(
             return strike
         strike -= step
         if strike <= 0:
-            return step  # degenerate edge case
+            # Degenerate: walked the strike below zero without ever
+            # crossing target_delta. Only happens with corrupt inputs
+            # (sigma effectively 0 OR t_years near 0 OR target unreachable).
+            # Returning a sub-pennystock "strike" silently passes garbage
+            # downstream — raise so the caller sees the bad input.
+            raise ValueError(
+                f"target_delta_magnitude={target_delta_magnitude} is "
+                f"unreachable at spot={spot}, sigma={sigma}, "
+                f"t_years={t_years} — strike walked below zero. "
+                f"Check that IV is non-trivially positive and the hedge "
+                f"horizon is at least a week."
+            )
     return strike
 
 
@@ -187,17 +232,26 @@ def _price_call_leg(
             )
     price = _bs_call(spot, strike_dollar, t_years, 0.04, iv)
     strike_pct_of_spot = strike_dollar / spot * 100
-    # Empirical calm-regime calibration (2026-06-10, vix_calibration_history.json):
-    # K=25 (1.22× spot)  → mid is 22% higher than BSM(VVIX)
-    # K=35 (1.71× spot)  → mid is 78% higher than BSM(VVIX)
-    # K=45 (2.20× spot)  → mid is 96% higher than BSM(VVIX)
-    # Full K=25+35+45 ladder: real cost = 2.0× BSM-with-VVIX estimate.
-    # The gap widens with strike (call skew) and likely widens further in
-    # inversion regimes (TBD on next VIX9D/VIX > 1.04 event).
-    if strike_pct_of_spot > 200:
-        approx_multiplier = "~2-3×"
+    # Empirical calm-regime calibration (2026-06-10, vix_calibration_history.json,
+    # VIX9D/VIX = 0.978 — NOT inverted):
+    #   K=25 (≈122% spot) → real mid 22% above BSM(VVIX)   [source: UW `theo`]
+    #   K=35 (≈171% spot) → real mid 78% above BSM(VVIX)   [source: `last_price`, T-1]
+    #   K=45 (≈220% spot) → real mid 96% above BSM(VVIX)   [source: `last_price`, T-1]
+    # K=25 number is intraday model-fit (UW `theo`); K=35/K=45 numbers are
+    # derived from end-of-day `last_price` (stale by design) — treat the
+    # deep-OTM brackets as lower bounds with wider uncertainty. Inversion
+    # regimes likely widen the gap further (TBD on next VIX9D/VIX > 1.04 event).
+    # Bucket boundaries align with the 2026-06-10 calibration points:
+    #   K=25  (143% spot)  → 1.22×
+    #   K=35  (~200% spot) → 1.78×
+    #   K=45  (~220% spot) → 1.96×  ← last calibrated point
+    # Anything > 250% is EXTRAPOLATION beyond data — flagged in the label.
+    if strike_pct_of_spot > 250:
+        approx_multiplier = "~2× (extrapolated — no calibration beyond K≈220% spot)"
+    elif strike_pct_of_spot > 175:
+        approx_multiplier = "~1.8-2×"
     elif strike_pct_of_spot > 150:
-        approx_multiplier = "~1.5-2×"
+        approx_multiplier = "~1.5-1.8×"
     else:
         approx_multiplier = "~1.2-1.3×"
     return price, fallback_provenance(
@@ -263,20 +317,23 @@ def _check_regime_gate(structure: str, regime: dict | None) -> None:
                 "regime_check.vix9d — both missing"
             )
         ratio = vix9d / vix
-        if ratio < 1.04:
+        if ratio < VIX_TERM_INVERSION_RATIO:
             raise ValueError(
                 f"vix_call_ladder gate FAILED: VIX9D/VIX = {ratio:.3f} "
-                f"(needs >= 1.04). Per macro-hedge-convexity.md, deploy "
-                f"only when the short-end term inverts. Current ratio "
-                f"means no near-term event premium loaded — VIX ladder "
-                f"will carry ~4.5% NLV/yr with no payoff."
+                f"(needs >= {VIX_TERM_INVERSION_RATIO}). Per "
+                f"macro-hedge-convexity.md, deploy only when the short-end "
+                f"term inverts. Current ratio means no near-term event "
+                f"premium loaded — VIX ladder will carry ~4.5% NLV/yr "
+                f"with no payoff."
             )
-        if vix >= 20:
+        if vix >= VIX_CALL_LADDER_VIX_CEILING:
             raise ValueError(
-                f"vix_call_ladder gate FAILED: VIX = {vix:.1f} (needs < 20). "
-                f"At VIX >= 20 the convexity premium is already priced; "
-                f"see COVID-2 case study — entering long-vol at peak vol "
-                f"loses money even if index keeps dropping."
+                f"vix_call_ladder gate FAILED: VIX = {vix:.1f} (needs < "
+                f"{VIX_CALL_LADDER_VIX_CEILING}). At VIX >= "
+                f"{VIX_CALL_LADDER_VIX_CEILING} the convexity premium is "
+                f"already priced; see COVID-2 case study — entering "
+                f"long-vol at peak vol loses money even if index keeps "
+                f"dropping."
             )
         return
 
@@ -284,13 +341,13 @@ def _check_regime_gate(structure: str, regime: dict | None) -> None:
         vvix = regime.get("vvix")
         if vvix is None:
             raise ValueError("iwm_putspread gate requires regime_check.vvix — missing")
-        if vvix <= 130:
+        if vvix <= VVIX_FAST_DELEVERAGING_THRESHOLD:
             raise ValueError(
-                f"iwm_putspread gate FAILED: VVIX = {vvix:.1f} (needs > 130). "
-                f"IWM outperforms SPX as hedge only in fast-deleveraging "
-                f"regimes (COVID-1, JPY unwind); otherwise IV ratio is "
-                f"already loaded and SPX is cheaper. Use SPX put spread "
-                f"instead."
+                f"iwm_putspread gate FAILED: VVIX = {vvix:.1f} (needs > "
+                f"{VVIX_FAST_DELEVERAGING_THRESHOLD}). IWM outperforms "
+                f"SPX as hedge only in fast-deleveraging regimes "
+                f"(COVID-1, JPY unwind); otherwise IV ratio is already "
+                f"loaded and SPX is cheaper. Use SPX put spread instead."
             )
         return
 
@@ -379,6 +436,43 @@ def _compute_convexity_scorecard(
         if s["payoff_per_cost_dollar"] is not None
     ]
     scorecard["max_convexity_ratio"] = round(max(ratios), 2) if ratios else None
+
+    # VIX-call calibration disclosure (F1 from review-cycle math audit;
+    # direction-corrected by Pass-2 C-MED1).
+    # The scorecard above prices BOTH entry cost AND scenario marks via
+    # BSM-with-VVIX-as-IV. Per 2026-06-10 calibration, real VIX call mids
+    # run ≈ 1.2-2× BSM in calm regimes (K-dependent — see _price_call_leg
+    # docstring). Net effect on payoff_per_cost_dollar ratio:
+    #   - pricing_source='bsm' (no chain available): BOTH entry cost AND
+    #     scenario payoff are BSM-under-stated by similar factors. At deep
+    #     scenarios (+200%/+400%) payoff ≈ intrinsic so payoff is close to
+    #     real, but cost is still BSM-under by ~2× → ratio OVERSTATED at
+    #     deep scenarios. At small scenarios (+50%) both biased similarly
+    #     → ratio approximately preserved.
+    #   - pricing_source='chain': entry cost is REAL chain mid (correctly
+    #     calibrated). Scenario payoff is still BSM-based, which UNDER-
+    #     states real mark at all spike depths (especially small spikes
+    #     where time value dominates). → ratio is a LOWER bound; real
+    #     convexity is HIGHER than reported.
+    # Comparing VIX-ladder max_convexity_ratio directly to put-ladder
+    # ratios (which use chain-mid entry cost when available) is therefore
+    # apples-to-oranges. The trader MUST read the note before picking
+    # between structures on convexity alone.
+    if is_call_structure:
+        scorecard["cost_calibration_note"] = (
+            "VIX ladder scorecard uses BSM(VVIX-as-IV) for both entry cost "
+            "and scenario marks. Per 2026-06-10 calm-regime calibration, "
+            "real VIX call mids are ≈ 1.2-2× BSM (K-dependent). Ratio "
+            "interpretation depends on pricing_source: "
+            "(a) pricing_source='bsm' → at deep scenarios (+200%/+400%), "
+            "max_convexity_ratio OVERSTATES real convexity by ~2× because "
+            "entry cost is BSM-under but payoff is intrinsic-dominated. "
+            "Halve max_convexity_ratio before comparing to put structures. "
+            "(b) pricing_source='chain' → entry cost is real but scenario "
+            "marks are BSM-under at all depths, so max_convexity_ratio is "
+            "a LOWER bound; real convexity is higher than reported. Use as "
+            "conservative floor when comparing structures."
+        )
     return scorecard
 
 
@@ -710,6 +804,19 @@ def build_macro_hedge(
     if snapshot is None:
         raise ValueError("snapshot is required: {spot, iv_atm_90d}")
 
+    # Pass-3 A1 guard: hedge_horizon_days=0 silently produces a degenerate
+    # hedge (BSM = intrinsic = 0 at ATM; solver returns spot since |delta|=0
+    # at t=0; cost=0 trivially passes the cost cap). Trader sees a result
+    # that looks valid but pays nothing. Refuse at entry so a typo
+    # (`--horizon-days 0` instead of `60`) doesn't slip through.
+    if hedge_horizon_days <= 0:
+        raise ValueError(
+            f"hedge_horizon_days must be > 0, got {hedge_horizon_days}. "
+            f"A zero-or-negative horizon collapses BSM to intrinsic and "
+            f"produces a meaningless zero-cost result — likely a typo or "
+            f"upstream snapshot bug."
+        )
+
     # Auto-route scenario → structure (backward compat)
     if structure == "auto":
         structure = {
@@ -814,11 +921,12 @@ def build_macro_hedge(
         projected_annual_pct = (
             (cost / portfolio_notional) / t_years if t_years > 0 else 0
         )
-        if projected_annual_pct > 0.05:
+        if projected_annual_pct > TACTICAL_CARRY_CEILING:
             raise ValueError(
                 f"{structure} projected annualized carry "
-                f"{projected_annual_pct * 100:.1f}% NLV exceeds 5% — this "
-                f"structure is tactical only (1-3 week deployment). Pass "
+                f"{projected_annual_pct * 100:.1f}% NLV exceeds "
+                f"{TACTICAL_CARRY_CEILING * 100:.0f}% — this structure is "
+                f"tactical only (1-3 week deployment). Pass "
                 f"`tactical_window_days=14` to confirm intent. "
                 f"Standing hedge alternative: long_put with target_delta=0.05."
             )

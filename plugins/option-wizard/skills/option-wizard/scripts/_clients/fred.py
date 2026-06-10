@@ -20,7 +20,7 @@ Series of interest:
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -125,7 +125,7 @@ def hy_oas_signal(
     """
     client = client or FREDClient()
     if today is None:
-        today = datetime.utcnow().date().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
     start = (
         (datetime.fromisoformat(today) - timedelta(days=lookback_days))
         .date()
@@ -149,9 +149,18 @@ def hy_oas_signal(
     mean_30 = sum(last_30) / len(last_30)
     mean_7 = sum(last_7) / len(last_7)
 
-    # Percentile of current value vs last 30
-    rank = sum(1 for v in last_30 if v <= current_value)
-    pct = (rank / len(last_30)) * 100.0
+    # Midrank percentile of current value vs last 30 (Pass-2 C-MED2).
+    # Using strict `v <= current` rank biases percentile to 100 in flat or
+    # clustered markets (every equal-value tie counts as "<=", so flat 3.0
+    # yields rank=30, pct=100 even though current is at the median). The
+    # trend logic above happens to mask this in tests (mean_7 > mean_30 is
+    # false in flat data), but `hy_oas_30d_pct` is also exposed directly to
+    # downstream orchestrators via add_fred_signals_to_snapshot, where the
+    # raw percentile DOES matter. Midrank gives ties a half-weight so flat
+    # data → percentile 50, clustered data → centered percentile.
+    below = sum(1 for v in last_30 if v < current_value)
+    equal = sum(1 for v in last_30 if v == current_value)
+    pct = ((below + 0.5 * equal) / len(last_30)) * 100.0
 
     if pct >= 80 and mean_7 > mean_30:
         trend = "rising"

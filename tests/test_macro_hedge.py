@@ -245,7 +245,18 @@ def test_chain_with_zero_mid_falls_back_to_bsm():
         snapshot=snapshot,
     )
     # Should fall back to BSM, not price at $0
-    assert result["legs"][0]["limit_price"] > 0
+    leg_price = result["legs"][0]["limit_price"]
+    assert leg_price > 0
+    # Pass-2 C-LOW5: bound the BSM price so silent regression in _bs_put
+    # (e.g., sign flip, missing exp(-rT) factor, wrong d1 d2 ordering)
+    # is caught. SPX -10% put at 70d / 18% IV is ~$30-150 per share.
+    # Wide band catches gross errors without being brittle on minor IV
+    # / rate tweaks.
+    assert 5 < leg_price < 500, (
+        f"BSM fallback price {leg_price} is outside the sane band "
+        f"[5, 500] for SPX -10% put at 70d / 18% IV — likely a silent "
+        f"BSM regression"
+    )
     assert result["legs"][0]["mid_source"] == "fallback"
     assert result["pricing_source"] == "bsm"
 
@@ -445,15 +456,21 @@ def test_long_put_with_target_delta_walks_strike_with_iv():
         snapshot={"spot": spot, "iv_atm_90d": 0.30},
         target_delta=0.05,
     )["legs"][0]["strike"]
-    # At low IV, 5-delta walks LESS far OTM than the legacy -10% strike
-    assert low_iv > pct_10_strike, (
-        f"At 14% IV, 5-delta strike {low_iv} should be > legacy -10% strike "
-        f"{pct_10_strike} (tighter distribution)"
+    # At low IV, 5-delta walks LESS far OTM than the legacy -10% strike.
+    # Pass-2 C-LOW6: tighten bound. Hand BSM: σ√T=0.0434, d1=1.645 →
+    # log(spot/K) ≈ 0.067 → K ≈ 5798. Solver returns 5797 (one step short
+    # of exact). Bound at 5700 to catch direction-preserving regressions
+    # where the magnitude is off by >$100.
+    assert low_iv > 5700, (
+        f"At 14% IV, 5-delta strike {low_iv} should be > 5700 (theoretical "
+        f"≈5798); got {low_iv}"
     )
-    # At high IV, 5-delta walks MORE far OTM than -10% strike
-    assert high_iv < pct_10_strike, (
-        f"At 30% IV, 5-delta strike {high_iv} should be < legacy -10% strike "
-        f"{pct_10_strike} (wider distribution)"
+    # At high IV, 5-delta walks MORE far OTM than -10% strike. Hand BSM
+    # at 30% IV: σ√T=0.0929, log(spot/K) ≈ 0.139 → K ≈ 5397. Solver
+    # returns ~5394. Bound at 5500.
+    assert high_iv < 5500, (
+        f"At 30% IV, 5-delta strike {high_iv} should be < 5500 (theoretical "
+        f"≈5397); got {high_iv}"
     )
 
 
@@ -495,6 +512,34 @@ def test_convexity_scorecard_uses_call_scenarios_for_vix_ladder():
     )
     sc = result["convexity_scorecard"]
     assert set(sc["scenarios"].keys()) == {"+50%", "+100%", "+200%", "+400%"}
+    # F1 from /review-cycle audit (+ Pass-2 C-MED1 direction correction):
+    # VIX scorecard must disclose the BSM-vs-real-mid calibration gap so
+    # trader can't directly compare max_convexity_ratio to put-structure
+    # ratios. The note must distinguish BSM-pricing (ratio OVERSTATED at
+    # deep scenarios) from chain-pricing (ratio is a LOWER bound).
+    assert "cost_calibration_note" in sc
+    note = sc["cost_calibration_note"]
+    assert "1.2-2×" in note
+    assert "pricing_source" in note
+    # Direction: BSM case overstates → "halve" guidance must appear
+    assert "Halve" in note or "halve" in note
+    # Direction: chain case understates → "lower bound" / "floor" guidance
+    assert "LOWER bound" in note or "lower bound" in note or "floor" in note
+
+
+def test_put_scorecard_has_no_vix_calibration_note():
+    """Put structures use chain-mid (or BSM-no-skew) entry cost without the
+    VIX-specific 2× calibration gap. The note must NOT appear on put
+    scorecards — its presence on puts would mislead the trader."""
+    result = build_macro_hedge(
+        portfolio_notional=10_000_000,
+        hedge_horizon_days=35,
+        scenario="crash_-20",
+        underlying="SPX",
+        structure="long_put",
+        snapshot={"spot": 6200.0, "iv_atm_90d": 0.18},
+    )
+    assert "cost_calibration_note" not in result["convexity_scorecard"]
 
 
 def test_butterfly_emits_deprecation_warning_when_misused():
@@ -521,6 +566,28 @@ def test_butterfly_no_warning_when_used_for_sanctioned_scenario():
         snapshot=SPX_SNAPSHOT,
     )
     assert "deprecation_warning" not in result
+
+
+def test_hedge_horizon_zero_is_refused():
+    """Pass-3 A1: hedge_horizon_days=0 collapses BSM to intrinsic and
+    silently produces a zero-cost zero-protection hedge. Must refuse
+    at entry so typos don't slip through."""
+    with pytest.raises(ValueError, match="hedge_horizon_days"):
+        build_macro_hedge(
+            portfolio_notional=1_000_000,
+            hedge_horizon_days=0,
+            scenario="crash_-20",
+            structure="long_put",
+            snapshot=SPX_SNAPSHOT,
+        )
+    with pytest.raises(ValueError, match="hedge_horizon_days"):
+        build_macro_hedge(
+            portfolio_notional=1_000_000,
+            hedge_horizon_days=-5,
+            scenario="crash_-20",
+            structure="long_put",
+            snapshot=SPX_SNAPSHOT,
+        )
 
 
 def test_regime_gate_skipped_when_no_regime_check():
