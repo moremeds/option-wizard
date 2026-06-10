@@ -170,7 +170,7 @@ def provenance_entry(
 
 def chain_leg_provenance(
     value: float,
-    chain_source: Literal["UW", "IB"],
+    chain_source: Literal["UW", "IB", "TV"],
     expiry: str,
     strike_pct: float,
     right: Literal["put", "call"],

@@ -38,16 +38,26 @@ incantations.
    | Data point | Primary | Fallback | Why |
    |---|---|---|---|
    | Spot | TV | IB `get_price_snapshot` | TV intra-minute fresh + chart-verifiable; IB broker-feed authoritative for live-trade gating |
-   | Option chain mid / IV / greeks | **IB** (live trade <60s decision) / **UW** (analytical context) | mutual fallback | IB seconds-fresh from broker feed; UW better for skew/term analytical context |
+   | Option chain mid / IV / greeks | **IB** (live trade <60s decision) / **UW** (analytical context) / **TV** (opencli session, when already running) | mutual fallback | IB seconds-fresh from broker feed; UW better for skew/term analytical context; TV piggybacks the same desktop session used for spot/news (one fewer auth boundary, but no IV rank / GEX) |
    | OHLCV historical | TV (chart context) | IB `get_price_history` (backtest precision) | — |
 
    **Forbidden:**
    - UW `get_extended_technical_indicator` / `get_ticker_indicator_series` for analysis (series lagged by weeks)
    - IB for IV rank / skew / GEX / max pain (IB doesn't compute these derivative metrics)
+   - TV for IV rank / skew / GEX / max pain / RV (UW is the only source for derivative metrics)
 
    **Rule of thumb:** if any of the three serves it directly, never recompute. Verdict / analysis output must carry `data_provenance` for every quoted metric so the trader can audit the source.
 
-   **Skill-wide chain-mid path:** `scripts.fair_aq_dq`, `scripts.fair_coupon`, `scripts.macro_hedge` ALL accept an optional `chain` field on their snapshot input. When provided, listed-strike option mids are read directly from the chain (per workflow §2 source-selection: UW analytical default / IB live-trade) instead of recomputed via BSM. Output fields tag the source: `fair_coupon_source` ∈ {chain, model}, `pricing_source` ∈ {chain, mixed, bsm}, leg-level `mid_source` and `mid_provenance`. Orchestrator MUST pull a chain into the snapshot before calling these scripts when the trader is in live-trade or fair-value-comparison mode.
+   **Skill-wide chain-mid path:** `scripts.fair_aq_dq`, `scripts.fair_coupon`, `scripts.macro_hedge`, `scripts.diagonal_calendar` ALL accept an optional `chain` field on their snapshot input. When provided, listed-strike option mids are read directly from the chain (per workflow §2 source-selection: UW analytical default / IB live-trade / TV when desktop session live) instead of recomputed via BSM. Output fields tag the source: `fair_coupon_source` ∈ {chain, model}, `pricing_source` ∈ {chain, mixed, bsm}, leg-level `mid_source` ∈ {UW, IB, TV, fallback} and `mid_provenance`. Orchestrator MUST pull a chain into the snapshot before calling these scripts when the trader is in live-trade or fair-value-comparison mode.
+
+   **Chain orchestrator-transform contract:** UW / IB / TV native shapes differ — the orchestrator (skill prompt) MUST transform into the nested form:
+   ```
+   chain[expiry_iso][strike_pct][right] = {"mid": float, "iv": float, "greeks": {delta, gamma, theta, vega}}
+   ```
+   - **UW** `get_options_chain` returns `{states: [flat list of option_state]}` with greeks as top-level fields (`delta`, `gamma`, `theta`, `vega`), no `mid` (use `theo` or `(bid+ask)/2`); group by `expires` → `strike/spot` → `option_type`.
+   - **IB** via `ib_insync.reqMktData` returns a `Ticker` with `bid`/`ask`/`modelGreeks`; compute `mid = (bid+ask)/2`, lift `modelGreeks` → nested `greeks`.
+   - **TV** via `opencli tv options-chain` returns rows with `bid`/`ask`/`iv` and (depending on TV plan) greeks; same `mid = (bid+ask)/2` + nested greeks transform.
+   - `chain_source` ∈ {"UW", "IB", "TV"}; legs inherit this as `mid_source`. BSM fallback flags `mid_source = "fallback"` per leg.
 3. Every order shows the pre-flight (legs, mid price, net debit/credit, max loss, max gain, breakeven, margin, P/L matrix at expiry across spot −20 / −10 / −5 / 0 / +5 / +10 / +20 percent, account verification, UW regime check, liquidity check, catalyst clock) before submission. Exactly one YES/NO question. YES → submit via `ib_insync.placeOrder` (IB option orders) or `create_order_instruction` (IB stock drafts for tap-to-approve). Non-IB broker orders (any secondary broker configured in `private/trader-profile.md`) typically have no auto-submit path — flag "manual entry in the broker's trading app" in the preflight. Anything else → abort. Live-account preflight is the safety boundary — do **not** propose paper-account (IB TWS paper instance) tests, and do not treat paper-account criteria as a blocker.
 4. Any short-premium position at 21 DTE surfaces as an entry in the consolidated **Action items** section at the end of the book review (see §"Book-review output structure"). It is **not** a mid-flow blocking YES/NO prompt — the trader picks close / roll / hold-and-accept-gamma from the action-items menu, and only then does the full hard-rule-#3 preflight expand.
 5. **PB structured products (FCN / AQ / DQ): no IB ORDER ROUTING; IB MARKET DATA is allowed.** This is two separate concerns:
@@ -89,6 +99,7 @@ Chinese:
 - "评估这个 accumulator 报价"
 - "decumulator 怎么 counter"
 - "<TICKER> 怎么做 sell put / covered call / jade lizard"
+- "QQQ CSP" / "SPY 卖 put" / "RUT diagonal" / "卖 index premium"
 - "我账户里这些仓位有没有问题"
 - "SPX 大盘对冲"
 - "<TICKER> 现在该 close 还是 roll"
@@ -101,6 +112,7 @@ English:
 - "negotiate accumulator"
 - "evaluate <ticker> for <structure>"
 - "size spx hedge"
+- "qqq csp" / "spy put" / "rut diagonal" / "sell index premium"
 - "review positions"
 - "weekly review" / "monthly review" / "review my recent calls"
 
@@ -125,6 +137,7 @@ points into specific layers without re-reading the whole runbook.
 | FCN / ELN quote evaluation ("PB 给我报了 X% coupon on Y") | `references/fcn-framework.md`; `scripts.fair_coupon::analyze_fcn`. Output is the 8-item PB checklist + 70/75/80/85% strike ladder + bilingual counter-offer email — do NOT route through IB (hard rule #5) |
 | AQ/DQ quote evaluation ("PB 给我报了 AQ", "evaluate aq quote") | `references/aq-dq-framework.md`; `scripts.fair_aq_dq::analyze_quote` + `optimize_terms` + `build_counter_offer_email`. Output: 6-refusal-check → 8-item PB checklist → fair-value breakdown w/ provenance → Pareto frontier → bilingual email. Do NOT route through IB (hard rule #5). |
 | SPX macro hedge sizing | `scripts.macro_hedge::build_macro_hedge`. Respect the 1.5% NLV annualized cost cap (hard rule #5). Trigger heuristics in `references/strategies.md` §"Macro hedge trigger heuristics" |
+| Index premium selling (QQQ/SPY CSP or RUT put diagonal) | `references/index-premium-selling.md`; `scripts.diagonal_calendar::build_diagonal_calendar` for RUT 3-mode structures; `scripts.entry_timing::decide` for morning-vs-EOD; CSP uses `scripts.ib_order::build_preflight` directly. Threshold calibration via `scripts.entry_timing::calibrate` reading the audit log |
 | Position book review ("我账户里这些仓位有没有问题") | Pull **every configured broker** — IB MCP primary (`get_account_summary` + `get_account_positions` + `get_account_orders`), plus any secondary brokers documented in `private/trader-profile.md` using the pull command(s) specified there (e.g., a CLI script, MCP server, or Python wrapper the user provides). Translate non-IB positions into the IB-shape dict (`contract_description` / `position` / `market_price`) before feeding into `scripts.defined_risk_audit::audit_book` and `scripts.manage_positions` (orchestrator CLI: `.venv/bin/python -m scripts.manage_positions --audit-only --no-email`). Report which broker(s) succeeded and any pull-time data gaps. Output follows §"Book-review output structure" — action items consolidated at the END of the report, not drilled into mid-flow. |
 | 21 DTE review on short-premium positions | `scripts.evaluate_position`; hard rule #4 — surfaces in the Action items section at the end of the book review (close / roll / hold-and-accept-gamma). Trader picks from the menu; only then expand into hard-rule-#3 preflight. |
 | Pre-submission preflight + YES/NO gate | `references/execution.md`; `scripts.ib_order::build_preflight`. Hard rule #3 — must show legs + mid + max loss + max gain + breakeven + margin + P/L matrix (spot ±5/10/20%) + account verification + UW regime check + liquidity + catalyst clock before exactly one YES/NO question |
@@ -342,6 +355,31 @@ out = build_macro_hedge(portfolio_notional=10_000_000, hedge_horizon_days=70,
 print(out["pricing_source"], out["cost_dollar"])
 for leg in out["legs"]:
     print(leg["action"], leg["strike"], leg["limit_price"], leg["mid_source"])
+'
+
+# Diagonal calendar (RUT 3-mode pricer with chain-vs-BSM fallback)
+.venv/bin/python -c '
+from scripts.diagonal_calendar import build_diagonal_calendar
+snap = {"iv_atm_short": 0.28, "iv_atm_long": 0.30,
+        "iv_rank": 35, "vrp_label": "NEUTRAL"}
+out = build_diagonal_calendar(spot=2300.0, mode="calendar", snapshot=snap)
+print(out["mode"], out["net_debit_dollar"], out["regime_check"]["matches_chosen_mode"])
+for leg in out["legs"]:
+    print(leg["action"], leg["strike"], leg["limit_price"], leg["mid_source"])
+print("roll matrix at -5%:", [r for r in out["roll_matrix"] if r["spot_scenario"] == -0.05])
+'
+
+# Entry timing decision (morning vs EOD vs abort)
+.venv/bin/python -c '
+from datetime import datetime, timezone
+from scripts.entry_timing import decide
+snap = {"spot": 2300.0, "time_et": "10:00",
+        "snapshot_taken_at": datetime.now(timezone.utc).isoformat(),
+        "vix": 14.2, "vix1d": 13.8, "vix9d": 14.0,
+        "premarket_gap": 0.003, "gex_flip": 2250.0, "net_dealer_gex": 1.0e9,
+        "odte_put_premium": 5.0e6, "odte_call_premium": 4.0e6,
+        "is_fomc_day": False, "is_monday_open": False, "is_opex_friday": False}
+print(decide(snap, mode="rut_calendar"))
 '
 
 # IB order preflight (no submission)
