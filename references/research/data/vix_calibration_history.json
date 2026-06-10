@@ -1,0 +1,107 @@
+[
+  {
+    "pull_date": "2026-06-10",
+    "expiry": "2026-07-22",
+    "dte": 42,
+    "regime": "calm_baseline",
+    "vix": 20.14,
+    "vix9d": 19.69,
+    "vix3m": 20.79,
+    "vvix": 92.4,
+    "skew": 145.0,
+    "vix9d_over_vix": 0.978,
+    "vx1_proxy": 20.465,
+    "rows": [
+      {
+        "strike": 25.0,
+        "last": 1.45,
+        "theo": 1.465,
+        "iv_at_strike": 1.062,
+        "bsm_vvix": 1.1397,
+        "bsm_at_iv": 1.4905,
+        "gap_pct": 22.2,
+        "volume": 6215,
+        "open_interest": 169493
+      },
+      {
+        "strike": 24.0,
+        "last": 1.64,
+        "theo": 1.605,
+        "iv_at_strike": 1.023,
+        "bsm_vvix": 1.3758,
+        "bsm_at_iv": 1.6376,
+        "gap_pct": 14.3,
+        "volume": 5621,
+        "open_interest": 86777
+      },
+      {
+        "strike": 23.0,
+        "last": 1.77,
+        "theo": 1.782,
+        "iv_at_strike": 0.984,
+        "bsm_vvix": 1.6546,
+        "bsm_at_iv": 1.818,
+        "gap_pct": 7.1,
+        "volume": 2978,
+        "open_interest": 49081
+      },
+      {
+        "strike": 22.0,
+        "last": 1.98,
+        "theo": 1.963,
+        "iv_at_strike": 0.933,
+        "bsm_vvix": 1.9817,
+        "bsm_at_iv": 2.0066,
+        "gap_pct": -1.0,
+        "volume": 4202,
+        "open_interest": 91385
+      },
+      {
+        "strike": 21.0,
+        "last": 2.21,
+        "theo": 2.2,
+        "iv_at_strike": 0.884,
+        "bsm_vvix": 2.3624,
+        "bsm_at_iv": 2.2521,
+        "gap_pct": -7.4,
+        "volume": 391,
+        "open_interest": 24106
+      },
+      {
+        "strike": 20.0,
+        "last": 2.47,
+        "theo": 2.503,
+        "iv_at_strike": 0.836,
+        "bsm_vvix": 2.802,
+        "bsm_at_iv": 2.5653,
+        "gap_pct": -11.9,
+        "volume": 8155,
+        "open_interest": 53184
+      },
+      {
+        "strike": 35.0,
+        "last": 0.71,
+        "theo": null,
+        "iv_at_strike": null,
+        "bsm_vvix": 0.1526,
+        "bsm_at_iv": null,
+        "gap_pct": 78.5,
+        "volume": 6557,
+        "open_interest": 308008
+      },
+      {
+        "strike": 45.0,
+        "last": 0.43,
+        "theo": null,
+        "iv_at_strike": null,
+        "bsm_vvix": 0.0189,
+        "bsm_at_iv": null,
+        "gap_pct": 95.6,
+        "volume": 4784,
+        "open_interest": 188978
+      }
+    ],
+    "summary_k25_gap_pct": 23.0,
+    "note": "Calm-baseline calibration. VIX9D/VIX = 0.978 (NOT inverted). K=25 call mid is 23% higher than BSM(VVIX-as-IV). Cause: VIX call skew (IV at K=25 is 1.062 vs ATM VVIX 0.924). Repeat on next VIX9D/VIX > 1.04 inversion to capture inversion-regime gap."
+  }
+]

@@ -50,3 +50,11 @@ The trader's mental model was "VIX is the underlying, VIX moved 38%, my call sho
 ## Rule going forward
 
 **For short-term vol-spike hedges (today, this week, next week), buy front-week or front-month VIX calls — or skip VIX entirely and buy SPX/SPY put spreads, which have delta-1 mapping to the actual equity exposure and no futures basis problem. Far-dated VIX call spreads (≥30 DTE) hedge "expected vol at that future date," not today's vol, and the spread structure compounds the disappointment by canceling vega between legs. Use ≥30 DTE VIX call spreads only when the thesis is explicitly about future vol at that expiry (e.g., Fed cycle, earnings season, election week), not as a generic equity-drawdown hedge.**
+
+## Lesson follow-through (2026-06-08)
+
+The trader reduced the IB VIX combo on Monday premarket after spot VIX retraced from 21.51 (Friday close) → 19.90 (-7.48% premarket). Reduction was the right call once the spread mechanics were understood — continuing to hold pays theta on a position that won't pay off without a vol regime shift on the August expiry date itself, not on any spot spike that occurs before then.
+
+Execution details (qty, fill prices, structure confirmation) logged separately in the trader's private execution log; not reproduced here per the account-anonymization rule for promoted pitfalls.
+
+**Closure criterion for this pitfall:** mark as fully-resolved once the position is flat AND the trader has avoided a repeat (≥30 DTE VIX call spread bought as same-week hedge) for ≥3 months. Until then, this lesson stays active.

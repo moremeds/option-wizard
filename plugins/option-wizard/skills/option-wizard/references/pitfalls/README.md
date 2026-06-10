@@ -6,6 +6,7 @@ Accumulated trading mistakes and the rules they generated. Each pitfall is a sho
 |---|------|----------|
 | 01 | [vix-options-track-futures-not-spot](01-vix-options-track-futures-not-spot.md) | Far-dated VIX call spreads track the VX future for that expiry, not spot VIX — use front-week VIX or SPX put spread for short-term hedges |
 | 02 | [aq-pb-yield-is-implicit](02-aq-pb-yield-is-implicit.md) | PB AQ quotes have no explicit yield — it's encoded in the strike discount × accumulation; use `pb_quoted_yield_pa=None` and implicit-yield mode |
+| 03 | [ratio-backspreads-not-tail-hedges](03-ratio-backspreads-not-tail-hedges.md) | Put ratio backspreads have a max-loss valley between strikes that aligns with typical M7 5-12% vol-shock drawdowns — they are short-skew premium capture, not crash hedges. Use delta-targeted long put + tactical SPX put spread per `macro-hedge-convexity.md` instead |
 
 ## Adding a pitfall
 
