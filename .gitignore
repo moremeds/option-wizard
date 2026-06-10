@@ -22,6 +22,10 @@ outputs/
 # See plugins/option-wizard/skills/option-wizard/references/private/README.md
 plugins/option-wizard/skills/option-wizard/references/private/
 
+# Same private-data convention applied at top-level references/
+# (referenced by some workflows under references/private/{ticker,market,review}).
+references/private/
+
 # Auto-generated pitfall drafts from `scripts.retrospective` (复盘 workflow).
 # Trader reviews + strips account-specific numbers before promoting to a
 # numbered references/pitfalls/NN-slug.md file.

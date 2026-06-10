@@ -156,16 +156,56 @@ becomes asymmetric in the wrong direction.
 
 ## Macro hedge trigger heuristics
 
-When to suggest SPX put-spread hedge sizing (see
-`scripts/macro_hedge.py`):
+See `references/macro-hedge-convexity.md` for the full empirical
+framework (5-event study 2018-2024 + 2017/2023 carry analysis). This
+section is the routing index.
 
-- Portfolio short-premium notional > 50% of net liquidation.
-- Net delta of options book > +0.5 of NLV in dollar terms.
-- VIX < 18 with VIX term structure backwardation — cheap hedge insurance.
-- Calendar earnings density: 3+ portfolio names reporting in a 2-week
-  window.
+**Standing hedge — always on:**
+- SPX 5-delta long put, 35 DTE, monthly roll. Empirical carry 0.01-0.54%
+  NLV/yr. `build_macro_hedge(structure="long_put", target_delta=0.05)`.
 
-Maximum annualized hedge cost capped at 1.5% of NLV (spec hard rule).
+**Regime decision tree (executed at every Monday open):**
+
+| Regime signal at T-5 | Structure | Sizing | Window |
+|---|---|---|---|
+| VIX9D/VIX ≥ 1.04 AND VVIX > 130 AND HY OAS rising | IWM ATM/-10% put spread | 0.5% NLV | tactical 14d |
+| VIX9D/VIX ≥ 1.04 AND 18 ≤ VIX < 25 | SPX ATM/-10% put spread | 0.5% NLV | tactical 14d |
+| VIX9D/VIX ≥ 1.04 AND 18 ≤ VIX < 25 AND tech-specific catalyst | + QQQ -10% long put | + 0.2% NLV | tactical 14d |
+| VIX9D/VIX ≥ 1.04 AND VIX < 18 | SPX 5-delta long put (overweight) + VIX 30-DTE ladder 25+35+45 | 0.15% + 0.5% NLV | std + tactical |
+| SKEW > 140 AND VIX < 18 | Standing SPX 5-delta long put (normal sizing) | 0.05-0.10% NLV | std |
+| VIX ≥ 25 AND VIX/VIX3M > 1.00 | **Don't chase.** Take profit on existing; convert naked puts → put spreads | — | exit-only |
+| Calm (none of the above) | SPX 5-delta long put only | 0.05% NLV | std |
+
+**Primary tell: VIX9D/VIX ≥ 1.04.** Fires **6 of 7** anchor events at T-5
+(original 5-event set + 2011 debt downgrade + 2015 China Black Monday).
+The miss is 2015 — that event was FX-driven (yuan devaluation cascade),
+not equity-vol-driven, so VIX9D stayed compressed until the flash-crash
+open. The short end of the VIX curve inverts before the proper term
+structure for equity-vol events; FX-driven events bypass this tell entirely.
+
+**Leading indicator: SKEW > 140.** Fires earlier (T-10) but less
+reliably (1 of 4 events). Use for slow lean-in; use VIX9D/VIX for trigger.
+
+**Cost cap:** 1.5% NLV/year annualized (per `private/trader-profile.md`).
+The standing hedge consumes 0.01-0.54%; tactical deployments add ≤ 0.7%
+per deployment × ~2 deployments/year typical = total ≤ 1.4% NLV/yr.
+
+**Forbidden structures** (empirically eliminated, per Pitfall 03):
+- `put_ratio_backspread` (any config) — max-loss valley aligns with
+  typical M7 5-12% drawdown range; 20-40% win rate; lose $3-21K per $1M
+  when they miss
+- `put_butterfly` for tail purpose — body at -5% passed through in fast
+  crashes; 40% win rate. Keep only for the literal `mild_correction_-5`
+  scenario with explicit caller intent.
+- Far-dated VIX call SPREAD as same-week hedge (Pitfall 01)
+
+**Catalyst-based add-on triggers (independent of regime tree):**
+- Portfolio short-premium notional > 50% of net liquidation → standing
+  hedge sizing × 1.5
+- Net delta of options book > +0.5 of NLV in dollar terms → standing
+  hedge sizing × 1.5
+- Earnings density: 3+ portfolio names reporting in a 2-week window →
+  add QQQ -10% long put at 0.1% NLV for the window
 
 ## Rejected structures
 
