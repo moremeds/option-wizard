@@ -83,12 +83,25 @@ The framework recognizes three types. **Source is `references/private/{ticker,ma
 
 | Type | Encoded as | Direction signal | Truth source |
 |---|---|---|---|
-| **Directional** | Stock or index expected to move up/down/range over horizon | +1 bullish / −1 bearish / 0 range | TV historical spot |
+| **Directional** | Stock or index expected to move up/down/range over horizon | +1 bullish / −1 bearish / 0 range | IB `get_price_history` daily close ¹ |
 | **Vol regime** | IV is RICH / CHEAP relative to RV | −1 RICH (expects vol compression) / +1 CHEAP (expects vol expansion) | UW IV rank time series + UW realized vol |
-| **Structure** | Listed-options structure recommended (bull put spread, CSP, collar, …) | Implicit from structure's natural delta; encoded as expected sign of normalized P/L | Mark-to-market of the hypothetical structure on TV spot path; if trader entered, actual position mark |
+| **Structure** | Listed-options structure recommended (bull put spread, CSP, collar, …) | Implicit from structure's natural delta; encoded as expected sign of normalized P/L | Mark-to-market of the hypothetical structure on the IB `get_price_history` daily-close path ¹; if trader entered, actual position mark |
 
 **FCN / AQ / DQ structure recommendations are filtered out** at the
 extraction stage — they live in PB workflows.
+
+> ¹ **Markout-truth fetch path (read before quoting any spot).**
+> `opencli tradingview` exposes only a live `quote` (current spot) — it has
+> **no historical-bars command** — and its desktop CDP session is often
+> unreachable in a headless review. So the markout truth series comes from
+> **IB `get_price_history`** (`step=ONE_DAY`, `period=TWO_WEEKS` or
+> `ONE_MONTH`, `outside_rth=false`). Resolve the `contract_id` first via
+> `search_contracts` (`STK` for single names / ETFs, `IND` for indices;
+> e.g. SPX = 416904 CBOE · QQQ = 320227571 NASDAQ · VIX = 13455763 CBOE).
+> TV is a live-spot cross-check only when its CDP session is up — never the
+> historical series. (Per SKILL.md hard rule #2, OHLCV historical: TV
+> primary *when reachable*, IB `get_price_history` is the working fallback
+> and the de-facto path for 复盘.)
 
 ### Markout horizons
 
@@ -152,11 +165,15 @@ horizon.
 
 If the trader did NOT enter the recommended structure, the structure
 markout is **simulated**: mark the hypothetical structure on the actual
-TV spot path using either:
+underlying daily-close path (IB `get_price_history`, footnote ¹) using
+either:
 
-- **Phase 1** (current): Black-Scholes-Merton mark with TV historical
-  spot + UW IV at analysis date held flat (crude — flagged as
-  `mark_source = "model"`)
+- **Phase 1** (current): Black-Scholes-Merton mark with the IB
+  `get_price_history` daily close + UW IV at analysis date held flat
+  (crude — flagged as `mark_source = "model"`). Exception: if the
+  structure's expiry falls inside the markout window, use terminal
+  intrinsic at expiry (exact) instead of the BSM mark — e.g. an expired
+  iron condor's terminal value is fully determined by the expiry-day close.
 - **Phase 2**: IB `get_price_history` for the specific option contract
   if accessible (`mark_source = "ib_chain"`)
 - **Phase 3**: macmini internal historical DB via dedicated MCP
@@ -213,7 +230,7 @@ accumulates.
 matching parser:
 
 - **IB**: `mcp__claude_ai_Interactive_Brokers_IBKR__get_account_trades period=DAYS_7|DAYS_30` → `parse_ib_trades(response, window_start, window_end) → list[Trade]`
-- **Futu**: `cd ~/projects/portfolio-analyser && npx tsx src/cli.ts ft --range 1m` (writes JSON report under `reports/`) → `parse_futu_trades(report_json, window_start, window_end) → list[Trade]`
+- **Futu**: `cd ~/projects/portfolio-analyser && npx tsx src/cli.ts ft --range 1m --rerun` (writes JSON report under `reports/`) → `parse_futu_trades(report_json, window_start, window_end) → list[Trade]`. **`--rerun` is mandatory for every review.** The CLI caches trades by ISO week, so without it a freshly-*named* report can still carry a stale `trades.dateRange.to` (observed 2026-06-14: a report file stamped 06-12 whose trade data ended 06-08, silently dropping the entire week's Futu flow). Before trusting any pre-existing report, verify `trades.dateRange.to ≥ the last trading day at or before window_end`; `parse_futu_trades` raises `ValueError` on stale data as a backstop, but the orchestrator should pass `--rerun` so it never trips.
 
 Tag `trade_sources=["IB", "Futu"]` (or whichever subset succeeded) on the `ReviewReport`. If a broker pull fails or returns empty, surface that as a **data gap in Layer B's output**, never silently drop. The `cross_cut_advisory` is computed only against the brokers actually pulled.
 
@@ -221,7 +238,7 @@ For every fill within the window:
 
 | Trade type | `entry_basis` | `mark_T` source | Normalization denominator |
 |---|---|---|---|
-| Stock outright | `entry_fill × abs(qty)` | TV historical spot × qty | `entry_basis` |
+| Stock outright | `entry_fill × abs(qty)` | IB `get_price_history` daily close × qty ¹ | `entry_basis` |
 | Long single option | `entry_fill × multiplier × abs(qty)` | option mid at T (chain or BSM) × qty | `entry_basis` |
 | Short single option | `entry_credit × multiplier × abs(qty)` | `entry_credit − option_mid_T` × multiplier × abs(qty) | `multiplier × strike` (= margin proxy) |
 | Defined-risk spread | sum of leg fills | sum of leg marks at T | `max_loss` (= spread_width − credit, for credit spreads; = debit, for debit spreads) |
@@ -503,8 +520,9 @@ Backward-compat: legacy archives with `status: open` / `closed` are read as `pro
 
 ## Phase 1 limitations (current)
 
-1. **Option marks for trade markout** use BSM with TV historical spot +
-   UW IV held flat at analysis date. This is a known approximation —
+1. **Option marks for trade markout** use BSM with the IB `get_price_history`
+   daily-close path (see footnote ¹ — TV opencli has no historical-bars
+   command) + UW IV held flat at analysis date. This is a known approximation —
    accurate for ATM, less so for OTM tails or near-expiry contracts.
    `mark_source = "model"` is reported on every mark so the trader sees
    when to discount. IB `get_price_history` for option contracts is

@@ -98,8 +98,9 @@ any broker auto-discovery** — you must wire up whatever brokers you use:
 - **Futu (Moo Moo)** — not built in. Common patterns: the OpenD daemon
   + futu-api Python wrapper, or a third-party CLI (e.g.,
   [`portfolio-analyser`](https://github.com/moremeds/portfolio-analyser)
-  for the `ft --range 1y` JSON export). Document your chosen pull
-  command in `private/trader-profile.md`.
+  for the `ft --range 1y --rerun` JSON export; `--rerun` bypasses the
+  ISO-week trade cache so a review never silently reads stale fills).
+  Document your chosen pull command in `private/trader-profile.md`.
 - **Tastytrade / Schwab / E*TRADE / IBKR Web API / Robinhood / etc.** —
   not built in. Bring your own CLI, MCP server, or Python wrapper that
   outputs positions in a JSON-translatable form, and reference the pull
