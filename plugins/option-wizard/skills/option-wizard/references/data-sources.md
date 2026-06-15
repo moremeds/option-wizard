@@ -107,6 +107,22 @@ connector on 2026-06-03:
 
 - `get_account_summary`, `get_account_balances`, `get_account_positions`,
   `get_account_orders`, `get_account_trades` — read-only state.
+- **Known issue (observed 2026-06-14): `get_account_positions` can fail
+  MCP output-schema validation** when IB returns `daily_pnl` as a string
+  for any single position (error: `/positions/N/daily_pnl: string found,
+  number expected`). This drops the **entire** positions payload, not just
+  the offending row. Fallback: keep going with `get_account_summary` for
+  account-level state (NLV / margin / buying power) + the Futu-side book
+  (or the most recent good IB snapshot) for the position list, and surface
+  the failure as an **Infrastructure (I-item) data gap**. Never report an
+  empty IB book as "no positions" — distinguish "pull failed" from "flat".
+- **IB option trades carry no strike / expiry / right.** `get_account_trades`
+  returns only `{symbol, sec_type, side, size, price, trade_time,
+  realized_pnl}` per leg, so a multi-leg option fill (e.g. an SPX 4-leg
+  package) is direction-ambiguous on its own. To classify it, cross-
+  reference `get_account_orders` / `get_account_positions` for the same
+  symbol+timestamp, or `search_contracts` the option; if it can't be
+  resolved, label the leg "direction inferred" rather than asserting it.
 - `create_order_instruction` — supports **Equity and ETF orders only**;
   produces a **draft** that the user must approve in the IBKR app via
   deep-link. No OCA / no parent-child orders at the MCP layer.

@@ -253,6 +253,25 @@ legs anywhere, vega is purely stacked) and/or the SPX/IWM put spread on
 the equity side (delta-1 mapping to actual equity exposure, no futures
 basis).
 
+### Failure mode 4: Waiting for "post-event IV crush" to buy a macro hedge
+
+Single-name ER logic — "vol pumps into the print, then crushes after, so
+wait and buy the hedge cheaper post-event" — does **not** transfer to
+scheduled macro data prints (NFP / CPI / FOMC). For a macro print the data
+*itself* is the potential vol shock: a miss can trigger the selloff AND a
+vol expansion at the same time. Observed in the 2026-06-14 retrospective: a
+06-03/04 macro read correctly called downside into the NFP 6/5 + CPI 6/10
+window, but the hedge-sizing note said *"best timing — after NFP, IV may
+briefly fall."* Reality: NFP 6/5 sent VIX 15.4 → 21.5 (+40%) and CPI 6/10
+pushed it to 22.66 (intraday). Waiting to buy made the hedge **more**
+expensive, not less. **Rule: for a scheduled macro data print, put the
+hedge on BEFORE the print — the cheap-IV window is pre-event. Reserve
+"wait for the post-event IV crush" reasoning for single-name ER, where the
+event resolves uncertainty rather than creating it.** This is the converse
+of Failure mode 2 (don't chase *after* vol has already spiked): for macro
+prints the spike is the event, so the only cheap entry is ahead of it. See
+pitfall 05.
+
 ## False-positive carry budget
 
 Annual hedge cost cap is 1.5% NLV (per `private/trader-profile.md`). The

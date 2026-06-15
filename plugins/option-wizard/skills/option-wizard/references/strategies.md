@@ -190,6 +190,13 @@ reliably (1 of 4 events). Use for slow lean-in; use VIX9D/VIX for trigger.
 The standing hedge consumes 0.01-0.54%; tactical deployments add ≤ 0.7%
 per deployment × ~2 deployments/year typical = total ≤ 1.4% NLV/yr.
 
+**Timing for scheduled macro prints (NFP / CPI / FOMC):** put the hedge on
+**before** the print, not after. The data *is* the vol shock — a miss
+expands VIX rather than crushing it (NFP 6/5/2026: VIX 15.4 → 21.5 (+40%)).
+Do NOT defer a macro hedge expecting a single-name-ER-style post-event IV
+crush; that logic only applies when the event resolves uncertainty. See
+`macro-hedge-convexity.md` Failure mode 4 + pitfall 05.
+
 **Forbidden structures** (empirically eliminated, per Pitfall 03):
 - `put_ratio_backspread` (any config) — max-loss valley aligns with
   typical M7 5-12% drawdown range; 20-40% win rate; lose $3-21K per $1M
