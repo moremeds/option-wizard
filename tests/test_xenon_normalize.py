@@ -143,6 +143,56 @@ def test_to_manage_legs_options_only_with_signed_qty_and_yyyymmdd():
     assert qqq["market_price"] == 10.74
 
 
+# A merged covered call: xenon combines long stock (expiry "N/A") + short call
+# into ONE position re-keyed to the option expiry (ib_sync._merge_covered_call_groups).
+_COVERED_CALL = {
+    "account_summary": {"cash": 1000.0},
+    "positions": [
+        {
+            "ticker": "QQQ",
+            "structure_type": "Covered Call",
+            "direction": "LONG",
+            "expiry": "2026-07-17",
+            "contracts": 1,
+            "legs": [
+                {
+                    "type": "Stock",
+                    "conId": 1,
+                    "strike": 0.0,
+                    "avg_cost": 640.0,
+                    "contracts": 18,
+                    "direction": "LONG",
+                    "market_price": 734.0,
+                },
+                {
+                    "type": "Call",
+                    "conId": 2,
+                    "strike": 815.0,
+                    "avg_cost": 700.0,
+                    "contracts": 1,
+                    "direction": "SHORT",
+                    "market_price": 5.0,
+                },
+            ],
+        },
+    ],
+}
+
+
+def test_merged_covered_call_uses_option_expiry_and_skips_stock_in_legs():
+    rows, _ = to_audit_positions(_COVERED_CALL)
+    # stock leg → bare symbol +18; call leg → OCC desc with the option expiry, -1
+    assert {"contract_description": "QQQ", "position": 18.0} in rows
+    call = next(r for r in rows if "815" in r["contract_description"])
+    assert call["position"] == -1.0
+    assert "260717C00815000" in call["contract_description"]
+    # manage legs: stock excluded, call carries the position (= option) expiry
+    legs = to_manage_legs(_COVERED_CALL)
+    assert len(legs) == 1
+    assert legs[0]["right"] == "C" and legs[0]["expiry"] == "20260717"
+    assert legs[0]["qty"] == -1.0
+
+
 def test_to_futu_audit_positions():
     rows, cash = to_futu_audit_positions(FUTU_PORTFOLIO)
     assert cash == 12000.0

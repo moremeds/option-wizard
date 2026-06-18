@@ -16,9 +16,16 @@ The synthesized `contract_description` matches the regexes in
 defined_risk_audit (_OPTION_RE + _OCC_RE) so audit_book is reused
 unchanged.
 
-KNOWN LIMITATION: IB expiry is position-level, so a multi-expiry structure
-(diagonal / calendar) collapses every leg to the position expiry. The
-current book is all single-expiry; revisit if calendars are added.
+EXPIRY MODEL (verified against xenon `ib_sync.collapse_positions`):
+xenon groups legs by `(ticker, expiry)`, so every position's option legs
+share ONE expiry. A diagonal / calendar (legs of different expiries) is
+split by xenon into SEPARATE per-expiry positions — each carrying its own
+correct expiry — so there is no collapse. The single cross-expiry merge is
+a covered call (long stock `expiry="N/A"` + short call), re-keyed to the
+OPTION expiry: the stock leg's expiry is irrelevant here (audit emits the
+bare symbol; `to_manage_legs` skips stock), and the option leg correctly
+takes the position = option expiry. Hence position-level expiry is correct
+for every option leg this module emits.
 """
 
 from __future__ import annotations
