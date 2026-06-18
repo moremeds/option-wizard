@@ -100,8 +100,17 @@ def _ib_modelgreeks(
     t = None
     try:
         ib._ib.qualifyContracts(contract)
+        # Frozen market-data type (2) → IB returns last-session greeks off-hours
+        # (mirrors xenon /options/greeks; a bare reqMktData yields no greeks
+        # outside RTH). Poll until delta computes or ~12s elapse, rather than a
+        # single fixed sleep — option greek ticks need a settle window.
+        ib._ib.reqMarketDataType(2)
         t = ib._ib.reqMktData(contract, genericTickList="", snapshot=False)
-        ib._ib.sleep(3)
+        for _ in range(24):
+            ib._ib.sleep(0.5)
+            mg = t.modelGreeks
+            if mg is not None and mg.delta is not None and not math.isnan(mg.delta):
+                break
     except Exception:
         return None
     try:
