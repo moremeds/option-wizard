@@ -6,11 +6,16 @@ into the linked deep-reference file for the per-step detail.
 
 **Cross-workflow constraints (apply to every workflow):**
 
-- **Source split** (hard rule #2): UW = options data only; TV = price +
-  technicals only; IB = account state. UW `get_extended_technical_indicator`
-  / `get_ticker_indicator_series` are **forbidden** for L3 analysis.
-- **Freshness** (hard rule #7): every quoted number ≤ 1 trading day stale,
-  else it's a gap.
+- **Source split** (hard rule #2): xenon = account state (IB+Futu) + live
+  mid/liquidity (`/market-depth`) + live greeks/IV (`/options/greeks`, no
+  client-side BSM); UW = options analytics aggregates + analytical greeks; TV
+  = price + technicals; ib_insync = execution + fallback greeks. UW
+  `get_extended_technical_indicator` / `get_ticker_indicator_series` are
+  **forbidden** for L3 analysis.
+- **Freshness / live-first** (hard rule #7): pull live at analysis time; walk
+  the per-data-point acquisition ladder (`references/data-sources.md`) before
+  declaring any gap. Avoidable stale-data caveats are not acceptable; genuine
+  gaps state what was tried and are never extrapolated.
 - **Defined-risk only** (hard rule #1): refuse naked short calls /
   margin-leveraged short puts.
 - **Archive is opt-in** (SKILL.md §Reporting & archive): only write to
@@ -26,7 +31,7 @@ into the linked deep-reference file for the per-step detail.
 
 | # | Layer | Pull | Source | Output |
 |---|---|---|---|---|
-| 1 | L0 Account | NLV, cash, available, margin, existing exposure in this ticker | IB MCP | Can we add risk? Is existing book healthy? |
+| 1 | L0 Account | NLV, cash, available, margin, existing exposure in this ticker | xenon `/portfolio` + `/futu/portfolio` (IB MCP fallback) | Can we add risk? Is existing book healthy? |
 | 2 | L1 Vol/Dealer | IV rank, RV, VRP, per-expiry GEX-by-strike, max pain term structure | UW | RICH/NEUTRAL/CHEAP label; gamma flip vs spot; per-expiry put/call wall |
 | 3 | L2 IV term + skew | ATM IV at 4-5 expiries, 25Δ skew | UW | Term contango/inversion; skew vs ~-0.05 baseline |
 | 4 | **L3 Price action (TV ONLY)** | Spot, OHLCV, volume bars, SMA(20/50/200), RSI(14), MACD, BBANDS, ATR(14), news | **TV via `finance-data-providers:tradingview-reader`** | Distance to 200DMA; trending vs range-bound; swing high/low; catalyst headlines |
@@ -81,7 +86,7 @@ into the linked deep-reference file for the per-step detail.
 
 | Stage | Action | Tooling |
 |---|---|---|
-| **1. Data pull (ALL configured brokers)** | (a) IB MCP primary: `get_account_summary` + `get_account_positions` + `get_account_orders`. (b) Any secondary brokers documented in `private/trader-profile.md` — run the pull command specified there (user-provided CLI / MCP / Python wrapper), then translate the output to IB shape (`contract_description` / `position` / `market_price`) before feeding into the audit pipeline. Report broker pull success/failure + data gaps (e.g., if a CLI report omits cash balance, note it as a gap and fall back to a separate pull if needed) | IB MCP + user-provided secondary broker connector(s) |
+| **1. Data pull (BOTH brokers via xenon)** | xenon Query API primary: `XenonClient.ib_portfolio()` + `futu_portfolio()`; `scripts.xenon_normalize.to_audit_positions` / `to_futu_audit_positions` translate both to IB shape (`contract_description` / `position`) before the audit pipeline. Fallbacks: IB MCP `get_account_summary`/`get_account_positions`/`get_account_orders` + Futu `portfolio-analyser` CLI. Report broker pull success/failure + data gaps (xenon `last_sync` / Futu `is_stale`) | xenon `/portfolio` + `/futu/portfolio` (IB MCP + Futu CLI fallback) |
 | **2. Book-level analysis** | (a) Concentration: abs MV % + Δ-1 notional vs NLV. (b) Net Greeks: Δ / Γ / Θ / V + Δ-1 single-name bars. (c) Every leg listed. (d) **Defined-risk audit verdict** (`scripts.defined_risk_audit::audit_book`) with $20 strike-width false-positive callouts. (e) 22-45 DTE watchlist. (f) Catalyst clock per ticker (ER, FOMC). (g) Data quality flags (stale price, missing field). (h) **IV term verification across held expiries** — for any ticker with positions across ≥2 expiries, pull ATM IV at each held expiry (`get_chains_for_expiry`, ATM ± 3 strikes per expiry), extract via `scripts.term_curve.atm_iv_from_chain_rows`, label adjacent pairs with **`scripts.term_curve.label_regime`**, and collapse with `summarize_regime`. Surface the per-pair regime table + the aggregate label (`all_contango` / `mixed_contango_inverted` / `all_inverted` / etc.) per ticker. Single-ticker IV rank / 52w percentile is NOT a substitute — see `analysis-runbook.md` L2 §"Position-review mode" | `scripts.manage_positions --audit-only --no-email` (or call constituents directly) + `get_chains_for_expiry` per held expiry + `scripts.term_curve` |
 | **3. NO mid-flow decision** | 21 DTE positions, approaching-21 DTE, ER catalyst, large shorts, data anomalies — **observed in stage 2, NOT acted on yet** | — |
 | **4. Consolidated Action items (at the END, all together)** | 4 groups: **P1, P2, …** position-level (close/roll/hold menu inline); **D1, D2, …** data quality; **R1, R2, …** book-level risks (concentration, macro delta, cover failure); **I1, I2, …** infra. Each line ends with trigger phrase ("P1 submit" / "D2 verify"). **Wait** for trader to pick → then hard-rule-#3 preflight expands | — |
@@ -161,7 +166,7 @@ decumulator|eln]` are filtered at the extraction stage.
 | Layer | Source | Output |
 |---|---|---|
 | A | `references/private/{ticker,market,review}/**/*.md` (archive only, recursive) | Directional verdict, hit rate. Never inferred to imply a trade. |
-| B | **IB MCP + Futu CLI** (both brokers required) | Trade flow, execution markout, realized P&L. Only legit source. |
+| B | **xenon `/blotter` + `/portfolio` + `/futu/portfolio`** via `parse_xenon_blotter` (both brokers required; IB MCP + Futu CLI = fallback) | Trade flow, execution markout, realized P&L. Only legit source. |
 | C | Trader / LLM judgment | Advisory observations linking A ↔ B. No algorithmic scorecard. |
 
 **Pipeline (5 steps):**
@@ -174,11 +179,12 @@ decumulator|eln]` are filtered at the extraction stage.
    `signed_dir × (spot_T / spot_0 − 1)`; vol regime uses `signed_dir ×
    (iv_rank_T − iv_rank_0)`; structure uses delta-1 spot proxy (Phase
    1) or BSM mark (Phase 2+). Aggregate via `aggregate_call_markout`.
-3. **Trade flow (Layer B) — BOTH brokers required.** Pull IB
-   (`get_account_trades`) + Futu (`portfolio-analyser` CLI), feed into
-   `parse_ib_trades` + `parse_futu_trades`. Compute `compute_trade_markout`
-   per fill (D1 excludes closes via `realized_pnl != 0`).
-   Aggregate via `aggregate_trade_markout`.
+3. **Trade flow (Layer B) — BOTH brokers required.** Pull xenon `/blotter`
+   (IB + Futu fills) → `parse_xenon_blotter` (fallback: IB
+   `get_account_trades` + Futu `portfolio-analyser` CLI → `parse_ib_trades`
+   + `parse_futu_trades`). Compute `compute_trade_markout` per fill (D1
+   excludes closes via `realized_pnl != 0`). Aggregate via
+   `aggregate_trade_markout`.
    - **3b. Open multi-expiry term-curve snapshot.** After trade-flow
      aggregation, any ticker that still has **open** positions across
      ≥2 expiries gets the same Workflow-3 check: pull

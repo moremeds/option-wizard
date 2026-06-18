@@ -28,7 +28,7 @@ decision, normalized so analyses and trades are directly comparable.
 | Layer | Source | What it measures |
 |---|---|---|
 | **A — Analysis quality** | `references/private/{ticker,market,review}/**/*.md` (archive only, recursive) | Directional verdict on past analyses: was the call right? Hit rate by call type / ticker. **Archive describes a proposed trade or analysis-only thesis — never a trade record.** |
-| **B — Trade flow** | **IB MCP `get_account_trades` + Futu via `portfolio-analyser` CLI** — BOTH brokers, every review | Actual fills, execution markout, realized P&L, roll patterns. **Only legitimate source for "what was actually done."** |
+| **B — Trade flow** | **xenon `/blotter` (IB + Futu fills) + `/portfolio` + `/futu/portfolio`** via `parse_xenon_blotter` — BOTH brokers, every review (IB MCP `get_account_trades` + Futu `portfolio-analyser` CLI = documented fallback) | Actual fills, execution markout, realized P&L, roll patterns. **Only legitimate source for "what was actually done."** |
 | **C — Cross-cut advisory** | Trader / LLM judgment | Manual observations linking A ↔ B. **Judgment-only — no algorithmic scorecard, no `followed × correct` quadrant.** |
 
 **Forbidden** (per hard rule #9):
@@ -226,8 +226,17 @@ accumulates.
 ## Layer B — Trade flow (broker only: IB + Futu)
 
 **Both brokers required every review** (per `private/trader-profile.md`
-"Position-review scope"). Pull each independently, then call the
-matching parser:
+"Position-review scope").
+
+**PRIMARY — xenon `/blotter`** (IB + Futu fills, one read-only surface):
+`XenonClient().blotter()` → `parse_xenon_blotter(blotter, window_start,
+window_end) → list[Trade]`. The blotter carries no option strike/expiry/right
+at the execution level, so `option_meta` is None (pre-enrich if needed).
+Check freshness via the blotter `as_of` and the Futu `is_stale` flag on
+`/futu/portfolio`.
+
+**FALLBACK** (when xenon is unreachable) — pull each broker independently,
+then call the matching parser:
 
 - **IB**: `mcp__claude_ai_Interactive_Brokers_IBKR__get_account_trades period=DAYS_7|DAYS_30` → `parse_ib_trades(response, window_start, window_end) → list[Trade]`
 - **Futu**: `cd ~/projects/portfolio-analyser && npx tsx src/cli.ts ft --range 1m --rerun` (writes JSON report under `reports/`) → `parse_futu_trades(report_json, window_start, window_end) → list[Trade]`. **`--rerun` is mandatory for every review.** The CLI caches trades by ISO week, so without it a freshly-*named* report can still carry a stale `trades.dateRange.to` (observed 2026-06-14: a report file stamped 06-12 whose trade data ended 06-08, silently dropping the entire week's Futu flow). Before trusting any pre-existing report, verify `trades.dateRange.to ≥ the last trading day at or before window_end`; `parse_futu_trades` raises `ValueError` on stale data as a backstop, but the orchestrator should pass `--rerun` so it never trips.
@@ -562,16 +571,19 @@ from scripts.retrospective import (
     run_review, render_report,
 )
 
-# Layer B — pull BOTH brokers (caller responsibility).
-ib_response = {...}        # from MCP get_account_trades period=DAYS_7
-with open("/path/to/futu_report.json") as f:
-    futu_report = json.load(f)
+# Layer B — pull BOTH brokers. PRIMARY: one xenon /blotter call (IB + Futu).
+from scripts._clients.xenon import XenonClient
+from scripts.retrospective import parse_xenon_blotter
 
-window_start, window_end = date(2026,5,30), date(2026,6,6)
-trades = (
-    parse_ib_trades(ib_response, window_start, window_end)
-    + parse_futu_trades(futu_report, window_start, window_end)
-)
+window_start, window_end = date(2026, 5, 30), date(2026, 6, 6)
+blotter = XenonClient().blotter()
+trades = parse_xenon_blotter(blotter, window_start, window_end)
+
+# FALLBACK (xenon unreachable): pull each broker and use the legacy parsers:
+#   ib_response = {...}  # MCP get_account_trades period=DAYS_7
+#   futu_report = json.load(open("/path/to/futu_report.json"))
+#   trades = (parse_ib_trades(ib_response, window_start, window_end)
+#             + parse_futu_trades(futu_report, window_start, window_end))
 
 # Layer C — optional advisory observations (judgment-only).
 advisory = [

@@ -9,28 +9,56 @@
 | Spot, OHLCV, daily/intraday candles, volume bars | **TV** via `finance-data-providers:tradingview-reader` | UW `get_company_info`, chain `price_data` (for "live spot"), `get_ticker_candles_by_range` (for analysis-grade technicals) |
 | SMA(20/50/200), EMA, RSI(14), MACD, BBANDS, ATR | **TV** | UW `get_extended_technical_indicator`, `get_ticker_indicator_series` — **banned for L3 analysis**; chronic multi-week staleness was the root cause of the 2026-06 NVDA / QQQ / SPY analyses being degraded to extrapolation |
 | IV rank, RV (UW computed), 25Δ skew, IV term structure | **UW** | TV (does not serve these) |
-| Max pain, GEX-by-strike, greeks-by-strike, interpolated IV | **UW** | — (UW exclusive) |
+| Max pain, GEX-by-strike, greeks-by-strike, interpolated IV (analytical mode) | **UW** | — (UW exclusive) |
 | Flow alerts, flow per expiry, dark pool prints | **UW** | — (UW exclusive) |
-| Account state (positions, balances, margin) | **IB MCP** | — |
+| Account state (positions, balances, margin, orders, fills) — IB **and** Futu | **xenon** Query API (`/portfolio`, `/futu/portfolio`, `/orders`, `/blotter`, `/journal`, `/performance`) | IB MCP read tools / Futu `portfolio-analyser` CLI = **documented fallback only** |
+| Live mid / NBBO / L2 liquidity | **xenon** `/market-depth` | — |
+| Live per-contract greeks / IV (live-trade mode) | **xenon** `/options/greeks` (IB `modelGreeks`) → **ib_insync `reqMktData`** fallback | **client-side BSM — forbidden**; UW analytical greeks are a cross-check, not the live source |
 
-## Freshness gate (SKILL.md hard rule #7)
+## Freshness gate + live-first acquisition (SKILL.md hard rule #7)
 
-Every data point quoted in an analysis must be **≤ 1 trading day stale**.
-Older = **gap**, not signal. Check freshness explicitly:
+Every quoted number must be the **most accurate currently-obtainable** value,
+pulled **live at the moment of analysis** — not a prior-session close, a
+converted prior-day technical, or an extrapolation. The xenon Query API
+(`XENON_BASE`, key `XENON_KEY`, header `X-API-Key`) makes live data
+acquirable at any time: account/positions/orders/blotter/journal/performance,
+`/market-depth` (live NBBO + L2), and `/options/greeks` (live greeks/IV — IB
+frozen mode returns them around the clock).
 
-- TV chart-state → returns live or T-0 close; freshness is usually fine
-  but record the timestamp in the Layer Coverage table.
-- UW chain endpoints → check `last_price.date` and `price_data.date`. If
-  the field is more than 1 trading day before today, flag as STALE.
-- UW indicator endpoints → routinely 2-6 weeks behind. **Do not extract
-  daily-fresh technicals from these.** If used at all (only in an
-  authorized exception), every value must carry an `as_of` timestamp and
-  a `STALE` flag.
-- IB MCP positions / balances → live during market hours; T-1 close after
-  hours. Always fresh enough.
+**Per-data-point acquisition ladder** — try in order; declare a gap only after
+every rung fails or returns empty:
 
-If a number cannot be brought current, list it under "What this analysis
-is missing" and do not extrapolate it into the decision.
+| Data point | Ladder |
+|---|---|
+| Spot | TV live → xenon `/market-depth` underlying mid → UW chain `price_data` |
+| Option IV / per-strike greeks | xenon `/options/greeks` → UW `interpolated_iv`/`greeks_by_strike` → ib_insync `reqMktData` |
+| 25Δ skew / IV term | live `/options/greeks` strike+expiry sweep → UW `historical-risk-reversal-skew`/`iv_term_structure` |
+| IV rank / RV | UW (exclusive — no rebuild) |
+| GEX by strike/expiry/ticker | UW by-strike-expiry → by-strike → by-ticker (exclusive) |
+| Max pain / dark pool / flow | UW (exclusive) |
+| Technicals (RSI/SMA/EMA/MACD/ATR/BBANDS) | TV live **today** — never a converted prior-day value |
+| VIX / VIX9D / VXN | TV exchange codes (`CBOE:VIX`, `CBOE:VIX9D`, `CBOE:VXN`/`NASDAQ:VXN`) → UW → derive front-end IV from `/options/greeks` on SPX/QQQ near-term |
+| Account / positions / orders / fills | xenon `/portfolio` `/futu/portfolio` `/orders` `/blotter` → IB MCP / Futu CLI fallback |
+
+**Exhaust-before-gap + self-check.** Before writing any "STALE / 未重拉 / gap"
+caveat, self-check: *Did I actually call the live endpoint? Did I try
+alternative symbols / exchange codes / endpoint variants / other sources,
+including the xenon live surface?* A caveat is permitted only after a
+**documented** attempt across the ladder, and must state **what was tried**
+(e.g. "UW GEX-by-strike-expiry empty for SPX 6/19; tried by-strike and
+by-ticker, both empty — genuine UW gap"), never a bare "未重拉".
+
+- **Avoidable gap** (live source existed and was reachable but not pulled —
+  stale chains, converted RSI, wrong VIX exchange code): **not acceptable.**
+- **Genuine gap** (no source serves that slice): flag honestly, characterize
+  by what was tried; the remedy is to acquire live, never to extrapolate or
+  convert a stale number into a "today" value (no fabrication).
+
+Surface freshness explicitly: xenon IB `last_sync`; Futu `is_stale` /
+`fetched_at` / `data_as_of`; UW `price_data.date` / chain `last_price.date`;
+UW indicator endpoints run 2-6 weeks behind — **banned** for daily-fresh
+technicals (use TV). If a number cannot be brought current, list it under
+"What this analysis is missing" and do not extrapolate it into the decision.
 
 ## UW options-data policy
 
@@ -101,6 +129,12 @@ comes from UW.
 
 ## IB role
 
+**State reads now go through the xenon Query API first** (`/portfolio`,
+`/futu/portfolio`, `/orders`, `/blotter`, `/journal`, `/performance` — both
+brokers, one read-only surface; see Source split + Freshness gate above). The
+IB MCP read tools below are the **documented fallback** when xenon is
+unreachable. Option **execution** is unchanged — it stays on `ib_insync`.
+
 IB MCP is **read-only for state, equity-only for writes**. Verified via
 `scripts/smoke/ib_mcp_findings.md` against the live `claude.ai` IBKR
 connector on 2026-06-03:
@@ -139,9 +173,11 @@ The standard sequence for evaluating a ticker for a new position
 (parallel-where-possible; the per-layer freshness gate must pass for
 each pull before its number is quoted):
 
-1. **IB account context** — `get_account_summary` (net liq, buying power,
-   maintenance margin), `get_account_positions` for any existing
-   exposure in the same name. (Layer 0)
+1. **xenon account context** — `XenonClient.ib_portfolio()` (net liq, buying
+   power, maintenance margin via `account_summary`; positions via `positions[]`)
+   + `futu_portfolio()` for any existing exposure in the same name across both
+   brokers. IB MCP `get_account_summary` / `get_account_positions` is the
+   fallback. (Layer 0)
 2. **UW vol regime** — `iv_rank`, `volatility/realized`,
    `volatility/term-structure`, `historical-risk-reversal-skew`. Computes
    VRP, term inversion flag, skew penalty. (Layer 1-2)
