@@ -1194,6 +1194,9 @@ def parse_ib_trades(
 ) -> list[Trade]:
     """Convert IB MCP `get_account_trades` response → Trade[].
 
+    FALLBACK: prefer parse_xenon_blotter (xenon /blotter) — this path is the
+    IB-MCP fallback.
+
     Filters to `[window_start, window_end]` inclusive. IB only exposes
     {symbol, sec_type, side, size, price, trade_time, realized_pnl} per
     leg — option strike/expiry require a separate `search_contracts` call,
@@ -1273,6 +1276,9 @@ def parse_futu_trades(
 ) -> list[Trade]:
     """Convert portfolio-analyser JSON report → Trade[].
 
+    FALLBACK: prefer parse_xenon_blotter (xenon /blotter, both brokers) —
+    this path is the Futu-CLI fallback.
+
     Reads `trades.matchedTrades[]` and `trades.unmatchedTrades[]`. Each
     matched pair emits two Trade objects (open + close, with the pair's
     `realizedPnl` attached to the close leg). Unmatched legs emit one
@@ -1316,6 +1322,56 @@ def parse_futu_trades(
         t = _futu_leg_to_trade(leg, realized_pnl=None)
         if t and window_start <= t.trade_date <= window_end:
             out.append(t)
+    return out
+
+
+def parse_xenon_blotter(
+    blotter: dict[str, Any],
+    window_start: date,
+    window_end: date,
+) -> list[Trade]:
+    """Convert a xenon ``GET /blotter`` response → Trade[] (IB + Futu fills
+    from Postgres). PRIMARY trade-flow source for Layer B (hard rule #9);
+    parse_ib_trades (IB MCP) and parse_futu_trades (Futu CLI) are retained
+    as documented fallbacks.
+
+    Walks ``closed_trades[].executions[]`` + ``open_trades[].executions[]``;
+    each execution → one Trade, filtered to [window_start, window_end]
+    inclusive. The blotter carries no option strike/expiry/right at the
+    execution level, so ``option_meta`` is None (same limitation as
+    parse_ib_trades; the caller pre-enriches if needed). The trade-level
+    ``realized_pnl`` is attached to the LAST in-window execution of each
+    closed trade (mirrors parse_futu_trades attaching realizedPnl to the
+    close leg) so it is not double-counted across fills.
+    """
+    out: list[Trade] = []
+    groups = (blotter.get("closed_trades") or []) + (blotter.get("open_trades") or [])
+    for tr in groups:
+        sec = str(tr.get("sec_type", "STK")).upper()
+        ctype: Literal["STK", "OPT"] = "OPT" if sec == "OPT" else "STK"
+        ticker = str(tr.get("symbol", "")).upper()
+        realized = tr.get("realized_pnl")
+        realized_f = float(realized) if realized is not None else None
+        is_closed = bool(tr.get("is_closed"))
+        execs = tr.get("executions") or []
+        last_idx = len(execs) - 1
+        for i, ex in enumerate(execs):
+            d = _iso_to_date(str(ex.get("time", "")))
+            if d is None or not (window_start <= d <= window_end):
+                continue
+            attach_pnl = realized_f if (is_closed and i == last_idx) else None
+            out.append(
+                Trade(
+                    ticker=ticker,
+                    trade_date=d,
+                    side="BUY" if str(ex.get("side", "")).upper() == "BUY" else "SELL",
+                    quantity=int(abs(ex.get("quantity", 0))),
+                    fill_price=float(ex.get("price", 0.0)),
+                    contract_type=ctype,
+                    option_meta=None,
+                    realized_pnl=attach_pnl,
+                )
+            )
     return out
 
 
