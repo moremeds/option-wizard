@@ -1181,3 +1181,63 @@ def test_validator_skips_cold_archive_subtree_by_default(tmp_path: Path):
     entries_all = validate_archive_dir(tmp_path, include_archive=True)
     files = sorted(e["file"] for e in entries_all)
     assert files == ["active.md", "frozen.md"]
+
+
+# --- parse_xenon_blotter (Layer-B trade flow from xenon /blotter) ---
+
+from scripts.retrospective import parse_xenon_blotter  # noqa: E402
+
+_BLOTTER = {
+    "configured": True,
+    "source": "postgres",
+    "as_of": "2026-06-17T19:47:53+00:00",
+    "summary": {"realized_pnl": -479.14},
+    "open_trades": [],
+    "closed_trades": [
+        {
+            "symbol": "GLD",
+            "contract_desc": "Stock",
+            "sec_type": "OPT",
+            "is_closed": True,
+            "net_quantity": 0,
+            "realized_pnl": -479.14,
+            "perm_id": None,
+            "executions": [
+                {
+                    "exec_id": "a.1",
+                    "time": "2026-06-12T03:40:00+08:00",
+                    "side": "SELL",
+                    "quantity": 1,
+                    "price": 28.00,
+                    "commission": 1.0,
+                },
+                {
+                    "exec_id": "a.2",
+                    "time": "2026-06-16T03:47:53+08:00",
+                    "side": "BUY",
+                    "quantity": 1,
+                    "price": 22.69,
+                    "commission": 1.0,
+                },
+            ],
+        }
+    ],
+}
+
+
+def test_parse_xenon_blotter_emits_per_fill_trades_with_realized_on_last():
+    trades = parse_xenon_blotter(_BLOTTER, date(2026, 6, 1), date(2026, 6, 30))
+    assert len(trades) == 2
+    assert all(t.ticker == "GLD" and t.contract_type == "OPT" for t in trades)
+    assert all(t.option_meta is None for t in trades)
+    opener, closer = trades
+    assert opener.side == "SELL" and opener.fill_price == 28.00
+    assert opener.realized_pnl is None  # only the last (closing) fill carries it
+    assert closer.side == "BUY" and closer.fill_price == 22.69
+    assert closer.realized_pnl == -479.14
+
+
+def test_parse_xenon_blotter_filters_to_window():
+    trades = parse_xenon_blotter(_BLOTTER, date(2026, 6, 14), date(2026, 6, 30))
+    # only the 6/16 fill is in-window
+    assert len(trades) == 1 and trades[0].fill_price == 22.69
