@@ -1,3 +1,11 @@
+---
+type: Framework
+title: Macro Hedge Convexity Framework — empirical convexity + regime gates
+description: Empirical convexity framework + regime decision tree for SPX / cross-index macro hedge sizing; 6 allowed structures (butterfly / put_spread / long_put / vix_call_ladder / iwm_putspread / qqq_longput); 1.5% NLV annualized cost cap; put_ratio_backspread forbidden.
+tags: [macro-hedge, convexity, spx, regime-gates, cost-cap, tail-hedge]
+timestamp: 2026-06-15T09:18:25Z
+---
+
 # Macro hedge convexity framework
 
 How to design index hedges that pay more in crashes per dollar of carry.

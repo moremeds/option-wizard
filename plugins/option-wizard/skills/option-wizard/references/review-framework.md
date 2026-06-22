@@ -1,3 +1,11 @@
+---
+type: Runbook
+title: Review (复盘) Framework — weekly / monthly retrospective
+description: 复盘 weekly / monthly review; 3 independent layers (A analysis-quality from archive, B trade-flow from xenon blotter, C cross-cut advisory); markout T+1/5/10/21/45d scoring; auto pitfall-draft generation; FCN/AQ/DQ out of scope.
+tags: [runbook, review, retrospective, 复盘, markout, 3-layer, pitfall-drafts]
+timestamp: 2026-06-18T13:09:06Z
+---
+
 # Review (复盘) Framework
 
 Structured retrospective on the trader's recent analyses + actual trades.

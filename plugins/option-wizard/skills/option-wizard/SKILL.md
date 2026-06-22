@@ -22,7 +22,11 @@ description: >
 Domain knowledge lives in `references/`; numeric work in `scripts/`. See
 §"When to read which file" below for the situation → files map (LLM uses
 this to pick what to load); see §"How to invoke scripts" for the script
-incantations.
+incantations. `references/` is an [Open Knowledge Format (OKF) v0.1] bundle
+(`references/OKF.md` = conformance + type vocabulary, `references/index.md` =
+navigable root, `references/log.md` = change history); the §"When to read
+which file" router is the primary lazy-load mechanism, the per-file
+frontmatter `description` is the self-describing fallback.
 
 ## Hard rules (apply to every response)
 
@@ -147,9 +151,9 @@ points into specific layers without re-reading the whole runbook.
 | 21 DTE review on short-premium positions | `scripts.evaluate_position`; hard rule #4 — surfaces in the Action items section at the end of the book review (close / roll / hold-and-accept-gamma). Trader picks from the menu; only then expand into hard-rule-#3 preflight. |
 | Pre-submission preflight + YES/NO gate | `references/execution.md`; `scripts.ib_order::build_preflight`. Hard rule #3 — must show legs + mid + max loss + max gain + breakeven + margin + P/L matrix (spot ±5/10/20%) + account verification + UW regime check + liquidity + catalyst clock before exactly one YES/NO question |
 | Honest gap reporting when a data source is unreachable | `references/analysis-runbook.md` §"Honest reporting of gaps" — list every missing layer under "What this analysis is missing" rather than fabricating signals |
-| Pattern match against a prior FCN deal | `references/ticker/orcl-2026-06-fcn.md` (public, anonymized) |
+| Pattern match against a prior public case study (any ticker / structure) | `scripts.case_studies::find_case_studies(ticker=..., structures=[...])` reads the OKF `Trade Case Study` frontmatter in `references/ticker/*.md` and returns ranked matches (ticker hit > structure overlap); CLI: `python -m scripts.case_studies --ticker ORCL [--structure fcn] [--json]`. Load the matched file(s) — e.g. `references/ticker/orcl-2026-06-fcn.md` (public, anonymized). This is the public-bundle complement to the `private/` archive lookup below. |
 | Pattern match against a prior personal trade / analysis | `references/private/{ticker,market,review}/**/*.md` — trader's local archive (gitignored). Pick subdir by analysis type (`ticker/` single-name, `market/` macro/multi-ticker, `review/` book/weekly/monthly) then by `{date}-{ticker}-{long|short|mixed}-{highlight}.md` filename |
-| Capturing a new pitfall from a closed trade | `references/pitfalls/_template.md` → copy to `NN-slug.md`; add row to `references/pitfalls/README.md` (index currently empty — backfill from trade history is tracked as H1). Strip all account-specific numbers before promoting from `private/` |
+| Capturing a new pitfall from a closed trade | `references/pitfalls/_template.md` → copy to `NN-slug.md` (template carries the `Trading Pitfall` OKF frontmatter to fill); add a row to `references/pitfalls/index.md` and a dated entry to `references/log.md`. Strip all account-specific numbers before promoting from `private/` |
 | Weekly / monthly review ("复盘" / "weekly review" / "review my recent calls") | `references/review-framework.md`; `scripts.retrospective::run_review` (pure functions) + `python -m scripts.retrospective --window weekly|monthly` (orchestrator CLI). **Hard rule #9 — 3 independent layers:** Layer A = analysis quality from archive only (markout T+1/5/10/21/45d, directional verdict, hit rate). Layer B = trade flow from **xenon `/blotter` (both brokers) + `/portfolio` + `/futu/portfolio`** via `parse_xenon_blotter` (IB MCP + Futu CLI = documented fallback; both brokers required; execution markout, realized P&L, roll patterns). Layer C = cross-cut advisory (judgment-only, no algorithmic scorecard). Action items at END (S/P/T/D). Auto-writeback of verdict to source `## Outcome / Lesson` section. Auto pitfall draft generation to `references/pitfalls/_drafts/`. **FCN / AQ / DQ are out of scope** — those audit separately. |
 
 ## Book-review output structure

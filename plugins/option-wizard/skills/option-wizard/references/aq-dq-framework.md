@@ -1,3 +1,11 @@
+---
+type: Framework
+title: AQ / DQ Framework — Accumulator / Decumulator quote evaluation
+description: PB Accumulator (AQ) / Decumulator (DQ) structured-product evaluation; the 6 refusal red lines → 8-item PB checklist → fair-value breakdown with provenance → Pareto frontier → bilingual counter-offer email. Never route through IB.
+tags: [aq, dq, accumulator, decumulator, pb-structured-product, fair-value, counter-offer]
+timestamp: 2026-06-09T16:26:53Z
+---
+
 # AQ / DQ Framework
 
 Private Bank structured products evaluation — Accumulator (AQ) and Decumulator (DQ).

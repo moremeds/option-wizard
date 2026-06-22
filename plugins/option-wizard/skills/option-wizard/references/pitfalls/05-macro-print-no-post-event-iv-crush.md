@@ -1,3 +1,13 @@
+---
+type: Trading Pitfall
+title: "Pitfall 05: Macro prints are not single-name ER — buy the hedge BEFORE the print"
+description: Macro data prints (NFP / CPI / FOMC) are not single-name earnings — the data IS the vol shock, so a miss expands VIX rather than crushing it. Buy the macro hedge before the print; the cheap-IV window is pre-event. Post-event IV-crush logic only applies to single-name earnings.
+severity: HIGH
+appliesTo: macro-hedge, hedge-timing, vol-mechanics, nfp, cpi, fomc
+tags: [macro-hedge, hedge-timing, iv-crush, nfp, cpi, fomc, vix]
+timestamp: 2026-06-15T09:18:25Z
+---
+
 # Pitfall 05: macro 数据事件 ≠ 单名 ER — 不要等"事件后 IV crush"再买 hedge
 
 **Date:** 2026-06-03 / 06-04 (analysis) · 2026-06-14 (复盘)

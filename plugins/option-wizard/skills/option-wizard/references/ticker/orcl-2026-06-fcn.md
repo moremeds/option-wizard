@@ -1,3 +1,17 @@
+---
+type: Trade Case Study
+title: "ORCL — 2026-06 FCN strike ladder + gamma-flip insight"
+description: ORCL FCN evaluation — the 70/75/80/85% strike ladder and the gamma-flip insight that generalizes; teaches the rule without exposing account data.
+ticker: ORCL
+event: FCN quote evaluation
+date: 2026-06
+status: closed
+result: framework insight (public, anonymized)
+structures: [fcn]
+tags: [fcn, strike-ladder, gamma-flip, coupon, case-study]
+timestamp: 2026-06-03T06:03:28Z
+---
+
 # ORCL — 2026-06
 
 **Date:** 2026-06-03

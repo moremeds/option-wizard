@@ -1,3 +1,11 @@
+---
+type: Runbook
+title: Analysis Runbook — 分析 <TICKER>
+description: The 8-layer ticker-analysis spine; every layer in order with its per-layer data source and decision output; opens with the Layer Coverage table; includes honest reporting of gaps when a data source is unreachable.
+tags: [runbook, ticker-analysis, layer-coverage, 8-layer, gap-reporting]
+timestamp: 2026-06-08T07:12:35Z
+---
+
 # Analysis Runbook — `分析 <TICKER>`
 
 The end-to-end workflow the skill follows when the trader asks to analyze a

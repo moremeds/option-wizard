@@ -1,3 +1,11 @@
+---
+type: Framework
+title: Gamma Framework — dealer GEX to flip / put wall / call wall
+description: Dealer GEX → gamma flip, put wall, call wall; oi_cluster vs aggregate definitions for short-dated trades; multi-factor probability map from chain + IV term + flow.
+tags: [gamma, gex, dealer-positioning, gamma-flip, put-wall, call-wall]
+timestamp: 2026-06-03T05:47:19Z
+---
+
 # Gamma Framework
 
 ## What GEX is

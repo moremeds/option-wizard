@@ -1,3 +1,13 @@
+---
+type: Trading Pitfall
+title: "Pitfall 01: Far-dated VIX call spreads track the VX future for that expiry, not spot VIX"
+description: Far-dated VIX call spreads track the VX future for that expiry, not spot VIX (contango bleed, sub-1 futures beta) — use front-week VIX or an SPX put spread for short-term hedges.
+severity: MED
+appliesTo: vix, macro-hedge, vol-mechanics, hedge-timing
+tags: [vix, vx-futures, contango, macro-hedge, hedge-mechanics]
+timestamp: 2026-06-10T09:04:58Z
+---
+
 # Pitfall 01: Far-dated VIX call spreads track the VX future for that expiry, not spot VIX
 
 **Date:** 2026-06-06

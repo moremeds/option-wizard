@@ -1,3 +1,11 @@
+---
+type: Framework
+title: Index Premium Selling — Workflow 2b reference (CSP + RUT diagonal)
+description: QQQ / SPY cash-secured-put + RUT put-diagonal workflow; 3-mode diagonal structures; morning-vs-EOD entry timing; threshold calibration from the audit log.
+tags: [index-premium, csp, put-diagonal, rut, entry-timing, workflow-2b]
+timestamp: 2026-06-10T05:43:51Z
+---
+
 # Index Premium Selling — Workflow 2b Reference
 
 Workflow 2b sub-flow for selling premium on US-equity index underlyings:

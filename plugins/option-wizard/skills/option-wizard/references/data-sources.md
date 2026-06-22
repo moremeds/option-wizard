@@ -1,3 +1,11 @@
+---
+type: Reference
+title: Data Sources — source discipline & freshness ladder
+description: Source discipline taxonomy — xenon (account state + live mid / L2 / greeks, no client-side BSM) / UW (options-analytics aggregates + analytical greeks) / TV (spot + technicals) / ib_insync (execution + fallback greeks); the live-first freshness ladder; TV setup gotchas.
+tags: [data-sources, source-discipline, freshness, xenon, unusual-whales, tradingview, ib]
+timestamp: 2026-06-18T13:09:06Z
+---
+
 # Data Sources
 
 ## Source split (SKILL.md hard rule #2)

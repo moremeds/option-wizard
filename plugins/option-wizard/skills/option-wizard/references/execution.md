@@ -1,3 +1,11 @@
+---
+type: Runbook
+title: Execution — preflight + one YES/NO gate
+description: Pre-submission preflight and the single YES/NO gate; legs + mid + max loss + max gain + breakeven + margin + P/L matrix (spot ±5/10/20%) + account verification + UW regime check + liquidity + catalyst clock; bracket defaults (TP 50% / SL 2× credit).
+tags: [runbook, execution, preflight, yes-no-gate, brackets, ib]
+timestamp: 2026-06-03T05:50:34Z
+---
+
 # Execution
 
 ## Execution layering

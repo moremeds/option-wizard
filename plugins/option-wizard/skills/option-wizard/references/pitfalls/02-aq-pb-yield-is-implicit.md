@@ -1,3 +1,13 @@
+---
+type: Trading Pitfall
+title: "Pitfall 02: PB AQ quotes have no explicit yield — it is encoded in the strike discount"
+description: PB AQ quotes carry no explicit yield; the yield is encoded in the strike discount × accumulation schedule. Use pb_quoted_yield_pa=None and the implicit-yield mode rather than rejecting the quote.
+severity: MED
+appliesTo: aq, dq, pb-structured-product, fair-value, framework-gap
+tags: [aq, accumulator, implicit-yield, strike-discount, pb-structured-product]
+timestamp: 2026-06-06T03:02:19Z
+---
+
 # Pitfall 02: PB AQ quotes do not include an explicit yield — "yield" is encoded in the strike discount
 
 **Date:** 2026-06-06

@@ -1,3 +1,11 @@
+---
+type: Runbook
+title: Workflows Overview — routing index for the 4 workflows
+description: Routing index for the workflows (analyze stock / analyze index / analyze positions / analyze FCN); read first to pick the workflow, then drill into the deep-reference file it points to.
+tags: [runbook, workflows, routing, overview]
+timestamp: 2026-06-18T13:09:06Z
+---
+
 # Workflows Overview
 
 Routing index for the 6 distinct workflows. Read this **first** when a
