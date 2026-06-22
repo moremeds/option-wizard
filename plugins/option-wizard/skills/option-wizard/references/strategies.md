@@ -1,3 +1,11 @@
+---
+type: Framework
+title: Strategies — regime × structure matrix
+description: Structure-to-regime matching (the regime × structure matrix), the strong-bullish-conviction veto, LEAPS stock replacement, the setup checklist, position management, and macro-hedge trigger heuristics.
+tags: [strategies, regime, structure-selection, conviction-veto, leaps, position-management]
+timestamp: 2026-06-15T09:18:25Z
+---
+
 # Strategies
 
 ## Regime × structure matrix

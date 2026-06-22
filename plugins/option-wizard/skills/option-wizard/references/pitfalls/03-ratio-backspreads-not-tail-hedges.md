@@ -1,3 +1,13 @@
+---
+type: Trading Pitfall
+title: "Pitfall 03: Put ratio backspreads are short-skew premium capture, not tail hedges"
+description: Put ratio backspreads have a max-loss valley between strikes that aligns with typical M7 5-12% vol-shock drawdowns — they are short-skew premium capture, not crash hedges. Use a delta-targeted long put + tactical SPX put spread instead.
+severity: HIGH
+appliesTo: macro-hedge, tail-hedge, ratio-backspread, structure-selection
+tags: [ratio-backspread, tail-hedge, short-skew, macro-hedge, max-loss-valley]
+timestamp: 2026-06-10T09:04:58Z
+---
+
 # Pitfall 03: Put ratio backspreads are short-skew premium capture, not tail hedges
 
 **Date:** 2026-06-10

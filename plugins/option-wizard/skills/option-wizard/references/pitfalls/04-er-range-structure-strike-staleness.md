@@ -1,3 +1,13 @@
+---
+type: Trading Pitfall
+title: "Pitfall 04: ER range structures — set strikes at entry, add a bearish-breakdown veto"
+description: ER vol-selling range structures (iron condor) must set strikes at the entry moment, not the analysis date; if the underlying has moved >1 implied move toward a short strike before entry, abort/re-strike. Add a bearish-breakdown veto alongside the bullish-conviction veto.
+severity: HIGH
+appliesTo: earnings, iron-condor, range-structure, entry-timing, strike-selection
+tags: [earnings, iron-condor, strike-staleness, entry-timing, bearish-veto, implied-move]
+timestamp: 2026-06-15T09:18:25Z
+---
+
 # Pitfall 04: ER 卖波动率的 range 结构 — strike 必须按入场时刻定，并设 bearish-breakdown veto
 
 **Date:** 2026-06-08 (提出) / 2026-06-12 (resolved) / 2026-06-14 (复盘)

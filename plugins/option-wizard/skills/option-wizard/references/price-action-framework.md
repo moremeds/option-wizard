@@ -1,3 +1,11 @@
+---
+type: Framework
+title: Price Action Framework — orderbook microstructure mental model
+description: Orderbook microstructure mental model — why the same news lands differently; tape / news / catalyst-clock validation for L3 analysis.
+tags: [price-action, microstructure, tape, catalyst-clock, news]
+timestamp: 2026-06-04T07:53:41Z
+---
+
 # Price Action Framework
 
 ## Source rule (SKILL.md hard rule #2)

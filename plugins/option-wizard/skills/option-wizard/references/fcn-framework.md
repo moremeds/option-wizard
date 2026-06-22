@@ -1,3 +1,11 @@
+---
+type: Framework
+title: FCN Framework — FCN / ELN coupon evaluation
+description: FCN / ELN quote evaluation; the 8-item PB checklist + 70/75/80/85% strike ladder + bilingual counter-offer email; fair-coupon decomposition. Never route through IB.
+tags: [fcn, eln, coupon, autocall, knock-in, pb-structured-product, counter-offer]
+timestamp: 2026-06-03T05:49:38Z
+---
+
 # FCN Framework
 
 ## FCN structure
