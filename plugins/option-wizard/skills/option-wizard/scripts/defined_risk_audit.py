@@ -10,8 +10,12 @@ Parses option descriptions of the form:
 Per underlying, checks:
   - aggregate cash-secured coverage on net-short puts
   - share coverage on net-short calls
-  - whether each short option is paired with a long protective option of
-    the same expiry within $20 of strike (defined-risk spread)
+  - whether short options are quantity-covered by long options in the same
+    (underlying, expiry, right) bucket — no strike-width limit. A bucket
+    with long qty >= short qty is fully defined-risk regardless of how wide
+    the spread is; any residual short qty is uncovered. Buckets never cross
+    expiry (strict mode) — a calendar/diagonal's long leg in a later expiry
+    does not protect a short leg expiring first (real gap risk).
 
 Returns a list of findings ready to format into the daily report.
 
@@ -20,6 +24,11 @@ fully cash-secured short puts as failures because it appended findings
 unconditionally on `if uncovered_puts:`. Fixed below — we only flag when
 coverage_ratio < 1.0, so test_audit_passes_fully_cash_secured_short_put
 holds (positions: -1 ORCL 200P, cash $25k > $20k assignment → pass).
+
+Prior defect (fixed 2026-07): a fixed $20 strike-width pairing check
+false-positived on any wide spread (SMH $30, MU broken-wing fly $95/105,
+LLY $40 — flagged 3 times independently across 2026-06 book reviews).
+Replaced with the quantity-conservation bucket check above.
 """
 
 from __future__ import annotations
@@ -56,6 +65,34 @@ def _is_stock(description: str) -> bool:
     return _OPTION_RE.match(description) is None and "[" not in description
 
 
+def _uncovered_legs(legs: list[dict[str, Any]], right: str) -> list[dict[str, Any]]:
+    """Net short vs long qty per (expiry, right) bucket — never across
+    expiries. Returns the residual short legs (worst-strike-first for puts,
+    so downstream assignment-cost math stays conservative) if the bucket
+    isn't fully covered; empty if it is."""
+    by_expiry: dict[str | None, list[dict[str, Any]]] = defaultdict(list)
+    for l in legs:
+        if l["right"] == right:
+            by_expiry[l["expiry"]].append(l)
+
+    uncovered: list[dict[str, Any]] = []
+    for expiry_legs in by_expiry.values():
+        shorts = [l for l in expiry_legs if l["position"] < 0]
+        longs = [l for l in expiry_legs if l["position"] > 0]
+        residual = sum(abs(l["position"]) for l in shorts) - sum(
+            l["position"] for l in longs
+        )
+        if residual <= 0:
+            continue
+        for l in sorted(shorts, key=lambda x: -x["strike"]):
+            if residual <= 0:
+                break
+            take = min(residual, abs(l["position"]))
+            uncovered.append({**l, "position": -take})
+            residual -= take
+    return uncovered
+
+
 def audit_book(
     positions: list[dict[str, Any]],
     cash_balance: float,
@@ -77,22 +114,8 @@ def audit_book(
 
     findings: list[dict[str, Any]] = []
     for underlying, legs in options_by_underlying.items():
-        shorts_puts = [l for l in legs if l["right"] == "P" and l["position"] < 0]
-        longs_puts = [l for l in legs if l["right"] == "P" and l["position"] > 0]
-        shorts_calls = [l for l in legs if l["right"] == "C" and l["position"] < 0]
-        longs_calls = [l for l in legs if l["right"] == "C" and l["position"] > 0]
-
-        def _is_protected(
-            short_leg: dict[str, Any], pool: list[dict[str, Any]]
-        ) -> bool:
-            return any(
-                l["expiry"] == short_leg["expiry"]
-                and abs(l["strike"] - short_leg["strike"]) <= 20.0
-                for l in pool
-            )
-
-        uncovered_puts = [l for l in shorts_puts if not _is_protected(l, longs_puts)]
-        uncovered_calls = [l for l in shorts_calls if not _is_protected(l, longs_calls)]
+        uncovered_puts = _uncovered_legs(legs, right="P")
+        uncovered_calls = _uncovered_legs(legs, right="C")
 
         if uncovered_puts:
             assignment_cost = sum(
