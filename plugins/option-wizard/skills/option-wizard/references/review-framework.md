@@ -71,6 +71,37 @@ post-mortems separately.
 | **Weekly review** | 7 calendar days back from invocation date | Micro-feedback loop: did this week's calls hold up? What position changes happened? | Layer A per-call scorecard + Layer B trade log + Layer C advisory observations. No pattern aggregation (sample too small). |
 | **Monthly review** | 30 calendar days back | Pattern detection: systematic miss on a call type / ticker / regime? Roll cadence / execution drift? | Everything from weekly + Layer A pattern analysis (hit rate by call type / ticker / regime) + action items proposing skill rule changes |
 
+### Two-pass monthly cadence (U5/R5)
+
+Running a monthly review on the 1st structurally starves directional and
+structure verdicts regardless of data quality: `DEFAULT_DIRECTIONAL_VERDICT_HORIZON = 21`
+trading days from a call made on the 3rd-to-last week of the month hasn't
+matured by month-end, and the earliest calls' T+21 lands a few days INTO
+the following month. Observed 2026-07-01: a monthly run over June found
+directional/structure calls scattered from early-June still short of
+T+21 — the calendar hadn't caught up, independent of whether the
+underlying spot/IV data was pulled correctly. Run the monthly review
+**twice**:
+
+1. **Facts pass** (month-start, ~day 1-2): Layer B realized P&L,
+   vol-regime verdicts (T+10 horizon — matures fast), pattern analysis on
+   whatever IS scored, action items. This is the primary monthly report.
+2. **Verdict backfill pass** (~3 weeks later, once the month's T+21
+   horizons have matured — typically the 3rd week of the FOLLOWING
+   month): re-run the same window with `--no-pitfall-drafts` (drafts
+   already exist from pass 1) to backfill directional/structure verdicts
+   into the SAME archive files via `write_back_outcome`'s per-call
+   idempotent marker (U2/R1) — re-running is safe, already-verdicted
+   calls are skipped. This is what finally resolves questions like "was
+   the anchoring-bias pattern real?" that pass 1 can only flag as
+   provisional.
+
+Both passes' rendered reports auto-archive to different filenames if run
+on different calendar dates (U5/F2 below) — the backfill pass's `today`
+argument should still be the ORIGINAL window's `today` for consistent
+verdict horizons, so pass the same `--today` explicitly to avoid
+`save_review_report` computing a different `window_end` than pass 1.
+
 CLI:
 
 ```bash
@@ -79,8 +110,9 @@ CLI:
 .venv/bin/python -m scripts.retrospective --window monthly --no-writeback --no-pitfall-drafts
 ```
 
-Default behavior writes verdicts back to source archive files and emits
-pitfall draft candidates. Flags opt out.
+Default behavior writes verdicts back to source archive files, emits
+pitfall draft candidates, **and auto-archives the rendered report itself**
+(U5/F2 — see `save_review_report`). All three opt out via flags.
 
 ## Layer A — Analysis quality (archive only)
 
@@ -710,7 +742,14 @@ report = run_review(
     drafts_dir=Path(".../pitfalls/_drafts"),
     ledger_section=ledger_section,
 )
-print(render_report(report))
+rendered = render_report(report)
+print(rendered)
+
+# Auto-archive the report itself (U5/F2, default ON — see save_review_report
+# docstring). Skip this call entirely for exploratory / throwaway runs.
+from scripts.retrospective import save_review_report
+saved_path = save_review_report(report, rendered)
+print(f"[archived to {saved_path}]")
 '
 ```
 
@@ -731,8 +770,8 @@ Orchestrator CLI (Phase 1 scaffold — data fetchers still need to be wired in b
 # Monthly review with pattern analysis
 .venv/bin/python -m scripts.retrospective --window monthly
 
-# Exploratory run — no archive edits, no drafts
-.venv/bin/python -m scripts.retrospective --window monthly --no-writeback --no-pitfall-drafts
+# Exploratory run — no archive edits, no drafts, no auto-archived report
+.venv/bin/python -m scripts.retrospective --window monthly --no-writeback --no-pitfall-drafts --no-archive
 
 # Validate archive frontmatter / Outcome section format (S2).
 # Exits non-zero on any issue → suitable for CI.

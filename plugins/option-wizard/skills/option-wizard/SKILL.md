@@ -181,6 +181,8 @@ Edge case — structurally dangerous position (naked short call discovered, unde
 
 **Output the analysis to the screen first.** Do NOT auto-write to `private/` by default. The trader explicitly requests save with phrases like "保存这份" / "save this" / "archive" / "存档" — only then write to:
 
+**Exception: 复盘 reports auto-archive by default** (U5/F2, `scripts.retrospective::save_review_report`). A 2026-06-14 weekly review drove real code fixes (commit `b6b5057`) but was never saved — its findings beyond the commit message are permanently unrecoverable. 复盘 is the skill's own audit trail, not a one-off analysis; losing the report defeats its purpose. This exception is scoped narrowly to 复盘's own rendered report — book reviews, ticker analyses, and everything else still follow the screen-first default above.
+
 ```
 references/private/{ticker|market|review}/{date}-{ticker}-{long|short|mixed}-{highlight}.md
 ```

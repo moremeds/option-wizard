@@ -1741,6 +1741,56 @@ def _default_drafts_dir() -> Path:
     return skill_root / "references" / "pitfalls" / "_drafts"
 
 
+def save_review_report(
+    report: ReviewReport,
+    rendered: str,
+    *,
+    base_dir: Path | None = None,
+) -> Path:
+    """Auto-archive the rendered 复盘 report itself (F2 fix, 2026-07-02).
+
+    The 2026-07-01 monthly skill audit found a 2026-06-14 weekly review
+    that drove real code fixes (commit b6b5057) but was never saved — its
+    findings beyond the commit message are permanently unrecoverable. 复盘
+    is the skill's own audit trail; losing the report defeats its purpose.
+    This is a narrow, deliberate exception to SKILL.md §"Reporting &
+    archive"'s general "screen first, explicit save" rule — scoped to 复盘
+    reports specifically, not book reviews or ticker analyses. CLI default
+    is archive-ON; `--no-archive` opts out (exploratory runs).
+
+    Filename matches the SKILL.md archive convention:
+    `references/private/review/{window_end}-book-mixed-{window}-retrospective.md`.
+    Overwrites same-day same-window re-runs by design — the R5 two-pass
+    monthly cadence (facts pass early in the month, T+21-matured verdict
+    backfill pass later) produces two DIFFERENT dates in practice, but a
+    same-day re-run (e.g. re-running after fixing a data gap) should
+    replace, not duplicate.
+    """
+    root = base_dir or (
+        Path(__file__).resolve().parent.parent / "references" / "private"
+    )
+    review_dir = root / "review"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    date_s = report.window_end.isoformat()
+    path = review_dir / f"{date_s}-book-mixed-{report.window}-retrospective.md"
+    frontmatter = (
+        "---\n"
+        "ticker: BOOK\n"
+        f"event: {report.window.title()} 复盘 — auto-archived\n"
+        f"date: {date_s}\n"
+        "status: analysis-only\n"
+        "result: pending\n"
+        "structures: [retrospective]\n"
+        f"tags: [{report.window}-review, auto-archived]\n"
+        "---\n\n"
+    )
+    body = rendered
+    if "## Outcome / Lesson" not in body:
+        body += "\n\n## Outcome / Lesson\n\n_(auto-archived — trader fills in)_\n"
+    path.write_text(frontmatter + body, encoding="utf-8")
+    return path
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Weekly / monthly review of past analyses + trades"
@@ -1770,6 +1820,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--no-writeback", action="store_true")
     parser.add_argument("--no-pitfall-drafts", action="store_true")
+    parser.add_argument(
+        "--no-archive",
+        action="store_true",
+        help="Skip auto-archiving the rendered 复盘 report itself to "
+        "references/private/review/ (default: archived — F2 fix, see "
+        "save_review_report docstring). Use for exploratory runs.",
+    )
     parser.add_argument(
         "--validate-archive",
         action="store_true",
@@ -1818,7 +1875,14 @@ def main(argv: list[str] | None = None) -> int:
         generate_drafts=not args.no_pitfall_drafts,
         include_archive=args.include_archive,
     )
-    print(render_report(report))
+    rendered = render_report(report)
+    print(rendered)
+    if not args.no_archive:
+        # base_dir mirrors --archive-dir so a non-default archive root
+        # (e.g. a test fixture) doesn't silently fall through to the
+        # module's real references/private/ default.
+        saved_path = save_review_report(report, rendered, base_dir=args.archive_dir)
+        print(f"\n[复盘 report auto-archived to {saved_path}]", file=sys.stderr)
     return 0
 
 

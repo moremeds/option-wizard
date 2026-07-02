@@ -1591,3 +1591,80 @@ def test_ledger_section_omitted_when_empty(tmp_path: Path):
         generate_drafts=False,
     )
     assert "## Decision ledger" not in render_report(report)
+
+
+# ----- U5 (2026-07-02): save_review_report auto-archive -----
+
+
+def test_save_review_report_writes_expected_path_and_frontmatter(tmp_path: Path):
+    from scripts.retrospective import render_report, save_review_report
+
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="weekly",
+        today=date(2026, 7, 2),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[],
+        trade_sources=[],
+        write_back=False,
+        generate_drafts=False,
+    )
+    rendered = render_report(report)
+    saved = save_review_report(report, rendered, base_dir=archive)
+    expected = archive / "review" / "2026-07-02-book-mixed-weekly-retrospective.md"
+    assert saved == expected
+    assert saved.exists()
+    text = saved.read_text(encoding="utf-8")
+    assert text.startswith("---\n")
+    assert "ticker: BOOK" in text
+    assert "date: 2026-07-02" in text
+    assert "tags: [weekly-review, auto-archived]" in text
+    assert "# 复盘 — Weekly review" in text  # rendered body preserved
+
+
+def test_save_review_report_appends_outcome_section_when_missing(tmp_path: Path):
+    from scripts.retrospective import render_report, save_review_report
+
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="monthly",
+        today=date(2026, 7, 2),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[],
+        trade_sources=[],
+        write_back=False,
+        generate_drafts=False,
+    )
+    rendered = render_report(report)
+    assert "## Outcome / Lesson" not in rendered  # render_report never emits one
+    saved = save_review_report(report, rendered, base_dir=archive)
+    assert "## Outcome / Lesson" in saved.read_text(encoding="utf-8")
+
+
+def test_save_review_report_overwrites_same_day_same_window(tmp_path: Path):
+    from scripts.retrospective import save_review_report
+
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="weekly",
+        today=date(2026, 7, 2),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[],
+        trade_sources=[],
+        write_back=False,
+        generate_drafts=False,
+    )
+    saved1 = save_review_report(report, "first render", base_dir=archive)
+    saved2 = save_review_report(report, "second render", base_dir=archive)
+    assert saved1 == saved2
+    assert "second render" in saved2.read_text(encoding="utf-8")
+    assert "first render" not in saved2.read_text(encoding="utf-8")
