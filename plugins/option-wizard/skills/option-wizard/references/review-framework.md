@@ -265,9 +265,12 @@ Check freshness via the blotter `as_of` and the Futu `is_stale` flag on
 then call the matching parser:
 
 - **IB**: `mcp__claude_ai_Interactive_Brokers_IBKR__get_account_trades period=DAYS_7|DAYS_30` → `parse_ib_trades(response, window_start, window_end) → list[Trade]`
-- **Futu**: `cd ~/projects/portfolio-analyser && npx tsx src/cli.ts ft --range 1m --rerun` (writes JSON report under `reports/`) → `parse_futu_trades(report_json, window_start, window_end) → list[Trade]`. **`--rerun` is mandatory for every review.** The CLI caches trades by ISO week, so without it a freshly-*named* report can still carry a stale `trades.dateRange.to` (observed 2026-06-14: a report file stamped 06-12 whose trade data ended 06-08, silently dropping the entire week's Futu flow). Before trusting any pre-existing report, verify `trades.dateRange.to ≥ the last trading day at or before window_end`; `parse_futu_trades` raises `ValueError` on stale data as a backstop, but the orchestrator should pass `--rerun` so it never trips.
+- **Futu**: `cd ~/projects/portfolio-analyser && npx tsx src/cli.ts ft --range 3m --rerun` (writes JSON report under `reports/`) → `parse_futu_trades(report_json, window_start, window_end, min_lookback_days=60) → list[Trade]`. **`--rerun` is mandatory for every review.** The CLI caches trades by ISO week, so without it a freshly-*named* report can still carry a stale `trades.dateRange.to` (observed 2026-06-14: a report file stamped 06-12 whose trade data ended 06-08, silently dropping the entire week's Futu flow). Before trusting any pre-existing report, verify `trades.dateRange.to ≥ the last trading day at or before window_end`; `parse_futu_trades` raises `ValueError` on stale data as a backstop, but the orchestrator should pass `--rerun` so it never trips.
+  **`--range` must extend well past the review window** (R3, observed 2026-07-02): the CLI's pair matcher only sees trades inside its range, so a June monthly review fed a `--range 1m` report attaches realized P&L only to intra-June round trips — every June close of a May-opened position lands in `unmatchedTrades` with no `realizedPnl` and silently drops out of the realized sum. This sign-flipped June 2026 realized P&L (−$9.9k under 1m vs +$9.7k under 3m; 39 cross-month pairs incl. MU +$10.2k / ORCL +$9.5k / QQQ +$6.4k were being discarded). Monthly reviews: `--range 3m` + `min_lookback_days=60` (raises when the report's `dateRange.from` starts too late). Weekly reviews: `--range 3m` is still the safe default — short round trips dominate weeklies, but cross-week closes are common.
 
 Tag `trade_sources=["IB", "Futu"]` (or whichever subset succeeded) on the `ReviewReport`. If a broker pull fails or returns empty, surface that as a **data gap in Layer B's output**, never silently drop. The `cross_cut_advisory` is computed only against the brokers actually pulled.
+
+**Realized P&L is reported per currency, never summed across currencies** (R4, observed twice in June 2026): IB `get_account_trades` returns `realized_pnl` for KRW-denominated contracts (000660 / 005930) in raw KRW, and the Futu book mixes JPY names (6981) into a USD account. A naive sum showed IB June at "−$1,056,703". `realized_pnl_by_currency(trades)` groups closing legs by the fill's `currency` field; `render_report` prints one row per currency. FX conversion is deliberately out of scope — no fabricated rates.
 
 For every fill within the window:
 
@@ -556,6 +559,21 @@ surfaced four gaps. All four are now closed:
   missing required fields (`ticker` / `date` / `structures` / `tags`),
   unparseable date, missing `## Outcome / Lesson` section. Exits
   non-zero if any file has issues so it can be wired into CI.
+
+## Fixes from the June 2026 monthly run (v0.4)
+
+The first full monthly review (June 2026, run 2026-07-02) surfaced four
+Layer-mechanics bugs, all fixed:
+
+- **R1 — writeback marker was date-only.** A multi-ticker archive (macro
+  snapshot emitting SPY/QQQ/IWM/DIA/VIX calls) got only its FIRST call's
+  verdict written; the marker check treated the rest as duplicates. Marker
+  now carries `ticker + call_type`.
+- **R2 — pitfall drafts keyed by archive stem only.** Three WRONG calls on
+  the same 6/4 snapshot collapsed into one draft file. Filenames now carry
+  `-{ticker}-{call_type}`.
+- **R3 — Futu matcher lookback** (see Layer B section above).
+- **R4 — cross-currency realized P&L** (see Layer B section above).
 
 ## Architectural refactor (v0.3 — source separation)
 

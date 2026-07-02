@@ -142,6 +142,7 @@ class Trade:
     group_key: str | None = (
         None  # legs entered same day with same group share one Trade
     )
+    currency: str = "USD"  # broker-reported settlement currency of the fill
 
     @property
     def signed_qty(self) -> int:
@@ -788,6 +789,25 @@ def aggregate_call_markout(
     return out
 
 
+def realized_pnl_by_currency(trades: list[Trade]) -> dict[str, dict[str, Any]]:
+    """Layer B only — realized P&L on closing legs, grouped by currency.
+
+    Never sums across currencies (R4 fix, 2026-07-02): IB reports
+    `realized_pnl` for KRW/JPY-denominated contracts in the raw local
+    currency, and Futu mixes JPY names into a USD book. A naive sum showed
+    IB June 2026 at "−$1,056,703" (actually −1,069,456 KRW + $12,673 USD).
+    Callers report each currency separately; FX conversion is out of scope
+    (no fabricated rates).
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for t in trades:
+        if t.realized_pnl:
+            row = out.setdefault(t.currency, {"realized": 0.0, "n_closes": 0})
+            row["realized"] += t.realized_pnl
+            row["n_closes"] += 1
+    return out
+
+
 def aggregate_trade_markout(
     trade_markouts: list[TradeMarkout],
 ) -> dict[int, dict[str, Any]]:
@@ -925,14 +945,23 @@ def generate_pitfall_drafts(
     drafts_dir: Path,
     review_date: date,
 ) -> list[Path]:
-    """Write a draft pitfall file for each WRONG call. Idempotent on filename."""
+    """Write a draft pitfall file for each WRONG call. Idempotent on filename.
+
+    Filename carries ticker + call_type so a multi-ticker archive with
+    several WRONG calls emits one draft per call instead of the first call
+    swallowing the rest (R2 fix, 2026-07-02 June review — SPY/QQQ/VIX WRONG
+    on the same 6/4 snapshot collapsed into a single draft).
+    """
     drafts_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for cm in wrong_call_markouts:
         if cm.verdict != "WRONG":
             continue
         slug = cm.call.archive_stem
-        path = drafts_dir / f"pitfall-{slug}.md"
+        path = (
+            drafts_dir
+            / f"pitfall-{slug}-{cm.call.ticker.lower()}-{cm.call.call_type}.md"
+        )
         if path.exists():
             continue  # idempotency: don't overwrite trader's in-progress edits
         markout_lines = [
@@ -973,8 +1002,11 @@ _OUTCOME_HEADER_RE = re.compile(r"^## Outcome\s*/\s*Lesson\s*$", re.MULTILINE)
 def write_back_outcome(call_markouts: list[CallMarkout], review_date: date) -> int:
     """Append verdict block to each source file's Outcome / Lesson section.
 
-    Idempotent: skips files that already contain a 'Verdict (复盘 <review_date>'
-    line. Returns count of files modified.
+    Idempotent **per call**: the marker carries ticker + call_type, so a
+    multi-ticker archive (e.g. a macro snapshot emitting SPY/QQQ/VIX calls)
+    receives one block per call instead of only the first (R1 fix,
+    2026-07-02 June review — the date-only marker made call #2+ on the same
+    file look already-written). Returns count of blocks written.
     """
     modified = 0
     for cm in call_markouts:
@@ -982,7 +1014,10 @@ def write_back_outcome(call_markouts: list[CallMarkout], review_date: date) -> i
             continue
         path = cm.call.archive_path
         text = path.read_text(encoding="utf-8")
-        marker = f"**Verdict (复盘 {review_date.isoformat()},"
+        marker = (
+            f"**Verdict (复盘 {review_date.isoformat()}, "
+            f"{cm.call.ticker} {cm.call.call_type}):**"
+        )
         if marker in text:
             continue
         match = _OUTCOME_HEADER_RE.search(text)
@@ -1009,7 +1044,8 @@ def write_back_outcome(call_markouts: list[CallMarkout], review_date: date) -> i
         )
         block = (
             f"\n"
-            f"**Verdict (复盘 {review_date.isoformat()}, {cm.call.call_type}):** "
+            f"**Verdict (复盘 {review_date.isoformat()}, "
+            f"{cm.call.ticker} {cm.call.call_type}):** "
             f"{cm.verdict}\n"
             f"**Markout:**\n"
             + "\n".join(markout_lines)
@@ -1102,6 +1138,17 @@ def render_report(report: ReviewReport) -> str:
         f"_Source: {' + '.join(report.trade_sources) or '(no brokers pulled)'}. "
         "Actual fills + execution markout — never inferred from archive._"
     )
+    lines.append("")
+    lines.append("**Realized P&L on closed legs (by currency — never summed across):**")
+    lines.append("")
+    lines.append("| Currency | Realized | n_closes |")
+    lines.append("|----------|----------|----------|")
+    realized = realized_pnl_by_currency([tm.trade for tm in report.trades])
+    if not realized:
+        lines.append("| — | (no closing legs in window) | 0 |")
+    for ccy in sorted(realized):
+        row = realized[ccy]
+        lines.append(f"| {ccy} | {row['realized']:+,.2f} | {row['n_closes']} |")
     lines.append("")
     lines.append("**Aggregate trade markout (Layer B):**")
     lines.append("")
@@ -1221,6 +1268,7 @@ def parse_ib_trades(
                 realized_pnl=(
                     float(tr["realized_pnl"]) if tr.get("realized_pnl") else None
                 ),
+                currency=str(tr.get("currency", "USD")).upper(),
             )
         )
     return out
@@ -1257,6 +1305,7 @@ def _futu_leg_to_trade(
         contract_type="OPT" if is_option else "STK",
         option_meta=option_meta,
         realized_pnl=realized_pnl,
+        currency=str(leg.get("currency", "USD")).upper(),
     )
 
 
@@ -1273,6 +1322,7 @@ def parse_futu_trades(
     window_end: date,
     *,
     allow_stale: bool = False,
+    min_lookback_days: int = 0,
 ) -> list[Trade]:
     """Convert portfolio-analyser JSON report → Trade[].
 
@@ -1291,8 +1341,31 @@ def parse_futu_trades(
     (from the report JSON) MUST be >= the last trading day at or before
     `window_end`. Raises `ValueError` if stale. Pass `allow_stale=True`
     to opt out (e.g., backfills, deliberate historical reviews).
+
+    Lookback gate (`min_lookback_days`, R3 fix 2026-07-02): the CLI's pair
+    matcher only sees trades inside its `--range`. A June review fed a
+    `--range 1m` report matches June closes only against June opens —
+    every close of a position opened in May lands in `unmatchedTrades`
+    with no realizedPnl and silently drops out of the realized sum (this
+    sign-flipped June 2026 realized P&L: −$9.9k under 1m vs +$9.7k under
+    3m). Pass `min_lookback_days=60` for monthly reviews: raises
+    ValueError when `dateRange.from` starts later than
+    `window_start − min_lookback_days`, telling the caller to re-pull
+    with `--range 3m`. Default 0 preserves legacy behavior.
     """
     trades_block = futu_report.get("trades", {})
+    if min_lookback_days:
+        from_date = _iso_to_date(str(trades_block.get("dateRange", {}).get("from", "")))
+        earliest_needed = window_start - timedelta(days=min_lookback_days)
+        if from_date is not None and from_date > earliest_needed:
+            raise ValueError(
+                f"Futu report lookback too short: dateRange.from is {from_date}, "
+                f"but min_lookback_days={min_lookback_days} requires coverage "
+                f"from {earliest_needed} so the pair matcher can attach realized "
+                "P&L to closes of positions opened before the review window. "
+                "Re-pull with `cd ~/projects/portfolio-analyser && npx tsx "
+                "src/cli.ts ft --range 3m --rerun` (or longer)."
+            )
     if not allow_stale:
         to_iso = str(trades_block.get("dateRange", {}).get("to", ""))
         to_date = _iso_to_date(to_iso)
@@ -1370,6 +1443,7 @@ def parse_xenon_blotter(
                     contract_type=ctype,
                     option_meta=None,
                     realized_pnl=attach_pnl,
+                    currency=str(tr.get("currency", "USD")).upper(),
                 )
             )
     return out

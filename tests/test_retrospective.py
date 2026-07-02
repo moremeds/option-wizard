@@ -1241,3 +1241,137 @@ def test_parse_xenon_blotter_filters_to_window():
     trades = parse_xenon_blotter(_BLOTTER, date(2026, 6, 14), date(2026, 6, 30))
     # only the 6/16 fill is in-window
     assert len(trades) == 1 and trades[0].fill_price == 22.69
+
+
+# ----- U1 fixes (2026-07-02 June review): R1-R4 -----
+
+
+def test_r1_writeback_multi_ticker_archive_writes_all_verdicts(tmp_path: Path):
+    """R1: marker carries ticker+type, so every call on a shared archive lands."""
+    base = date(2026, 5, 1)
+    archive = _write_archive(
+        tmp_path,
+        name="macro-2026-05-01.md",
+        ticker="SPY, QQQ",
+        date_iso=base.isoformat(),
+        structures=[],
+        body="\n## Outcome / Lesson\n\n(empty)\n",
+    )
+    spot = {
+        "SPY": {base: 100.0, _horizon_date(base, 21): 110.0},
+        "QQQ": {base: 100.0, _horizon_date(base, 21): 90.0},
+    }
+    cms = [
+        compute_call_markout(
+            Call(tk, base, "directional", +1, None, archive, "bull"),
+            spot_history=spot,
+        )
+        for tk in ("SPY", "QQQ")
+    ]
+    review_date = base + timedelta(days=30)
+    n1 = write_back_outcome(cms, review_date)
+    assert n1 == 2  # both tickers written, not just the first
+    text = archive.read_text()
+    assert f"复盘 {review_date.isoformat()}, SPY directional):** CORRECT" in text
+    assert f"复盘 {review_date.isoformat()}, QQQ directional):** WRONG" in text
+    # idempotent per call on re-run
+    assert write_back_outcome(cms, review_date) == 0
+
+
+def test_r2_pitfall_drafts_unique_per_ticker(tmp_path: Path):
+    """R2: two WRONG calls from the same archive emit two draft files."""
+    base = date(2026, 5, 1)
+    shared = Path("macro-2026-05-01.md")
+    spot = {
+        "SPY": {base: 100.0, _horizon_date(base, 21): 90.0},
+        "QQQ": {base: 100.0, _horizon_date(base, 21): 90.0},
+    }
+    cms = [
+        compute_call_markout(
+            Call(tk, base, "directional", +1, None, shared, "bull"),
+            spot_history=spot,
+        )
+        for tk in ("SPY", "QQQ")
+    ]
+    assert all(cm.verdict == "WRONG" for cm in cms)
+    written = generate_pitfall_drafts(cms, tmp_path / "drafts", base)
+    assert len(written) == 2
+    names = {p.name for p in written}
+    assert names == {
+        "pitfall-macro-2026-05-01-spy-directional.md",
+        "pitfall-macro-2026-05-01-qqq-directional.md",
+    }
+
+
+def test_r3_parse_futu_trades_min_lookback_guard():
+    """R3: short-lookback report raises so cross-month realized isn't dropped."""
+    from scripts.retrospective import parse_futu_trades
+
+    report = {
+        "trades": {
+            "dateRange": {"from": "2026-06-01T00:00:00Z", "to": "2026-07-01T00:00:00Z"},
+            "matchedTrades": [],
+            "unmatchedTrades": [],
+        }
+    }
+    with pytest.raises(ValueError, match="lookback too short"):
+        parse_futu_trades(
+            report, date(2026, 6, 1), date(2026, 6, 30), min_lookback_days=60
+        )
+    # default (0) preserves legacy behavior; long-enough lookback passes
+    assert parse_futu_trades(report, date(2026, 6, 1), date(2026, 6, 30)) == []
+    report["trades"]["dateRange"]["from"] = "2026-04-01T00:00:00Z"
+    assert (
+        parse_futu_trades(
+            report, date(2026, 6, 1), date(2026, 6, 30), min_lookback_days=60
+        )
+        == []
+    )
+
+
+def test_r4_realized_pnl_by_currency_never_mixes():
+    """R4: KRW closes group separately from USD — no cross-currency sum."""
+    from scripts.retrospective import parse_ib_trades, realized_pnl_by_currency
+
+    resp = {
+        "trades": [
+            {
+                "symbol": "000660",
+                "sec_type": "STK",
+                "side": "SELL",
+                "size": 9,
+                "price": 2858000,
+                "trade_time": "2026-06-22T05:30:00Z",
+                "realized_pnl": -595618.2,
+                "currency": "KRW",
+            },
+            {
+                "symbol": "SPX",
+                "sec_type": "OPT",
+                "side": "SELL",
+                "size": 1,
+                "price": 21.7,
+                "trade_time": "2026-06-23T15:30:00Z",
+                "realized_pnl": 726.7185,
+                "currency": "USD",
+            },
+            {
+                # opening leg: no realized -> excluded from the P&L table
+                "symbol": "QQQ",
+                "sec_type": "OPT",
+                "side": "BUY",
+                "size": 1,
+                "price": 5.52,
+                "trade_time": "2026-06-30T15:30:00Z",
+                "realized_pnl": 0,
+                "currency": "USD",
+            },
+        ]
+    }
+    trades = parse_ib_trades(resp, date(2026, 6, 1), date(2026, 6, 30))
+    assert [t.currency for t in trades] == ["KRW", "USD", "USD"]
+    grouped = realized_pnl_by_currency(trades)
+    assert grouped["KRW"] == {"realized": -595618.2, "n_closes": 1}
+    assert grouped["USD"]["n_closes"] == 1
+    assert grouped["USD"]["realized"] == pytest.approx(726.7185)
+    assert set(grouped) == {"KRW", "USD"}
