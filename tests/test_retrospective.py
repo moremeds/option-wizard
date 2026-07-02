@@ -36,6 +36,7 @@ from scripts.retrospective import (
     generate_action_items,
     generate_pitfall_drafts,
     parse_archive_frontmatter,
+    parse_structured_calls,
     run_review,
     validate_archive_dir,
     write_back_outcome,
@@ -1375,3 +1376,172 @@ def test_r4_realized_pnl_by_currency_never_mixes():
     assert grouped["USD"]["n_closes"] == 1
     assert grouped["USD"]["realized"] == pytest.approx(726.7185)
     assert set(grouped) == {"KRW", "USD"}
+
+
+# ----- U2 (2026-07-02): structured `calls:` frontmatter -----
+
+
+def _write_archive_with_calls(
+    dir_: Path,
+    *,
+    name: str,
+    ticker: str,
+    date_iso: str,
+    calls_line: str,
+    body: str = "",
+) -> Path:
+    p = dir_ / name
+    fm_lines = [
+        "---",
+        f"ticker: {ticker}",
+        f"date: {date_iso}",
+        "structures: []",
+        "tags: []",
+        calls_line,
+        "---",
+    ]
+    p.write_text("\n".join(fm_lines) + "\n" + body, encoding="utf-8")
+    return p
+
+
+def test_structured_calls_take_precedence_over_prose(tmp_path: Path):
+    archive = _write_archive_with_calls(
+        tmp_path,
+        name="nvda-2026-07-02.md",
+        ticker="NVDA",
+        date_iso="2026-07-02",
+        calls_line=(
+            'calls: ["NVDA|structure|-1|bull_put_spread|PROBE|3|true", '
+            '"TSLA|directional|+1||NORMAL|0|false"]'
+        ),
+        # Body would classify bullish via prose keywords if it were read —
+        # proves the structured branch short-circuits prose entirely.
+        body="## TL;DR\n\nbullish 做多 buy the dip\n",
+    )
+    calls, skipped = extract_calls_from_archive(
+        tmp_path, date(2026, 7, 1), date(2026, 7, 3)
+    )
+    assert skipped == []
+    assert len(calls) == 2
+    nvda, tsla = calls
+    assert nvda.ticker == "NVDA" and nvda.call_type == "structure"
+    assert nvda.direction == -1 and nvda.structure == "bull_put_spread"
+    assert nvda.tier == "PROBE" and nvda.crowding_flags == 3
+    assert nvda.opposite_case_first is True
+    assert tsla.ticker == "TSLA" and tsla.call_type == "directional"
+    assert tsla.direction == +1 and tsla.structure is None
+    assert tsla.tier == "NORMAL" and tsla.crowding_flags == 0
+    assert tsla.opposite_case_first is False
+    assert calls[0].archive_path == archive
+
+
+def test_structured_calls_empty_list_yields_no_calls_and_skips_prose(tmp_path: Path):
+    _write_archive_with_calls(
+        tmp_path,
+        name="macro-2026-07-02.md",
+        ticker="SPX",
+        date_iso="2026-07-02",
+        calls_line="calls: []",
+        body="## TL;DR\n\nbullish 做多\n",
+    )
+    calls, skipped = extract_calls_from_archive(
+        tmp_path, date(2026, 7, 1), date(2026, 7, 3)
+    )
+    assert calls == []
+    assert skipped == []  # explicit empty calls is not an error
+
+
+def test_structured_calls_malformed_entry_reported_not_silently_dropped(
+    tmp_path: Path,
+):
+    _write_archive_with_calls(
+        tmp_path,
+        name="bad-2026-07-02.md",
+        ticker="NVDA",
+        date_iso="2026-07-02",
+        calls_line='calls: ["NVDA|not_a_type|+1||PROBE|0|false"]',
+    )
+    calls, skipped = extract_calls_from_archive(
+        tmp_path, date(2026, 7, 1), date(2026, 7, 3)
+    )
+    assert calls == []
+    assert len(skipped) == 1
+    assert "unknown call_type" in skipped[0]["reason"]
+
+
+def test_structured_calls_reject_unknown_tier(tmp_path: Path):
+    calls, reasons = parse_structured_calls(
+        ["NVDA|directional|+1||MEGA_YOLO|0|false"],
+        analysis_date=date(2026, 7, 2),
+        archive_path=Path("x.md"),
+        notes="",
+    )
+    assert calls == []
+    assert len(reasons) == 1 and "unknown tier" in reasons[0]
+
+
+def test_pattern_analysis_by_tier_only_counts_structured_calls():
+    base = date(2026, 5, 1)
+    spot = {
+        "NVDA": {
+            base: 100.0,
+            _horizon_date(base, 21): 90.0,  # bullish -> WRONG
+            base + timedelta(days=7): 100.0,
+            _horizon_date(base + timedelta(days=7), 21): 88.0,
+            base + timedelta(days=14): 100.0,
+            _horizon_date(base + timedelta(days=14), 21): 85.0,
+        }
+    }
+    tiered_calls = [
+        Call(
+            "NVDA",
+            base + timedelta(days=7 * i),
+            "directional",
+            +1,
+            None,
+            Path(f"n{i}.md"),
+            "",
+            tier="PROBE",
+        )
+        for i in range(3)
+    ]
+    untiered_call = Call("NVDA", base, "directional", +1, None, Path("legacy.md"), "")
+    cms = [compute_call_markout(c, spot_history=spot) for c in tiered_calls]
+    cms.append(compute_call_markout(untiered_call, spot_history=spot))
+    pat = detect_pattern_anomalies(cms)
+    assert pat["by_tier"]["PROBE"]["n_scored"] == 3
+    assert pat["by_tier"]["PROBE"]["hit_rate"] == 0.0
+    assert None not in pat["by_tier"]  # untiered call excluded, no crash
+
+
+def test_k4_action_item_reports_scored_over_raw_not_raw_alone(tmp_path: Path):
+    """K4 fix: 'TSLA: 0% over 7 calls' when only 1 was scored is the
+    overfitting trap the 2026-07-02 June review flagged — S1 must show
+    scored/raw, and the ≥3 threshold gates on SCORED count."""
+    base = date(2026, 5, 1)
+    # 1 scored (WRONG) + 2 UNKNOWN (missing spot at horizon) => below the
+    # PATTERN_MIN_SCORED=3 gate, so no S-item should fire at all.
+    spot = {"TSLA": {base: 100.0, _horizon_date(base, 21): 90.0}}
+    archive = tmp_path / "private"
+    archive.mkdir()
+    for i in range(3):
+        _write_archive(
+            archive,
+            name=f"tsla-{i}.md",
+            ticker="TSLA",
+            date_iso=(base + timedelta(days=7 * i)).isoformat(),
+            structures=["long_call"],
+        )
+    report = run_review(
+        window="monthly",
+        today=base + timedelta(days=14),
+        archive_dir=archive,
+        spot_history=spot,  # only base has spot data -> other 2 calls UNKNOWN
+        iv_rank_history=None,
+        trades=[],
+        trade_sources=[],
+        write_back=False,
+        generate_drafts=False,
+    )
+    s_items = [i for i in report.action_items if i["id"].startswith("S")]
+    assert s_items == []  # 1 scored < PATTERN_MIN_SCORED=3 -> ticker excluded

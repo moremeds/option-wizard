@@ -98,6 +98,29 @@ The framework recognizes three types. **Source is `references/private/{ticker,ma
 **FCN / AQ / DQ structure recommendations are filtered out** at the
 extraction stage — they live in PB workflows.
 
+### Extraction precedence: structured `calls:` vs prose (U2, 2026-07-02)
+
+Two extraction paths, in priority order:
+
+1. **Structured `calls:` frontmatter** (SKILL.md §"Reporting & archive") —
+   explicit `ticker|call_type|direction|structure|tier|crowding_flags|opposite_case_first`
+   entries written when the archive is saved from a 决策块. Carries the
+   decision-doctrine `tier` and crowding-check outcome that prose can
+   never recover. When the `calls` key is present (even `calls: []`), it
+   takes **full precedence** for that file — the prose branch below never
+   runs, including for multi-ticker files.
+2. **Prose classification** (legacy / pre-doctrine archives) — keyword
+   scan over the structure tag or TL;DR text, as documented below. This
+   is a fallback, not the source of truth: it misclassifies mixed-language
+   calls (e.g. a "lock in roll profit" call scored as a pure directional
+   bet — see the 2026-07-01 skill-audit archive's TSLA 6/3 case) and
+   cannot carry `tier` at all.
+
+Malformed `calls:` entries (wrong field count, unknown `call_type` /
+`tier`, unparseable direction) are never silently dropped — they land in
+`skipped_archives` with the parse reason, same discipline as a missing
+frontmatter field.
+
 > ¹ **Markout-truth fetch path (read before quoting any spot).**
 > `opencli tradingview` exposes only a live `quote` (current spot) — it has
 > **no historical-bars command** — and its desktop CDP session is often
@@ -397,12 +420,19 @@ Weekly reviews skip this — sample too small. Monthly reviews aggregate:
 | Breakdown | Computed |
 |---|---|
 | Hit rate by call type | `% CORRECT` for directional / vol regime / structure each |
-| Hit rate by ticker | Tickers with ≥3 calls in window: per-ticker correct% |
+| Hit rate by ticker | Tickers with ≥`PATTERN_MIN_SCORED` (3) **scored** calls in window: per-ticker correct% |
+| Hit rate by aggression tier (U2) | Tiers with ≥`PATTERN_MIN_SCORED` (3) scored calls: per-tier correct% — structured `calls:` frontmatter only, answers "does higher conviction actually perform better?" |
 | Hit rate by vol regime | Hit rate when analysis labeled RICH vs NEUTRAL vs CHEAP |
 | Hit rate by data source | Hit rate when call rested primarily on UW signal vs TV chart vs IB account state |
 
-Outliers (e.g., TSLA at 0% hit rate over 4 calls; CHEAP regime at 80%
-hit rate vs RICH at 30%) get flagged in action items as candidates for
+Every breakdown reports both `n` (raw calls) and `n_scored` (excludes
+UNKNOWN/NEUTRAL) — the grouping threshold gates on `n_scored`, not `n`.
+This closes a 2026-07-02 overfitting trap: a ticker showing "0% hit rate
+over 7 calls" had only 1 scored call and 6 still UNKNOWN (T+21 hadn't
+matured) — the other 6 were noise, not evidence.
+
+Outliers (e.g., TSLA at 0% hit rate over 4 scored calls; CHEAP regime at
+80% hit rate vs RICH at 30%) get flagged in action items as candidates for
 rule additions or pitfall promotion.
 
 ## Output structure (4 stages, mirrors book-review)

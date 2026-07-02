@@ -55,6 +55,19 @@ OUT_OF_SCOPE_STRUCTURE_TAGS: frozenset[str] = frozenset(
     {"fcn", "aq", "dq", "accumulator", "decumulator", "eln"}
 )
 
+# Valid call_type / aggression-tier vocab for structured `calls:` frontmatter
+# entries (U2, decision-doctrine.md §"Aggression tiers").
+CALL_TYPES: frozenset[str] = frozenset({"directional", "vol_regime", "structure"})
+TIER_VALUES: frozenset[str] = frozenset(
+    {"NO_TRADE", "PROBE", "SMALL", "NORMAL", "HIGH_CONVICTION", "EXCEPTIONAL"}
+)
+
+# Minimum SCORED calls (CORRECT/WRONG, excludes UNKNOWN/NEUTRAL) before a
+# by-ticker / by-tier hit rate is reported — guards against the "TSLA: 0%
+# over 7 calls" overfitting trap observed 2026-07-02, where only 1 of 7
+# calls actually had a verdict.
+PATTERN_MIN_SCORED = 3
+
 # Structure → direction sign convention. +1 long delta / -1 short delta / 0 range.
 STRUCTURE_DIRECTION: dict[str, int] = {
     "csp": +1,
@@ -112,7 +125,15 @@ VOL_REGIME_CHEAP_KEYWORDS = ("cheap", "buy premium", "long vol", "vol expansion"
 
 @dataclass(frozen=True)
 class Call:
-    """One falsifiable claim extracted from an archived analysis."""
+    """One falsifiable claim extracted from an archived analysis.
+
+    `tier` / `crowding_flags` / `opposite_case_first` (U2, 2026-07-02) are
+    populated only when the archive uses the structured `calls:` frontmatter
+    (see `parse_structured_calls`); prose-classified calls leave them None.
+    They let pattern analysis answer decision-doctrine questions the prose
+    extractor never could: "did the PROBE-tier calls actually underperform
+    HIGH_CONVICTION?", "does the crowding check improve hit rate?".
+    """
 
     ticker: str
     analysis_date: date
@@ -121,6 +142,9 @@ class Call:
     structure: str | None  # e.g. "bull_put_spread"; None for non-structure types
     archive_path: Path
     notes: str  # excerpt from TL;DR / Decision for traceability
+    tier: str | None = None  # aggression tier at time of call, e.g. "PROBE"
+    crowding_flags: int | None = None  # count of crowding-check flags that fired
+    opposite_case_first: bool | None = None  # crowding check forced opposite-case-first
 
     @property
     def archive_stem(self) -> str:
@@ -306,6 +330,95 @@ def _extract_notes(body: str) -> str:
     return first_para.replace("\n", " ").strip()[:200]
 
 
+# --- Structured `calls:` frontmatter (U2) ----------------------------
+#
+# Prose classification (`_classify_directional` / `_classify_vol_regime`)
+# is a keyword-scan fallback that misreads mixed-language calls (a "roll
+# judgment" call scored as directional), false-ticker rows from
+# multi-ticker book reviews, and can't carry the decision-doctrine tier /
+# crowding-check fields at all. Archives written after 2026-07-02 should
+# declare calls explicitly:
+#
+#   calls: ["NVDA|structure|-1|bull_put_spread|PROBE|3|true", "TSLA|directional|+1|||NORMAL|0|false"]
+#
+# Field order: ticker|call_type|direction|structure|tier|crowding_flags|opposite_case_first
+# `structure` / `tier` / `crowding_flags` / `opposite_case_first` may be
+# empty. When the `calls` key is present (even as `[]`), it takes full
+# precedence over the structure-tag and prose branches for that file.
+
+
+def _parse_one_structured_call(
+    raw: str,
+    *,
+    analysis_date: date,
+    archive_path: Path,
+    notes: str,
+) -> tuple[Call | None, str | None]:
+    """Parse one `calls:` entry. Returns (Call, None) or (None, reason)."""
+    parts = [p.strip() for p in raw.split("|")]
+    if len(parts) != 7:
+        return (
+            None,
+            f"malformed calls entry (want 7 |-separated fields, got {len(parts)}): {raw!r}",
+        )
+    ticker, call_type, direction_s, structure_s, tier, flags_s, opp_s = parts
+    if not ticker:
+        return None, f"calls entry missing ticker: {raw!r}"
+    if call_type not in CALL_TYPES:
+        return None, f"calls entry unknown call_type {call_type!r}: {raw!r}"
+    try:
+        direction = int(direction_s)
+    except ValueError:
+        return None, f"calls entry unparseable direction {direction_s!r}: {raw!r}"
+    if direction not in (-1, 0, 1):
+        return None, f"calls entry direction must be -1/0/+1, got {direction}: {raw!r}"
+    if tier and tier not in TIER_VALUES:
+        return None, f"calls entry unknown tier {tier!r}: {raw!r}"
+    try:
+        crowding_flags = int(flags_s) if flags_s else None
+    except ValueError:
+        return None, f"calls entry unparseable crowding_flags {flags_s!r}: {raw!r}"
+    opposite_case_first = opp_s.lower() == "true" if opp_s else None
+    return (
+        Call(
+            ticker=ticker.upper(),
+            analysis_date=analysis_date,
+            call_type=call_type,  # type: ignore[arg-type]
+            direction=direction,
+            structure=structure_s or None,
+            archive_path=archive_path,
+            notes=notes,
+            tier=tier or None,
+            crowding_flags=crowding_flags,
+            opposite_case_first=opposite_case_first,
+        ),
+        None,
+    )
+
+
+def parse_structured_calls(
+    raw_calls: list[str] | str,
+    *,
+    analysis_date: date,
+    archive_path: Path,
+    notes: str,
+) -> tuple[list[Call], list[str]]:
+    """Parse a `calls:` frontmatter value into (calls, malformed_reasons)."""
+    if isinstance(raw_calls, str):
+        raw_calls = [raw_calls]
+    calls: list[Call] = []
+    reasons: list[str] = []
+    for raw in raw_calls:
+        call, reason = _parse_one_structured_call(
+            raw, analysis_date=analysis_date, archive_path=archive_path, notes=notes
+        )
+        if call is None:
+            reasons.append(reason or f"malformed calls entry: {raw!r}")
+        else:
+            calls.append(call)
+    return calls, reasons
+
+
 # --- Active vs cold archive iteration -------------------------------
 #
 # Hard rule #9 + 30-day TTL: active subtree is `references/private/{ticker,
@@ -382,6 +495,19 @@ def extract_calls_from_archive(
             continue
         body = text[len(_FRONTMATTER_RE.match(text).group(0)) :]  # type: ignore[union-attr]
         notes = _extract_notes(body)
+        if "calls" in fm:
+            # Structured calls (U2) take full precedence over the
+            # structure-tag and prose branches below for this file.
+            file_calls, malformed = parse_structured_calls(
+                fm["calls"],
+                analysis_date=analysis_date,
+                archive_path=md_path,
+                notes=notes,
+            )
+            calls.extend(file_calls)
+            for reason in malformed:
+                skipped.append({"file": md_path.name, "reason": reason})
+            continue
         structures = fm.get("structures", [])
         if isinstance(structures, str):
             structures = [structures]
@@ -826,31 +952,64 @@ def aggregate_trade_markout(
 # --- Pattern analysis (monthly only) --------------------------------
 
 
+def _scored(items: list[CallMarkout]) -> list[CallMarkout]:
+    return [cm for cm in items if cm.verdict in ("CORRECT", "WRONG")]
+
+
+def _hit_rate(items: list[CallMarkout]) -> float | None:
+    scored = _scored(items)
+    if not scored:
+        return None
+    return sum(1 for cm in scored if cm.verdict == "CORRECT") / len(scored)
+
+
 def detect_pattern_anomalies(
     call_markouts: list[CallMarkout],
 ) -> dict[str, Any]:
-    """Hit rate breakdowns by call type / ticker / direction. Monthly only."""
+    """Hit rate breakdowns by call type / ticker / tier. Monthly only.
 
-    def hit_rate(items: list[CallMarkout]) -> float | None:
-        scored = [cm for cm in items if cm.verdict in ("CORRECT", "WRONG")]
-        if not scored:
-            return None
-        return sum(1 for cm in scored if cm.verdict == "CORRECT") / len(scored)
-
+    Every breakdown carries both `n` (raw calls) and `n_scored`
+    (CORRECT/WRONG only, excludes UNKNOWN/NEUTRAL) — `n` alone hid the
+    2026-07-02 overfitting trap where "TSLA: 0% over 7 calls" meant 1
+    scored call and 6 UNKNOWN (T+21 not yet matured). Grouping thresholds
+    gate on `n_scored`, not `n`.
+    """
     by_type: dict[str, dict[str, Any]] = {}
     for ct in ("directional", "vol_regime", "structure"):
         sub = [cm for cm in call_markouts if cm.call.call_type == ct]
-        by_type[ct] = {"n": len(sub), "hit_rate": hit_rate(sub)}
+        by_type[ct] = {
+            "n": len(sub),
+            "n_scored": len(_scored(sub)),
+            "hit_rate": _hit_rate(sub),
+        }
 
-    # By ticker (only tickers with ≥3 calls).
+    # By ticker (only tickers with ≥PATTERN_MIN_SCORED SCORED calls).
     by_ticker: dict[str, dict[str, Any]] = {}
     tickers = sorted({cm.call.ticker for cm in call_markouts})
     for tk in tickers:
         sub = [cm for cm in call_markouts if cm.call.ticker == tk]
-        if len(sub) >= 3:
-            by_ticker[tk] = {"n": len(sub), "hit_rate": hit_rate(sub)}
+        if len(_scored(sub)) >= PATTERN_MIN_SCORED:
+            by_ticker[tk] = {
+                "n": len(sub),
+                "n_scored": len(_scored(sub)),
+                "hit_rate": _hit_rate(sub),
+            }
 
-    return {"by_call_type": by_type, "by_ticker_min3": by_ticker}
+    # By aggression tier (U2) — only calls extracted from structured
+    # `calls:` frontmatter carry a tier; prose-classified calls are
+    # excluded here (their tier is unknown, not NO_TRADE).
+    by_tier: dict[str, dict[str, Any]] = {}
+    tiers = sorted({cm.call.tier for cm in call_markouts if cm.call.tier})
+    for tier in tiers:
+        sub = [cm for cm in call_markouts if cm.call.tier == tier]
+        if len(_scored(sub)) >= PATTERN_MIN_SCORED:
+            by_tier[tier] = {
+                "n": len(sub),
+                "n_scored": len(_scored(sub)),
+                "hit_rate": _hit_rate(sub),
+            }
+
+    return {"by_call_type": by_type, "by_ticker_min3": by_ticker, "by_tier": by_tier}
 
 
 # --- Action items + pitfall drafts ----------------------------------
@@ -869,7 +1028,8 @@ def generate_action_items(report: ReviewReport) -> list[dict[str, str]]:
                     {
                         "id": f"S{counter['S']}",
                         "desc": (
-                            f"Ticker {tk}: hit rate {hit:.0%} over {stats['n']} calls — "
+                            f"Ticker {tk}: hit rate {hit:.0%} over "
+                            f"{stats['n_scored']}/{stats['n']} scored calls — "
                             f"flag for skill-level downweight rule on directional signals for {tk}"
                         ),
                         "trigger": f"S{counter['S']} add",
@@ -1189,15 +1349,32 @@ def render_report(report: ReviewReport) -> str:
         for ct, stats in bt.items():
             hit = stats.get("hit_rate")
             hit_s = f"{hit:.0%}" if hit is not None else "n/a"
-            lines.append(f"- {ct}: {stats['n']} calls, hit rate {hit_s}")
+            lines.append(
+                f"- {ct}: {stats['n_scored']}/{stats['n']} scored, hit rate {hit_s}"
+            )
         lines.append("")
         bk = report.pattern_analysis.get("by_ticker_min3", {})
         if bk:
-            lines.append("**By ticker (≥3 calls):**")
+            lines.append(f"**By ticker (≥{PATTERN_MIN_SCORED} scored calls):**")
             for tk, stats in bk.items():
                 hit = stats.get("hit_rate")
                 hit_s = f"{hit:.0%}" if hit is not None else "n/a"
-                lines.append(f"- {tk}: {stats['n']} calls, hit rate {hit_s}")
+                lines.append(
+                    f"- {tk}: {stats['n_scored']}/{stats['n']} scored, hit rate {hit_s}"
+                )
+            lines.append("")
+        by_tier = report.pattern_analysis.get("by_tier", {})
+        if by_tier:
+            lines.append(
+                f"**By aggression tier (≥{PATTERN_MIN_SCORED} scored calls, "
+                "structured `calls:` frontmatter only):**"
+            )
+            for tier, stats in by_tier.items():
+                hit = stats.get("hit_rate")
+                hit_s = f"{hit:.0%}" if hit is not None else "n/a"
+                lines.append(
+                    f"- {tier}: {stats['n_scored']}/{stats['n']} scored, hit rate {hit_s}"
+                )
             lines.append("")
 
     # Action items.

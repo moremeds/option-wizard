@@ -186,6 +186,13 @@ the next 10 trading days NVDA holds > 165 and tests 175–180, unless 30-day
 IV expands > 5 vol pts" is scoreable. Skip the block only for pure data
 lookups / trivial answers.
 
+**When the analysis gets archived** (trader says "save it"), encode every
+falsifiable claim from the 决策块 as a `calls:` frontmatter entry (SKILL.md
+§"Reporting & archive") carrying `tier` and the crowding-check result —
+this is what lets 复盘 answer "did the PROBE-tier calls underperform
+HIGH_CONVICTION?" and "does the crowding check improve hit rate?" instead
+of only "was the direction right?".
+
 ## What stays fixed vs adaptive
 
 The narrative adapts to the decision — verdict-first for time-critical
