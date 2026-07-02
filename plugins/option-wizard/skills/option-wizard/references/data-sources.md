@@ -41,11 +41,11 @@ every rung fails or returns empty:
 | Spot | TV live → xenon `/market-depth` underlying mid → UW chain `price_data` |
 | Option IV / per-strike greeks | xenon `/options/greeks` → UW `interpolated_iv`/`greeks_by_strike` → ib_insync `reqMktData` |
 | 25Δ skew / IV term | live `/options/greeks` strike+expiry sweep → UW `historical-risk-reversal-skew`/`iv_term_structure` |
-| IV rank / RV | UW (exclusive — no rebuild) |
+| IV rank / RV | UW (exclusive — no rebuild) — for a **historical daily series** (not just today), `iv_rank(ticker)` alone only returns the trailing ~5 rows; walk `_get(f"/api/stock/{t}/iv-rank", params={"date": D})` with `D` stepped weekly across the target window and merge by `date` (see review-framework.md 复盘 Layer A vol-regime markout). This was misdiagnosed as "no historical endpoint exists" in the 2026-07-01 monthly skill audit — the endpoint takes a `date` param, it just wasn't tried. |
 | GEX by strike/expiry/ticker | UW by-strike-expiry → by-strike → by-ticker (exclusive) |
 | Max pain / dark pool / flow | UW (exclusive) |
 | Technicals (RSI/SMA/EMA/MACD/ATR/BBANDS) | TV live **today** — never a converted prior-day value |
-| VIX / VIX9D / VXN | TV exchange codes (`CBOE:VIX`, `CBOE:VIX9D`, `CBOE:VXN`/`NASDAQ:VXN`) → UW → derive front-end IV from `/options/greeks` on SPX/QQQ near-term |
+| VIX / VIX9D / VXN / VVIX | TV exchange codes (`CBOE:VIX`, `CBOE:VIX9D`, `CBOE:VXN`/`NASDAQ:VXN`, `CBOE:VVIX`) → **IB `get_price_history`** (`security_type="IND"`, `exchange="CBOE"`) with `contract_id`: VIX 13455763, **VIX9D 322592334**, **VVIX 105068053**, VXN 13455757 (all `search_contracts security_type=IND` verified live 2026-07-02) → UW → derive front-end IV from `/options/greeks` on SPX/QQQ near-term. This closes the macro-hedge regime-gate gap flagged in the 2026-07-02 macro archive (`snapshot["regime_check"]` in `scripts.macro_hedge::build_macro_hedge` needs vix9d/vvix and only VIX itself was filled — the TV exchange-prefix path fails for these symbols, but IB resolves them directly). |
 | Account / positions / orders / fills | xenon `/portfolio` `/futu/portfolio` `/orders` `/blotter` → IB MCP / Futu CLI fallback |
 
 **Exhaust-before-gap + self-check.** Before writing any "STALE / 未重拉 / gap"

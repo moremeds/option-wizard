@@ -326,13 +326,22 @@ This is the **same** check Workflow 3 (book review) runs in real-time
 hasn't run a book review since the positions were opened still sees
 the regime.
 
-**Mechanics:**
-- Pull `get_chains_for_expiry` for each held expiry (ATM ± 3 strikes
-  is enough — full chain is wasteful here).
-- Extract ATM IV per expiry via
-  `scripts.term_curve.atm_iv_from_chain_rows(rows, spot)`.
-- Label adjacent pairs via
-  `scripts.term_curve.label_regime(atm_iv_by_expiry)` →
+**Mechanics (U4, R6 — `iv_term_structure`-first, chain-pull fallback):**
+- **Primary**: one `UWClient.iv_term_structure(ticker)` call covers the
+  ticker's full listed term structure. Extract ATM IV for the held
+  expiries via `scripts.term_curve.atm_iv_by_expiry_from_term_structure(rows, held_expiries)`
+  — cheaper than pulling a chain per expiry (one API call regardless of
+  how many expiries are held).
+- **Fallback**: any held expiry NOT covered by `iv_term_structure`
+  (observed missing for SPX weeklies like 2026-07-10 / 2026-07-13
+  alongside covered monthlies on the same day) falls back to
+  `get_chains_for_expiry` (ATM ± 3 strikes is enough — full chain is
+  wasteful here) → `scripts.term_curve.atm_iv_from_chain_rows(rows, spot)`.
+  This function auto-pivots the actual MCP per-contract row shape (one
+  row per strike+option_type, single `iv` field) — no manual transform
+  needed.
+- Merge both dicts (term-structure hits ∪ chain-pull fallback hits) and
+  label adjacent pairs via `scripts.term_curve.label_regime(atm_iv_by_expiry)` →
   list of `{from_expiry, to_expiry, iv_from, iv_to, basis, regime}`.
 - Collapse with `scripts.term_curve.summarize_regime(pairs)` →
   one of `all_contango`, `all_inverted`, `all_flat`,

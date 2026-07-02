@@ -180,3 +180,76 @@ def test_atm_iv_raises_on_empty_rows():
 def test_atm_iv_raises_on_non_positive_spot():
     with pytest.raises(ValueError, match="positive"):
         atm_iv_from_chain_rows([{"strike": 100, "call_iv": 0.4}], spot=0)
+
+
+# ---------- atm_iv_from_chain_rows: UW per-contract shape (U4) ----------
+
+
+def test_atm_iv_auto_pivots_uw_per_contract_shape():
+    # get_chains_for_expiry actual shape: one row per (strike, option_type),
+    # strike as string, single `iv` field. Observed live 2026-07-02.
+    rows = [
+        {"strike": "380", "option_type": "call", "iv": 0.35},
+        {"strike": "380", "option_type": "put", "iv": 0.38},
+        {"strike": "390", "option_type": "call", "iv": 0.34},
+        {"strike": "390", "option_type": "put", "iv": 0.36},
+        {"strike": "400", "option_type": "call", "iv": 0.33},
+        {"strike": "400", "option_type": "put", "iv": 0.35},
+    ]
+    assert atm_iv_from_chain_rows(rows, spot=391.0) == pytest.approx(0.35, abs=1e-9)
+
+
+def test_atm_iv_auto_pivot_handles_null_iv_and_missing_side():
+    rows = [
+        {"strike": "100", "option_type": "call", "iv": None},
+        {"strike": "100", "option_type": "put", "iv": 0.42},
+    ]
+    assert atm_iv_from_chain_rows(rows, spot=100) == pytest.approx(0.42, abs=1e-9)
+
+
+def test_atm_iv_wide_shape_still_bypasses_pivot():
+    # rows already carrying call_iv_key must NOT be pivoted (regression
+    # guard: pivot only fires when call_iv_key is absent).
+    rows = [
+        {"strike": 100, "option_type": "call", "call_iv": 0.40, "put_iv": 0.42},
+    ]
+    assert atm_iv_from_chain_rows(rows, spot=100) == pytest.approx(0.41, abs=1e-9)
+
+
+# ---------- atm_iv_by_expiry_from_term_structure (U4 / R6) ----------
+
+
+def test_term_structure_extracts_held_expiries_only():
+    from scripts.term_curve import atm_iv_by_expiry_from_term_structure
+
+    rows = [
+        {"expiry": "2026-07-17", "volatility": "0.368", "dte": 15},
+        {"expiry": "2026-08-21", "volatility": "0.382", "dte": 50},
+        {"expiry": "2026-12-18", "volatility": "0.418", "dte": 169},
+    ]
+    out = atm_iv_by_expiry_from_term_structure(
+        rows, ["2026-07-17", "2026-12-18"]
+    )
+    assert out == {"2026-07-17": 0.368, "2026-12-18": 0.418}
+
+
+def test_term_structure_missing_expiry_simply_absent():
+    from scripts.term_curve import atm_iv_by_expiry_from_term_structure
+
+    rows = [{"expiry": "2026-07-17", "volatility": "0.368", "dte": 15}]
+    out = atm_iv_by_expiry_from_term_structure(
+        rows, ["2026-07-10", "2026-07-17"]
+    )
+    assert out == {"2026-07-17": 0.368}  # 2026-07-10 not in rows -> absent
+
+
+def test_term_structure_result_feeds_label_regime_directly():
+    from scripts.term_curve import atm_iv_by_expiry_from_term_structure
+
+    rows = [
+        {"expiry": "2026-07-17", "volatility": "0.368"},
+        {"expiry": "2026-08-21", "volatility": "0.382"},
+    ]
+    atm = atm_iv_by_expiry_from_term_structure(rows, ["2026-07-17", "2026-08-21"])
+    pairs = label_regime(atm)
+    assert pairs[0]["regime"] == "contango"

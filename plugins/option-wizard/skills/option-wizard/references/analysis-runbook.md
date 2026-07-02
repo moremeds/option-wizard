@@ -157,8 +157,14 @@ as required, not optional.
 **Compute:**
 - ATM IV per expiry = average of ATM call IV and ATM put IV. Use
   `scripts.term_curve.atm_iv_from_chain_rows(rows, spot)` to extract
-  ATM IV from each `get_chains_for_expiry` response (handles
-  single-side fallback + tolerates string-formatted IV fields).
+  ATM IV from each `get_chains_for_expiry` response (auto-pivots the
+  actual per-contract MCP row shape — one row per strike+option_type —
+  and tolerates string-formatted IV fields). When 25Δ skew isn't needed
+  (a term-curve-only check, e.g. Workflow 3/6), prefer
+  `scripts.term_curve.atm_iv_by_expiry_from_term_structure` first — one
+  `iv_term_structure(ticker)` call covers every listed expiry, falling
+  back to the chain pull only for expiries it doesn't carry. See
+  `review-framework.md` §"Open multi-expiry term-curve snapshot".
 - Term-curve labels via **`scripts.term_curve.label_regime(atm_iv_by_expiry)`**
   — returns adjacent-pair labels (`contango` / `flat` / `inverted`) plus
   basis. Use `summarize_regime(pairs)` for a single aggregate label
