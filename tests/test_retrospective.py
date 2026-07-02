@@ -1867,3 +1867,75 @@ def test_render_report_shows_hedge_cost_outlier_table(tmp_path: Path):
     rendered = render_report(report)
     assert "Hedge cost outliers (1" in rendered
     assert "VIX" in rendered
+
+
+# ----- Pass-1 self-review fixes (2026-07-02): save_review_report -----
+
+
+def test_save_review_report_stamps_empty_calls_to_prevent_self_extraction(
+    tmp_path: Path,
+):
+    """Without calls: [], this auto-archived file would itself be swept up
+    by a future extract_calls_from_archive as a garbage 'BOOK' ticker call
+    — exactly the noise class U2 exists to eliminate."""
+    from scripts.retrospective import render_report, save_review_report
+
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="weekly",
+        today=date(2026, 7, 2),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[],
+        trade_sources=[],
+        write_back=False,
+        generate_drafts=False,
+    )
+    saved = save_review_report(report, render_report(report), base_dir=archive)
+    assert "calls: []" in saved.read_text(encoding="utf-8")
+
+    # Confirm the self-extraction guard actually works end to end: a
+    # subsequent extraction sweep over the SAME archive must not pick up
+    # this file as a Call at all.
+    calls, skipped = extract_calls_from_archive(
+        archive, date(2026, 6, 25), date(2026, 7, 3)
+    )
+    assert calls == []
+    assert skipped == []
+
+
+def test_save_review_report_preserves_hand_edited_outcome_on_rerun(tmp_path: Path):
+    """A same-day re-run (e.g. after fixing a data gap) must not clobber
+    Outcome/Lesson notes the trader already hand-wrote into the auto-
+    archived file — only the auto-generated body above it refreshes."""
+    from scripts.retrospective import save_review_report
+
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="weekly",
+        today=date(2026, 7, 2),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[],
+        trade_sources=[],
+        write_back=False,
+        generate_drafts=False,
+    )
+    path = save_review_report(report, "first render", base_dir=archive)
+    # Simulate the trader hand-editing the Outcome/Lesson section in place.
+    text = path.read_text(encoding="utf-8")
+    text = text.replace(
+        "_(auto-archived — trader fills in)_",
+        "交易者手动记录：这周判断偏乐观，实际打脸。",
+    )
+    path.write_text(text, encoding="utf-8")
+
+    saved2 = save_review_report(report, "second render (data gap fixed)", base_dir=archive)
+    final = saved2.read_text(encoding="utf-8")
+    assert "second render (data gap fixed)" in final
+    assert "交易者手动记录：这周判断偏乐观，实际打脸。" in final
+    assert "first render" not in final

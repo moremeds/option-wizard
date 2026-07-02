@@ -1911,7 +1911,19 @@ def save_review_report(
     monthly cadence (facts pass early in the month, T+21-matured verdict
     backfill pass later) produces two DIFFERENT dates in practice, but a
     same-day re-run (e.g. re-running after fixing a data gap) should
-    replace, not duplicate.
+    replace, not duplicate. A pre-existing file's `## Outcome / Lesson`
+    content (the trader's own hand-filled notes, per SKILL.md's archive
+    convention) is preserved verbatim across an overwrite — only the
+    auto-generated body above it is refreshed.
+
+    Stamps `calls: []` (U2) into the frontmatter — WITHOUT it, this
+    auto-archived report would itself be picked up by a future
+    `extract_calls_from_archive` sweep (nothing in `_is_in_scope` blocks
+    `structures: [retrospective]`) and prose-classified into a garbage
+    "BOOK" ticker call from keywords inside its own rendered tables —
+    exactly the noise 28 of the June review's original 67 calls turned
+    out to be. `calls: []` short-circuits that entirely (see
+    `extract_calls_from_archive`'s `"calls" in fm` precedence check).
     """
     root = base_dir or (
         Path(__file__).resolve().parent.parent / "references" / "private"
@@ -1929,10 +1941,18 @@ def save_review_report(
         "result: pending\n"
         "structures: [retrospective]\n"
         f"tags: [{report.window}-review, auto-archived]\n"
+        "calls: []\n"
         "---\n\n"
     )
     body = rendered
-    if "## Outcome / Lesson" not in body:
+    existing_outcome = None
+    if path.exists():
+        match = _OUTCOME_HEADER_RE.search(path.read_text(encoding="utf-8"))
+        if match:
+            existing_outcome = path.read_text(encoding="utf-8")[match.start() :]
+    if existing_outcome:
+        body += f"\n\n{existing_outcome}"
+    elif "## Outcome / Lesson" not in body:
         body += "\n\n## Outcome / Lesson\n\n_(auto-archived — trader fills in)_\n"
     path.write_text(frontmatter + body, encoding="utf-8")
     return path
