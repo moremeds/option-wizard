@@ -1939,3 +1939,27 @@ def test_save_review_report_preserves_hand_edited_outcome_on_rerun(tmp_path: Pat
     assert "second render (data gap fixed)" in final
     assert "交易者手动记录：这周判断偏乐观，实际打脸。" in final
     assert "first render" not in final
+
+
+# ----- Pass-2 codex-review fixes (2026-07-02): realized_pnl_by_currency -----
+
+
+def test_realized_pnl_by_currency_counts_exact_zero_close():
+    """A genuine break-even close (realized_pnl == 0.0) is still a real
+    closing trade — truthiness silently dropped it (codex-review finding)."""
+    from scripts.retrospective import realized_pnl_by_currency
+
+    trades = [
+        Trade(
+            ticker="QQQ", trade_date=date(2026, 6, 5), side="SELL",
+            quantity=1, fill_price=5.0, contract_type="OPT",
+            option_meta=None, realized_pnl=0.0, currency="USD",
+        ),
+        Trade(
+            ticker="SPY", trade_date=date(2026, 6, 5), side="SELL",
+            quantity=1, fill_price=5.0, contract_type="OPT",
+            option_meta=None, realized_pnl=None, currency="USD",  # opening leg
+        ),
+    ]
+    out = realized_pnl_by_currency(trades)
+    assert out == {"USD": {"realized": 0.0, "n_closes": 1}}

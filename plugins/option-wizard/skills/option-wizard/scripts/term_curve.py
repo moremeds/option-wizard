@@ -139,7 +139,9 @@ def summarize_regime(pairs: Iterable[dict]) -> str:
     return "mixed_with_flat"
 
 
-def _pivot_uw_contract_rows(rows: list[dict], *, strike_key: str) -> list[dict]:
+def _pivot_uw_contract_rows(
+    rows: list[dict], *, strike_key: str, call_iv_key: str, put_iv_key: str
+) -> list[dict]:
     """Pivot per-contract chain rows into the per-strike {call_iv, put_iv}
     shape `atm_iv_from_chain_rows` expects.
 
@@ -149,6 +151,12 @@ def _pivot_uw_contract_rows(rows: list[dict], *, strike_key: str) -> list[dict]:
     not the {strike, call_iv, put_iv} wide shape this module was designed
     against. Observed live 2026-07-02: every caller had to hand-write this
     same defaultdict pivot before the ATM lookup worked at all.
+
+    Writes into `call_iv_key`/`put_iv_key` (Pass-2 codex-review fix,
+    2026-07-02) rather than hardcoded `"call_iv"`/`"put_iv"` — a caller
+    combining custom key names with per-contract-shaped rows previously
+    got a silent `None` back: the pivot wrote hardcoded keys, then the
+    caller's lookup under its own custom key names found nothing.
     """
     by_strike: dict[float, dict] = {}
     for r in rows:
@@ -159,9 +167,9 @@ def _pivot_uw_contract_rows(rows: list[dict], *, strike_key: str) -> list[dict]:
             continue
         side = str(r.get("option_type", "")).lower()
         key = (
-            "call_iv"
+            call_iv_key
             if side.startswith("c")
-            else "put_iv"
+            else put_iv_key
             if side.startswith("p")
             else None
         )
@@ -209,7 +217,9 @@ def atm_iv_from_chain_rows(
         raise ValueError(f"spot must be positive; got {spot}")
 
     if "option_type" in rows[0] and call_iv_key not in rows[0]:
-        rows = _pivot_uw_contract_rows(rows, strike_key=strike_key)
+        rows = _pivot_uw_contract_rows(
+            rows, strike_key=strike_key, call_iv_key=call_iv_key, put_iv_key=put_iv_key
+        )
 
     def _strike(row: dict) -> float:
         return float(row[strike_key])

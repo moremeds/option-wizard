@@ -938,10 +938,16 @@ def realized_pnl_by_currency(trades: list[Trade]) -> dict[str, dict[str, Any]]:
     IB June 2026 at "−$1,056,703" (actually −1,069,456 KRW + $12,673 USD).
     Callers report each currency separately; FX conversion is out of scope
     (no fabricated rates).
+
+    Checks `is not None`, not truthiness (Pass-2 codex-review fix,
+    2026-07-02): a genuine break-even close carries `realized_pnl == 0.0`,
+    which is a real closing trade — truthiness silently dropped it from
+    both the sum and `n_closes`, undercounting the window's actual close
+    count with no error or gap notice.
     """
     out: dict[str, dict[str, Any]] = {}
     for t in trades:
-        if t.realized_pnl:
+        if t.realized_pnl is not None:
             row = out.setdefault(t.currency, {"realized": 0.0, "n_closes": 0})
             row["realized"] += t.realized_pnl
             row["n_closes"] += 1

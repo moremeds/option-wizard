@@ -70,7 +70,17 @@ def append_entry(
     due: date | None = None,
     source_file: str | None = None,
 ) -> dict[str, Any]:
-    """Create one open ledger entry and append it to `path`. Returns the entry."""
+    """Create one open ledger entry and append it to `path`. Returns the entry.
+
+    ponytail: unsynchronized read-modify-write — two concurrent callers
+    can both read the same `entries` before either writes and compute the
+    same next id, or `set_status`'s read-all/rewrite-all can clobber a
+    line another process just appended. Acceptable for a single trader's
+    single interactive session (this tool's only real usage pattern);
+    add a file lock (e.g. `filelock`) if a second concurrent writer ever
+    becomes real — flagged independently by Pass-2 codex-review,
+    2026-07-02.
+    """
     entries = load_ledger(path)
     entry = {
         "id": _next_id(entries),

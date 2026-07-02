@@ -253,3 +253,20 @@ def test_term_structure_result_feeds_label_regime_directly():
     atm = atm_iv_by_expiry_from_term_structure(rows, ["2026-07-17", "2026-08-21"])
     pairs = label_regime(atm)
     assert pairs[0]["regime"] == "contango"
+
+
+# ---------- Pass-2 codex-review fix: pivot honors custom key names ----------
+
+
+def test_atm_iv_auto_pivot_honors_custom_call_put_keys():
+    # Custom key names combined with per-contract-shaped rows previously
+    # returned None: the pivot always wrote hardcoded call_iv/put_iv, so
+    # the caller's lookup under cIV/pIV found nothing (codex-review finding).
+    rows = [
+        {"k": "390", "option_type": "call", "iv": 0.34},
+        {"k": "390", "option_type": "put", "iv": 0.36},
+    ]
+    out = atm_iv_from_chain_rows(
+        rows, spot=390, strike_key="k", call_iv_key="cIV", put_iv_key="pIV"
+    )
+    assert out == pytest.approx(0.35, abs=1e-9)
