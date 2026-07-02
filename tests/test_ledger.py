@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from scripts.ledger import (
     append_entry,
+    default_ledger_path,
     load_ledger,
     open_items,
     overdue_items,
@@ -17,6 +18,18 @@ from scripts.ledger import (
     render_open_items_block,
     set_status,
 )
+
+
+def test_default_ledger_path_resolves_under_references_private(tmp_path: Path):
+    # Pass-2 codex-review coverage gap: the untested failure mode is
+    # resolving to the wrong repo/private path. skill_root is two parents
+    # up from scripts/ledger.py — assert the resolved path actually lands
+    # in that skill's references/private/, not some other directory.
+    path = default_ledger_path()
+    assert path.name == "ledger.jsonl"
+    assert path.parent.name == "private"
+    assert path.parent.parent.name == "references"
+    assert path.parent.parent.parent.name == "option-wizard"
 
 
 def test_load_ledger_missing_file_returns_empty(tmp_path: Path):
