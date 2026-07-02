@@ -44,10 +44,21 @@ def load_ledger(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     out: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = line.strip()
-        if line:
+        if not line:
+            continue
+        try:
             out.append(json.loads(line))
+        except json.JSONDecodeError as e:
+            # Point at the exact bad line (Pass-3 adversarial finding,
+            # 2026-07-02) — a bare JSONDecodeError from manage_positions.py's
+            # daily scan would otherwise surface as an unattributed
+            # traceback with no indication which of N ledger lines broke.
+            raise ValueError(
+                f"{path}:{lineno}: malformed ledger entry — {e}. "
+                "Fix or remove this line; other entries are unaffected."
+            ) from e
     return out
 
 

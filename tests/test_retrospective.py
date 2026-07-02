@@ -1963,3 +1963,30 @@ def test_realized_pnl_by_currency_counts_exact_zero_close():
     ]
     out = realized_pnl_by_currency(trades)
     assert out == {"USD": {"realized": 0.0, "n_closes": 1}}
+
+
+# ----- Pass-3 adversarial: unbracketed single calls: scalar -----
+
+
+def test_structured_calls_unbracketed_single_entry_still_parses(tmp_path: Path):
+    """calls: "TICKER|..." (no [] brackets) hits parse_archive_frontmatter's
+    scalar branch, not the inline-list branch — confirm the str path in
+    parse_structured_calls handles it (a plausible single-call archive)."""
+    p = tmp_path / "single-call.md"
+    p.write_text(
+        "---\n"
+        "ticker: NVDA\n"
+        "date: 2026-07-02\n"
+        "structures: []\n"
+        "tags: []\n"
+        'calls: "NVDA|directional|+1||PROBE|0|false"\n'
+        "---\n"
+        "body\n",
+        encoding="utf-8",
+    )
+    calls, skipped = extract_calls_from_archive(
+        tmp_path, date(2026, 7, 1), date(2026, 7, 3)
+    )
+    assert skipped == []
+    assert len(calls) == 1
+    assert calls[0].ticker == "NVDA" and calls[0].tier == "PROBE"

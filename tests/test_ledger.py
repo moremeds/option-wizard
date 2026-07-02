@@ -182,3 +182,12 @@ def test_render_ledger_section_flags_overdue(tmp_path: Path):
 def test_render_ledger_section_no_open_items(tmp_path: Path):
     section = render_ledger_section([], date(2026, 7, 2))
     assert "(no open items)" in section
+
+
+def test_load_ledger_malformed_line_raises_with_location(tmp_path: Path):
+    # Pass-3 adversarial finding: a bare JSONDecodeError gave no line
+    # number, unattributable in manage_positions.py's daily scan output.
+    path = tmp_path / "ledger.jsonl"
+    path.write_text('{"id": "L1", "status": "open"}\nnot valid json\n')
+    with pytest.raises(ValueError, match=r"ledger\.jsonl:2: malformed"):
+        load_ledger(path)
