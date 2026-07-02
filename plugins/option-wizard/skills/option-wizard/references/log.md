@@ -10,6 +10,53 @@ timestamp: 2026-07-02T02:20:29Z
 
 OKF reserved `log.md` — chronological history of this knowledge bundle, most recent first. Seeded from git history; append a dated entry whenever you add or materially revise a concept (see [`OKF.md`](OKF.md) conformance checklist). For the full commit-level history, `git log -- plugins/option-wizard/skills/option-wizard/references/`.
 
+## 2026-07-02 — Review-loop upgrade (U1–U6)
+
+Live-tested the day-old decision-doctrine (below) on NVDA + macro
+analyses, then ran the first full June monthly 复盘 — surfacing six
+distinct fix targets, closed in dependency order (U1 → U6):
+
+- **U1** (`fix(retrospective)`, `9aee56f`) — four Layer-mechanics bugs
+  the June run tripped: `write_back_outcome` / pitfall-draft filenames
+  keyed by archive-stem only (multi-ticker archives lost all but the
+  first call's verdict / collapsed WRONG drafts into one file);
+  `parse_futu_trades` gained `min_lookback_days` (a `--range 1m` report
+  sign-flipped June's realized P&L, −$9.9k vs the true +$9.7k, by
+  dropping 39 cross-month pairs); `Trade.currency` + `realized_pnl_by_currency`
+  (IB returns KRW `realized_pnl` unconverted, polluting a naive USD sum).
+- **U2** (`feat(retrospective)`, `eeff01c`) — structured `calls:`
+  frontmatter (`ticker|type|dir|structure|tier|crowding_flags|opposite_case_first`)
+  takes precedence over prose keyword classification, carrying the
+  decision-doctrine `tier` prose can't recover; `detect_pattern_anomalies`
+  now reports `n_scored` alongside `n` and gates grouping thresholds on
+  it (closes an overfitting trap: "TSLA 0% over 7 calls" meant 1 scored
+  call and 6 still UNKNOWN); new by-tier hit-rate breakdown.
+- **U3** (`feat(ledger)`, `8b57a0b`) — `scripts/ledger.py`: a JSONL
+  decision ledger for action items that don't close the loop in-session
+  (archived analyses found a "should roll down" call still open a week
+  later, rescued only by a rally). Surfaces at the top of the daily
+  `manage_positions` scan and 复盘's own report.
+- **U4** (`fix(term-curve)`, `5f68d63`) — `atm_iv_from_chain_rows`
+  auto-pivots the actual `get_chains_for_expiry` per-contract row shape
+  (every live caller this session hand-wrote the same pivot first); new
+  `atm_iv_by_expiry_from_term_structure` (one `iv_term_structure` call
+  covers a ticker's full listed term structure, cheaper than a
+  chain-pull per held expiry); VIX9D/VVIX IB contract ids documented
+  (TV's exchange-prefix path fails for both).
+- **U5** (`feat(retrospective)`, `b52fcc0`) — `save_review_report`
+  auto-archives the rendered 复盘 report by default (a 2026-06-14 weekly
+  review drove real code fixes but was never saved — permanently
+  unrecoverable beyond the commit message); documents the two-pass
+  monthly cadence (facts pass at month-start, T+21-matured verdict
+  backfill pass ~3 weeks later — a monthly review run on the 1st can't
+  score most of the month's directional calls regardless of data quality).
+- **U6** (`feat(retrospective)`, `8ec191f`) — `flag_hedge_cost_outliers`:
+  retroactive reverse cost-cap check on Layer B BUY option legs that
+  read as long insurance, catching hedges placed manually (bypassing
+  `build_macro_hedge`'s `max_annual_cost_pct` enforcement entirely —
+  the mechanism behind a real ~8% NLV VIX call spread the 2026-07-01
+  monthly skill audit found).
+
 ## 2026-07-02 — Decision doctrine
 
 - Added [`decision-doctrine.md`](decision-doctrine.md): reasoning phases (competing hypotheses → disconfirmation → ≥2-structure comparison), aggression tiers with 9 alignment conditions (max loss hard-capped at **5% NLV at every tier**, per trader decision), mandatory contrarian crowding check, dynamic risk re-rating, 12-class missing-data taxonomy, adversarial QC checklist, and the 决策块 final decision block. Distilled from the trader's "ultimate market-structure agent" prompt; conflicts resolved in favor of hard rules #3 / #8 / #9 (fixed skeletons and 复盘 source separation stay).
