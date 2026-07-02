@@ -361,8 +361,13 @@ Mark this row `skipped` in the Layer Coverage table when not run, or `n/a` for t
 - Catalyst clearance (Layer 5)
 - Fundamentals conviction (Layer 5.5, if run) — sizing band + structure-tightening modifier
 
-**Decision:** map onto the regime × structure matrix in
-`references/strategies.md`. Then:
+**Decision:** this layer is where `references/decision-doctrine.md`
+(hard rule #10) fires. Before touching the matrix, run doctrine Phase C
+(competing hypotheses: bull / base / bear / vol-up / vol-down / no-trade)
+and Phase D (disconfirmation + crowding check — one-sided consensus means
+the opposite case is written first) on the evidence from Layers 1–5.5.
+Then map onto the regime × structure matrix in `references/strategies.md`
+and:
 
 1. Run the **4-signal bullish veto check** (`strategies.md` §"Strong
    bullish conviction veto"):
@@ -383,10 +388,21 @@ Mark this row `skipped` in the Layer Coverage table when not run, or `n/a` for t
 3. Pick **expiry** at 30-45 DTE, pre-catalyst, with the 21 DTE review
    date falling on a stable session.
 
-4. Pick **size** = min of:
-   - 2-5% of NLV at max loss
+4. Compare **≥2 economically distinct structures** (doctrine Phase E) —
+   direction/Δ, convexity, θ, vega, capital, max loss, catalyst
+   sensitivity, portfolio fit — and name the losing alternative in the
+   output.
+
+5. Pick **size** via the aggression tier (doctrine Phase F: PROBE ≤1% /
+   SMALL 1–2% / NORMAL 2–3.5% / HIGH_CONVICTION 3.5–5% / EXCEPTIONAL 5%
+   hard cap, of NLV at max loss), then take min of:
+   - tier band % of NLV at max loss
    - 25% of `AvailableFunds`
    - integer position respecting margin reserve after entry
+
+6. Close the analysis with the **决策块 decision block** (doctrine
+   template — includes 进攻程度 tier, 失效条件, 数据可信度) before
+   offering the Layer 7 preflight.
 
 ---
 

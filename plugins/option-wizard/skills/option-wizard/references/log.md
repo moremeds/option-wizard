@@ -3,12 +3,18 @@ type: Changelog
 title: option-wizard Knowledge Base — Change Log
 description: Chronological history of the option-wizard reference bundle — frameworks, runbooks, pitfalls, and case studies added over time.
 tags: [log, changelog, history]
-timestamp: 2026-06-22T15:49:54Z
+timestamp: 2026-07-02T02:20:29Z
 ---
 
 # Change Log
 
 OKF reserved `log.md` — chronological history of this knowledge bundle, most recent first. Seeded from git history; append a dated entry whenever you add or materially revise a concept (see [`OKF.md`](OKF.md) conformance checklist). For the full commit-level history, `git log -- plugins/option-wizard/skills/option-wizard/references/`.
+
+## 2026-07-02 — Decision doctrine
+
+- Added [`decision-doctrine.md`](decision-doctrine.md): reasoning phases (competing hypotheses → disconfirmation → ≥2-structure comparison), aggression tiers with 9 alignment conditions (max loss hard-capped at **5% NLV at every tier**, per trader decision), mandatory contrarian crowding check, dynamic risk re-rating, 12-class missing-data taxonomy, adversarial QC checklist, and the 决策块 final decision block. Distilled from the trader's "ultimate market-structure agent" prompt; conflicts resolved in favor of hard rules #3 / #8 / #9 (fixed skeletons and 复盘 source separation stay).
+- `SKILL.md`: new hard rule #10 (decision doctrine) + router row; `analysis-runbook.md` Layer 6 now runs doctrine phases C–F (hypotheses, crowding check, structure comparison, tier-based sizing) and closes with the 决策块.
+- `review-framework.md`: four layer-mapped scoring dimensions (thesis / structure / process = Layer A, execution = Layer B, joins = Layer C judgment-only); pitfall promotion lifecycle (`OBSERVATION` → `CANDIDATE` → `ACTIVE` → `RETIRED`) with overfitting gate; removed the v0.2 "Discipline 4-quadrant" leftover from the output structure (contradicted hard rule #9).
 
 ## 2026-06-22 — OKF v0.1 alignment
 

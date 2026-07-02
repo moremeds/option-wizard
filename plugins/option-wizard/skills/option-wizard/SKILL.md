@@ -92,6 +92,7 @@ frontmatter `description` is the self-describing fallback.
    - Running 复盘 with only one broker pulled — both IB and Futu must be hit each time
 
    See `references/review-framework.md` §"3-layer architecture" for the full pipeline and `scripts/retrospective.py` orchestrator.
+10. **Decision doctrine (aggressive when confirmed, contrarian when crowded).** Every actionable recommendation (listed-options trade, macro hedge, book-review action item) follows `references/decision-doctrine.md`: competing hypotheses (bull / base / bear / vol-up / vol-down / no-trade) → disconfirmation + **crowding check** (consensus one-sided → the opposite case is written FIRST) → **≥2 economically distinct structures compared** → **aggression tier** (NO_TRADE / PROBE / SMALL / NORMAL / HIGH_CONVICTION / EXCEPTIONAL; max loss hard-capped at **5% NLV at every tier** — aggression buys earlier entry and more directional structure, never bigger max loss) → management plan with dynamic re-rating triggers → closes with the **决策块** decision block (当前判断 / 我的行动 / 进攻程度 / 为什么现在 / 最大风险 / 失效条件 / 下一步触发器 / 数据可信度). Conviction never exceeds evidence quality — data confidence LOW caps the tier at PROBE.
 
 ## Triggers
 
@@ -138,6 +139,7 @@ points into specific layers without re-reading the whole runbook.
 | **Any trader request — match it to a workflow first** | `references/workflows-overview.md` (routing index for the 4 workflows: analyze stock / analyze index / analyze positions / analyze FCN). Read this **first** to pick the workflow, then drill into the deep-reference file the workflow points to |
 | Full ticker analysis ("分析 <TICKER>", "evaluate <ticker> for <structure>") | `references/analysis-runbook.md` end-to-end — every layer in order, with the per-layer data source and decision output |
 | Picking structure once vol regime + direction are known | `references/strategies.md` (regime × structure matrix); apply §"Strong bullish conviction veto" before recommending jade lizard / iron condor / calendar |
+| **Turning evidence into a recommendation — sizing, aggression tier, competing hypotheses, crowding check, 决策块 decision block** | **MANDATORY for any actionable rec (hard rule #10)**: `references/decision-doctrine.md` — phases A–G, 9 alignment conditions, tier table (5% NLV max-loss hard cap), contrarian crowding check, dynamic re-rating triggers, missing-data taxonomy, adversarial QC checklist. Fires at runbook Layer 6–7, macro-hedge sizing, and book-review action items |
 | **About to recommend jade lizard / iron condor / calendar / diagonal** | **MANDATORY**: `references/strategies.md` §"Strong bullish conviction veto" — run the 4-signal check FIRST. If ≥3 fire, refuse and recommend long call / bull put spread / risk reversal / CSP instead |
 | Computing gamma flip / put wall / call wall from UW GEX | `references/gamma-framework.md`; invoke `scripts.gex_levels::compute_levels_per_expiry` with `call_wall_definition='oi_cluster'` for short-dated trades (aggregate `compute_levels` is misleading for short windows — see runbook Layer 1) |
 | Labelling vol regime (RICH / NEUTRAL / CHEAP) | `scripts.vrp::compute_vrp` — IV − RV with ±5pp thresholds |

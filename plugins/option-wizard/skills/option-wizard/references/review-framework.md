@@ -231,6 +231,24 @@ quallitative-first is to be lenient enough to learn from the data, not
 to assert precision the sample size doesn't support. Tighten once data
 accumulates.
 
+### Four scoring dimensions (layer-mapped)
+
+Each reviewed decision is assessed on four independent dimensions.
+Outcome ≠ decision quality: a profitable trade can have poor process, a
+losing trade can be a high-quality decision. Layer assignment is strict
+per hard rule #9:
+
+| Dimension | Question | Layer / source |
+|---|---|---|
+| Thesis quality | Was the market interpretation right? | **A** — archive markout only |
+| Structure quality | Did the chosen structure express the thesis efficiently, vs the Phase-E alternatives recorded in the archive? | **A** — archive only |
+| Process quality | Were doctrine phases followed — hypotheses built, crowding checked, tier justified, invalidation falsifiable (`decision-doctrine.md`)? | **A** — archive only |
+| Execution quality | Timing, limit-vs-fill slippage, bracket placement, roll timing | **B** — broker blotter only |
+
+No per-decision join across A and B — "thesis was right AND execution
+was late" about the same trade is a Layer C judgment-only observation,
+never an algorithmic score.
+
 ## Layer B — Trade flow (broker only: IB + Futu)
 
 **Both brokers required every review** (per `private/trader-profile.md`
@@ -396,7 +414,7 @@ rule additions or pitfall promotion.
    - Columns: `ticker | date | type | direction | T+1 | T+5 | T+10 | T+21 | T+45 | verdict`
    - Sorted by date descending
 3. **Side-by-side markout table** (the central deliverable)
-4. **Discipline 4-quadrant** + per-quadrant avg markout
+4. **Per-layer aggregates** (Layer A call markout · Layer B trade flow) + Layer C advisory observations — no A↔B quadrant (removed in v0.3 source separation, hard rule #9)
 5. **Pattern analysis** (monthly only)
 6. **Action items — END only, never mid-flow**
 
@@ -469,6 +487,30 @@ in `_drafts/`. Re-running 复盘 over the same archive doesn't generate
 duplicates.
 
 Opt-out: `--no-pitfall-drafts` flag skips draft emission.
+
+### Promotion lifecycle + overfitting gate
+
+Status flow for any candidate rule — pitfall or S-item skill rule:
+
+`OBSERVATION` (draft in `_drafts/`) → `CANDIDATE` (trader picks "P1
+promote" / "S1 add") → `ACTIVE` (numbered `pitfalls/NN-slug.md`, or
+SKILL.md / trader-profile rule) → `RETIRED` (marked retired in the
+index — never deleted, so the same bad idea isn't rediscovered).
+
+Trader approval is required for every promotion to `ACTIVE` — the
+framework never auto-applies. Before promoting, run the overfitting gate:
+
+- One memorable loss, or a repeated pattern? Label the evidence:
+  anecdotal / emerging / statistically meaningful / structurally
+  established. Anecdotal findings stay `OBSERVATION`.
+- Does it generalize across tickers and regimes, or fit one incident?
+- Does it improve expected value, or only historical fit?
+- Could it suppress valid future opportunities?
+- Was the original decision actually wrong, or was the data
+  unavailable / stale at the time?
+- Does it survive transaction costs and realistic fills?
+
+Prefer small reversible rules over sweeping ones.
 
 ## Integration with existing skill components
 
