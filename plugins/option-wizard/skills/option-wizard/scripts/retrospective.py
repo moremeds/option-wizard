@@ -223,6 +223,10 @@ class ReviewReport:
     action_items: list[dict[str, str]]
     pitfall_candidates: list[dict[str, Any]]
     skipped_archives: list[dict[str, str]]  # filename + reason
+    # Decision ledger (U3, scripts/ledger.py) — a fourth, independent source.
+    # Pre-rendered by the caller (`scripts.ledger.render_ledger_section`) so
+    # this module never imports ledger.py; empty string omits the section.
+    ledger_section: str = ""
 
 
 # --- Frontmatter parsing --------------------------------------------
@@ -1251,6 +1255,12 @@ def render_report(report: ReviewReport) -> str:
         lines.append(f"**Skipped archives:** {len(report.skipped_archives)} (see end)")
     lines.append("")
 
+    # ----- Decision ledger (U3) — opens with "what did I say to do last
+    # time?" before diving into markout scoring. Independent of Layer A/B. -----
+    if report.ledger_section:
+        lines.append(report.ledger_section)
+        lines.append("")
+
     # ----- Layer A — Analysis quality (archive only) -----
     lines.append("## Layer A — Analysis quality (archive)")
     lines.append("")
@@ -1652,6 +1662,7 @@ def run_review(
     write_back: bool = True,
     generate_drafts: bool = True,
     include_archive: bool = False,
+    ledger_section: str = "",
 ) -> ReviewReport:
     """End-to-end pure-function pipeline (3-layer per hard rule #9).
 
@@ -1660,6 +1671,11 @@ def run_review(
     observations relating A↔B, never auto-derived. Caller is responsible
     for filling B's trades from ALL configured brokers (IB + Futu per
     `trader-profile.md`) and tagging `trade_sources` accordingly.
+
+    `ledger_section` (U3) is pre-rendered by the caller via
+    `scripts.ledger.render_ledger_section(load_ledger(default_ledger_path()), today)`
+    — a fourth, independent source (not Layer A, B, or C) surfacing open
+    action items from prior 决策块 / book reviews. Empty string omits it.
 
     `include_archive=False` (default) restricts Layer A to the active
     subtree (`references/private/{ticker,market,review}/`). Pass True for
@@ -1703,6 +1719,7 @@ def run_review(
         action_items=[],
         pitfall_candidates=[],
         skipped_archives=skipped,
+        ledger_section=ledger_section,
     )
     report.action_items = generate_action_items(report)
     if generate_drafts and drafts_dir is not None:

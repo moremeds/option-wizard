@@ -1545,3 +1545,49 @@ def test_k4_action_item_reports_scored_over_raw_not_raw_alone(tmp_path: Path):
     )
     s_items = [i for i in report.action_items if i["id"].startswith("S")]
     assert s_items == []  # 1 scored < PATTERN_MIN_SCORED=3 -> ticker excluded
+
+
+# ----- U3 (2026-07-02): decision ledger section wiring -----
+
+
+def test_ledger_section_included_in_render_report(tmp_path: Path):
+    from scripts.retrospective import render_report
+
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="weekly",
+        today=date(2026, 7, 2),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[],
+        trade_sources=[],
+        write_back=False,
+        generate_drafts=False,
+        ledger_section="## Decision ledger\n\n- **L1** TSLA: roll down [NORMAL] due 2026-06-25 ⚠ OVERDUE",
+    )
+    rendered = render_report(report)
+    assert "## Decision ledger" in rendered
+    assert "L1" in rendered and "OVERDUE" in rendered
+    # Decision ledger section appears before Layer A in the rendered order.
+    assert rendered.index("## Decision ledger") < rendered.index("## Layer A")
+
+
+def test_ledger_section_omitted_when_empty(tmp_path: Path):
+    from scripts.retrospective import render_report
+
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="weekly",
+        today=date(2026, 7, 2),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[],
+        trade_sources=[],
+        write_back=False,
+        generate_drafts=False,
+    )
+    assert "## Decision ledger" not in render_report(report)

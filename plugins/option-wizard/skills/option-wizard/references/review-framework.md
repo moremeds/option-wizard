@@ -437,6 +437,7 @@ rule additions or pitfall promotion.
 
 ## Output structure (4 stages, mirrors book-review)
 
+0. **Decision ledger (U3)** — `scripts.ledger.render_ledger_section(load_ledger(default_ledger_path()), today)`, passed into `run_review(ledger_section=...)`. Opens the report with open action items from prior reviews (flagging any past their `due` date) before any markout scoring — a fourth source, independent of Layer A/B, never joined against either per hard rule #9.
 1. **Data pull**
    - Window dates + count of archive files scanned
    - IB trade pull result (count, date range) — note any pull failures
@@ -698,9 +699,18 @@ report = run_review(
     trades=trades, trade_sources=["IB", "Futu"],
     cross_cut_advisory=advisory,
     drafts_dir=Path(".../pitfalls/_drafts"),
+    ledger_section=ledger_section,
 )
 print(render_report(report))
 '
+```
+
+Stage 0 — decision ledger (U3, `scripts/ledger.py`):
+
+```python
+from scripts.ledger import default_ledger_path, load_ledger, render_ledger_section
+
+ledger_section = render_ledger_section(load_ledger(default_ledger_path()), window_end)
 ```
 
 Orchestrator CLI (Phase 1 scaffold — data fetchers still need to be wired in by the trader):

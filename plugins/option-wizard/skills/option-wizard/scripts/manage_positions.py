@@ -29,6 +29,7 @@ from scripts.evaluate_position import (
     SHORT_PREMIUM_STRUCTURES,
     evaluate_short_premium,
 )
+from scripts.ledger import default_ledger_path, load_ledger, render_open_items_block
 from scripts.live_quote import live_quote
 from scripts.xenon_normalize import to_audit_positions, to_manage_legs
 
@@ -261,6 +262,12 @@ def main(argv: list[str] | None = None) -> int:
 
     rows: list[dict] = []
     try:
+        # Open decision-ledger items (references/decision-doctrine.md
+        # §"Dynamic risk management") surface here so a prior 决策块 action
+        # item ("roll TSLA 400/390 down by 6/25") doesn't only live in a
+        # one-off report the trader has to remember to reread.
+        ledger_block = render_open_items_block(load_ledger(default_ledger_path()))
+
         client = XenonClient()
         ib_portfolio = client.ib_portfolio()
         audit_positions, cash = to_audit_positions(ib_portfolio)
@@ -268,7 +275,8 @@ def main(argv: list[str] | None = None) -> int:
         audit_section = format_audit_findings(audit_findings)
 
         if args.audit_only:
-            print(audit_section or "Defined-risk audit: no failures (clean book).")
+            body = audit_section or "Defined-risk audit: no failures (clean book)."
+            print(f"{ledger_block}\n\n{body}" if ledger_block else body)
             return 0
 
         legs = to_manage_legs(ib_portfolio)
@@ -293,6 +301,8 @@ def main(argv: list[str] | None = None) -> int:
         report = (
             (audit_section + "\n" + scan_section) if audit_section else scan_section
         )
+        if ledger_block:
+            report = f"{ledger_block}\n\n{report}"
         print(report)
 
         if not args.no_email:
