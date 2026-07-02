@@ -488,7 +488,7 @@ Weekly reviews skip this — sample too small. Monthly reviews aggregate:
 |---|---|
 | Hit rate by call type | `% CORRECT` for directional / vol regime / structure each |
 | Hit rate by ticker | Tickers with ≥`PATTERN_MIN_SCORED` (3) **scored** calls in window: per-ticker correct% |
-| Hit rate by aggression tier (U2) | Tiers with ≥`PATTERN_MIN_SCORED` (3) scored calls: per-tier correct% — structured `calls:` frontmatter only, answers "does higher conviction actually perform better?" |
+| Hit rate by aggression tier (U2) | Tiers with ≥`PATTERN_MIN_SCORED` (3) scored calls: per-tier correct% — structured `calls:` frontmatter only, answers "does higher conviction actually perform better?" **NO_TRADE is scoreable too** once `decision-doctrine.md`'s shadow-trade requirement is followed — the archived direction is the judgment the constraint suppressed, so this tier answers "was the underlying read right even when something else forced a pass?" |
 | Hit rate by vol regime | Hit rate when analysis labeled RICH vs NEUTRAL vs CHEAP |
 | Hit rate by data source | Hit rate when call rested primarily on UW signal vs TV chart vs IB account state |
 

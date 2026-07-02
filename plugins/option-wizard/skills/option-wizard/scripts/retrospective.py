@@ -353,7 +353,7 @@ def _extract_notes(body: str) -> str:
 # crowding-check fields at all. Archives written after 2026-07-02 should
 # declare calls explicitly:
 #
-#   calls: ["NVDA|structure|-1|bull_put_spread|PROBE|3|true", "TSLA|directional|+1|||NORMAL|0|false"]
+#   calls: ["NVDA|structure|-1|bear_call_spread|PROBE|3|true", "TSLA|directional|+1||NORMAL|0|false"]
 #
 # Field order: ticker|call_type|direction|structure|tier|crowding_flags|opposite_case_first
 # `structure` / `tier` / `crowding_flags` / `opposite_case_first` may be

@@ -10,6 +10,40 @@ timestamp: 2026-07-02T02:20:29Z
 
 OKF reserved `log.md` — chronological history of this knowledge bundle, most recent first. Seeded from git history; append a dated entry whenever you add or materially revise a concept (see [`OKF.md`](OKF.md) conformance checklist). For the full commit-level history, `git log -- plugins/option-wizard/skills/option-wizard/references/`.
 
+## 2026-07-02 — Re-review fixes + 决策块 shadow trade
+
+Re-reviewed PR #30 after the first live end-to-end test (TSLA, U1–U6
+already merged into the branch) and found two doc-example bugs plus a
+gap the trader flagged directly:
+
+- **F1** — SKILL.md's and `retrospective.py`'s own `calls:` worked
+  examples had an extra `|` (8 fields instead of 7); an archive copying
+  the example verbatim got the call silently dropped to
+  `skipped_archives` (caught it firsthand — yesterday's TSLA archive was
+  written from this exact example and rejected by the real parser).
+  Fixed both examples; added `test_skill_md_calls_example_parses_without_malformed_reasons`
+  / `test_retrospective_module_calls_docstring_example_parses` in
+  `tests/test_retrospective.py` so a future doc edit can't silently
+  reintroduce either bug (parses the literal example string out of the
+  source file and feeds it through `parse_structured_calls`).
+- **F2** — the NVDA doc example paired `direction=-1` with
+  `structure=bull_put_spread` (`STRUCTURE_DIRECTION` says `+1`) — copying
+  it verbatim scores the call backwards. Swapped to `bear_call_spread`.
+  Same regression test checks direction/structure consistency against
+  `STRUCTURE_DIRECTION` for every entry in the doc example.
+- **Shadow trade** — `decision-doctrine.md`'s 决策块 gained a **概率分布**
+  (rough probability per competing hypothesis, Phase C) and **赔率**
+  (gain vs max loss) field, plus a mandatory shadow-trade requirement:
+  whenever 我的行动 is throttled below what 当前判断 supports (NO_TRADE,
+  a margin-constraint gate, etc.), the block must still name the
+  structure/strikes/expiry/tier the evidence would have justified. This
+  closes the TSLA 2026-07-02 gap where dealer gamma / term structure /
+  flow all read bullish but an account-margin constraint forced
+  NO_TRADE — without the shadow trade, that underlying judgment never
+  enters markout scoring. No `calls:` schema change needed — the shadow
+  trade's direction is what the archived entry already carries, with
+  `tier: NO_TRADE` recording that it wasn't acted on.
+
 ## 2026-07-02 — Review-loop upgrade (U1–U6)
 
 Live-tested the day-old decision-doctrine (below) on NVDA + macro

@@ -33,7 +33,9 @@ freshness) — the runbook layers are the evidence pass; nothing new here.
 vol-up / vol-down / no-trade. One line each: what current evidence
 supports it, what would confirm it. The recommendation must name the base
 case and say why the others lose — never a thesis plus a token risk
-paragraph.
+paragraph. Attach a rough probability to each hypothesis (e.g. "base 55% /
+bear 30% / tail 15%") — a number the trader can disagree with beats a
+qualitative label no one can falsify or argue against.
 
 **D. Disconfirmation + crowding check.** Actively try to kill the
 preferred thesis: contradictory tape, conflicting flow, surface signals
@@ -79,7 +81,7 @@ Nine alignment conditions:
 
 | Tier | Max loss (% NLV) | Requires |
 |---|---|---|
-| NO_TRADE | — | default when EV is inadequate; name the trigger that would create the trade |
+| NO_TRADE | — | default when EV is inadequate; name the trigger that would create the trade **and the shadow trade it activates** (§below) |
 | PROBE | ≤ 1% | thesis interesting but ≤ 4 conditions, **or** evidence quality LOW |
 | SMALL | 1–2% | ≥ 5 conditions, evidence ≥ MEDIUM |
 | NORMAL | 2–3.5% | ≥ 6 conditions incl. #6 + #7, evidence ≥ MEDIUM |
@@ -171,14 +173,31 @@ Every substantive analysis closes with this block (before the Layer-7
 preflight offer; for book reviews, atop the Action-items block as the
 book-level verdict):
 
-- **当前判断** — the market / portfolio view, falsifiable (level + horizon + condition)
+- **当前判断** — the market / portfolio view, falsifiable (level + horizon + condition), with the Phase C probability split (e.g. "base 55% / bear 30% / tail 15%")
 - **我的行动** — the exact recommendation
 - **进攻程度** — NO_TRADE / PROBE / SMALL / NORMAL / HIGH_CONVICTION / EXCEPTIONAL
+- **赔率** — if 当前判断 plays out: gain vs max loss at the sized structure (or, for NO_TRADE, at the shadow trade below) — the number Phase F condition #9 (expected return justifies the risk) is actually checking
 - **为什么现在** — the timing edge
 - **最大风险** — the most important failure mode (the QC answer above)
 - **失效条件** — observable invalidation
 - **下一步触发器** — what data / price / vol / event forces reassessment
 - **数据可信度** — HIGH / MEDIUM / LOW + the principal limitation
+
+**Shadow trade (required whenever 我的行动 is weaker than 当前判断
+supports)** — NO_TRADE, "wait", or any tier throttled by a constraint
+unrelated to the thesis (e.g. hard rule #1's account-margin gate) must
+still name the trade the evidence would otherwise justify: structure,
+strikes, expiry, the tier it would have sized at, and the trigger that
+lifts the constraint. Motivation: TSLA 2026-07-02 found dealer gamma,
+term structure, and flow all aligned bullish, but the account-margin
+constraint alone forced NO_TRADE — without a shadow trade recorded, the
+underlying market judgment (which was independently verifiable and
+correct) never enters the markout scoring pipeline, and 复盘 can only ever
+ask "was NO_TRADE the right call" instead of "was the judgment underneath
+it right." The shadow trade's direction is what goes in the archived
+`calls:` entry (SKILL.md §"Reporting & archive") — `tier: NO_TRADE` on
+that entry already records that it wasn't acted on; no schema change
+needed, only the discipline of writing it down.
 
 Falsifiability standard (feeds Layer A markout scoring in
 `review-framework.md`): "NVDA looks constructive" is unscoreable; "over

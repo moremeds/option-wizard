@@ -15,6 +15,8 @@ refactor; their tests are gone.
 
 from __future__ import annotations
 
+import json
+import re
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -22,6 +24,7 @@ import pytest
 from scripts.retrospective import (
     DIRECTIONAL_NOISE_BAND,
     MARKOUT_HORIZONS,
+    STRUCTURE_DIRECTION,
     VOL_REGIME_IV_RANK_BAND,
     Call,
     Trade,
@@ -1684,7 +1687,9 @@ def _opt_trade(
     quantity=1,
     trade_date=date(2026, 6, 5),
 ):
-    from scripts.retrospective import flag_hedge_cost_outliers  # noqa: F401 (import check)
+    from scripts.retrospective import (
+        flag_hedge_cost_outliers,  # noqa: F401 (import check)
+    )
 
     return Trade(
         ticker=ticker,
@@ -1749,18 +1754,33 @@ def test_flag_hedge_cost_outliers_ignores_non_hedge_shapes():
     trades = [
         # SELL leg -> not a BUY, never flagged regardless of cost.
         _opt_trade(
-            ticker="VIX", side="SELL", right="C", strike=30,
-            expiry_iso="2026-08-21", fill_price=50.0, quantity=25,
+            ticker="VIX",
+            side="SELL",
+            right="C",
+            strike=30,
+            expiry_iso="2026-08-21",
+            fill_price=50.0,
+            quantity=25,
         ),
         # long call on a non-VIX ticker -> not hedge-like.
         _opt_trade(
-            ticker="NVDA", side="BUY", right="C", strike=200,
-            expiry_iso="2026-07-17", fill_price=50.0, quantity=10,
+            ticker="NVDA",
+            side="BUY",
+            right="C",
+            strike=200,
+            expiry_iso="2026-07-17",
+            fill_price=50.0,
+            quantity=10,
         ),
         # stock trade -> not OPT, skipped.
         Trade(
-            ticker="SPY", trade_date=date(2026, 6, 5), side="BUY",
-            quantity=100, fill_price=700.0, contract_type="STK", option_meta=None,
+            ticker="SPY",
+            trade_date=date(2026, 6, 5),
+            side="BUY",
+            quantity=100,
+            fill_price=700.0,
+            contract_type="STK",
+            option_meta=None,
         ),
     ]
     assert flag_hedge_cost_outliers(trades, nlv=100_000) == []
@@ -1771,8 +1791,13 @@ def test_flag_hedge_cost_outliers_skips_missing_option_meta():
 
     trades = [
         Trade(
-            ticker="VIX", trade_date=date(2026, 6, 5), side="BUY",
-            quantity=25, fill_price=50.0, contract_type="OPT", option_meta=None,
+            ticker="VIX",
+            trade_date=date(2026, 6, 5),
+            side="BUY",
+            quantity=25,
+            fill_price=50.0,
+            contract_type="OPT",
+            option_meta=None,
         ),
     ]
     assert flag_hedge_cost_outliers(trades, nlv=100_000) == []
@@ -1783,13 +1808,23 @@ def test_flag_hedge_cost_outliers_skips_expired_or_unparseable_expiry():
 
     trades = [
         _opt_trade(
-            ticker="VIX", side="BUY", right="C", strike=20,
-            expiry_iso="not-a-date", fill_price=50.0, quantity=25,
+            ticker="VIX",
+            side="BUY",
+            right="C",
+            strike=20,
+            expiry_iso="not-a-date",
+            fill_price=50.0,
+            quantity=25,
         ),
         _opt_trade(
-            ticker="VIX", side="BUY", right="C", strike=20,
+            ticker="VIX",
+            side="BUY",
+            right="C",
+            strike=20,
             expiry_iso="2026-06-01",  # before trade_date 2026-06-05 -> dte<=0
-            fill_price=50.0, quantity=25, trade_date=date(2026, 6, 5),
+            fill_price=50.0,
+            quantity=25,
+            trade_date=date(2026, 6, 5),
         ),
     ]
     assert flag_hedge_cost_outliers(trades, nlv=100_000) == []
@@ -1814,8 +1849,17 @@ def test_run_review_nlv_none_skips_hedge_check(tmp_path: Path):
         archive_dir=archive,
         spot_history={},
         iv_rank_history=None,
-        trades=[_opt_trade(ticker="VIX", side="BUY", right="C", strike=20,
-                            expiry_iso="2026-08-21", fill_price=50.0, quantity=25)],
+        trades=[
+            _opt_trade(
+                ticker="VIX",
+                side="BUY",
+                right="C",
+                strike=20,
+                expiry_iso="2026-08-21",
+                fill_price=50.0,
+                quantity=25,
+            )
+        ],
         trade_sources=["IB"],
         write_back=False,
         generate_drafts=False,
@@ -1833,8 +1877,17 @@ def test_run_review_nlv_supplied_flags_outlier_and_emits_r_item(tmp_path: Path):
         archive_dir=archive,
         spot_history={},
         iv_rank_history=None,
-        trades=[_opt_trade(ticker="VIX", side="BUY", right="C", strike=20,
-                            expiry_iso="2026-08-21", fill_price=50.0, quantity=25)],
+        trades=[
+            _opt_trade(
+                ticker="VIX",
+                side="BUY",
+                right="C",
+                strike=20,
+                expiry_iso="2026-08-21",
+                fill_price=50.0,
+                quantity=25,
+            )
+        ],
         trade_sources=["IB"],
         write_back=False,
         generate_drafts=False,
@@ -1857,8 +1910,17 @@ def test_render_report_shows_hedge_cost_outlier_table(tmp_path: Path):
         archive_dir=archive,
         spot_history={},
         iv_rank_history=None,
-        trades=[_opt_trade(ticker="VIX", side="BUY", right="C", strike=20,
-                            expiry_iso="2026-08-21", fill_price=50.0, quantity=25)],
+        trades=[
+            _opt_trade(
+                ticker="VIX",
+                side="BUY",
+                right="C",
+                strike=20,
+                expiry_iso="2026-08-21",
+                fill_price=50.0,
+                quantity=25,
+            )
+        ],
         trade_sources=["IB"],
         write_back=False,
         generate_drafts=False,
@@ -1934,7 +1996,9 @@ def test_save_review_report_preserves_hand_edited_outcome_on_rerun(tmp_path: Pat
     )
     path.write_text(text, encoding="utf-8")
 
-    saved2 = save_review_report(report, "second render (data gap fixed)", base_dir=archive)
+    saved2 = save_review_report(
+        report, "second render (data gap fixed)", base_dir=archive
+    )
     final = saved2.read_text(encoding="utf-8")
     assert "second render (data gap fixed)" in final
     assert "交易者手动记录：这周判断偏乐观，实际打脸。" in final
@@ -1951,14 +2015,26 @@ def test_realized_pnl_by_currency_counts_exact_zero_close():
 
     trades = [
         Trade(
-            ticker="QQQ", trade_date=date(2026, 6, 5), side="SELL",
-            quantity=1, fill_price=5.0, contract_type="OPT",
-            option_meta=None, realized_pnl=0.0, currency="USD",
+            ticker="QQQ",
+            trade_date=date(2026, 6, 5),
+            side="SELL",
+            quantity=1,
+            fill_price=5.0,
+            contract_type="OPT",
+            option_meta=None,
+            realized_pnl=0.0,
+            currency="USD",
         ),
         Trade(
-            ticker="SPY", trade_date=date(2026, 6, 5), side="SELL",
-            quantity=1, fill_price=5.0, contract_type="OPT",
-            option_meta=None, realized_pnl=None, currency="USD",  # opening leg
+            ticker="SPY",
+            trade_date=date(2026, 6, 5),
+            side="SELL",
+            quantity=1,
+            fill_price=5.0,
+            contract_type="OPT",
+            option_meta=None,
+            realized_pnl=None,
+            currency="USD",  # opening leg
         ),
     ]
     out = realized_pnl_by_currency(trades)
@@ -1990,3 +2066,62 @@ def test_structured_calls_unbracketed_single_entry_still_parses(tmp_path: Path):
     assert skipped == []
     assert len(calls) == 1
     assert calls[0].ticker == "NVDA" and calls[0].tier == "PROBE"
+
+
+# ----- Post-review fix (2026-07-02): documented `calls:` examples must parse -----
+#
+# F1/F2 (found re-reviewing PR #30 after the TSLA test-drive archive got
+# rejected by this exact parser): SKILL.md's own worked example had an
+# extra `|` (8 fields, not 7) and paired direction=-1 with bull_put_spread
+# (STRUCTURE_DIRECTION says +1) — an LLM copying either example verbatim
+# produces a skipped call or a call scored backwards. Both docs (SKILL.md
+# and this module's own `calls:` docstring) must stay parseable and
+# direction-consistent, checked directly against the source strings so a
+# future doc edit can't silently reintroduce either bug.
+
+
+def test_skill_md_calls_example_parses_without_malformed_reasons():
+    skill_md = (
+        Path(__file__).resolve().parent.parent
+        / "plugins"
+        / "option-wizard"
+        / "skills"
+        / "option-wizard"
+        / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"Example: `calls: (\[.*?\])`", skill_md)
+    assert match, "SKILL.md `calls:` worked example not found — did the section move?"
+    raw_calls = json.loads(match.group(1))
+    calls, reasons = parse_structured_calls(
+        raw_calls, analysis_date=date(2026, 7, 2), archive_path=Path("x.md"), notes=""
+    )
+    assert reasons == []
+    assert len(calls) == len(raw_calls)
+    for c in calls:
+        expected_dir = STRUCTURE_DIRECTION.get(c.structure) if c.structure else None
+        if expected_dir is not None:
+            assert c.direction == expected_dir, (
+                f"{c.ticker} example pairs direction={c.direction} with "
+                f"structure={c.structure!r}, but STRUCTURE_DIRECTION says "
+                f"{expected_dir} — scores backwards if copied verbatim"
+            )
+
+
+def test_retrospective_module_calls_docstring_example_parses():
+    src = (
+        Path(__file__).resolve().parent.parent
+        / "plugins"
+        / "option-wizard"
+        / "skills"
+        / "option-wizard"
+        / "scripts"
+        / "retrospective.py"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"#\s+calls: (\[.*?\])", src)
+    assert match, "retrospective.py `calls:` docstring example not found — did it move?"
+    raw_calls = json.loads(match.group(1))
+    calls, reasons = parse_structured_calls(
+        raw_calls, analysis_date=date(2026, 7, 2), archive_path=Path("x.md"), notes=""
+    )
+    assert reasons == []
+    assert len(calls) == len(raw_calls)
