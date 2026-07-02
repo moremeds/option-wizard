@@ -398,6 +398,32 @@ as a vol-crush hedge against the contango short). Whether to roll
 the inverted leg out is a trader-judgment decision and surfaces in
 Layer C if the trader chooses to flag it.
 
+### Hedge cost outliers — reverse cost-cap check (U6/F3)
+
+`scripts.retrospective.flag_hedge_cost_outliers(trades, nlv=..., max_annual_cost_pct=0.015)`
+retroactively re-checks every BUY option leg that reads as long insurance
+(long put on any ticker, or a long VIX call) against the same
+`max_annual_cost_pct` cap `scripts.macro_hedge::build_macro_hedge`
+enforces on structures routed through it. This closes a gap the 2026-07-01
+monthly skill audit found: a manual VIX Aug 20/30 call spread ran at
+~8% NLV annualized cost — 5× the 1.5% cap — because it was placed
+directly in the broker's app, never touching `build_macro_hedge`'s
+enforcement (hard rule #3's preflight requirement was simply bypassed).
+The check can't prevent that trade; it surfaces the miss as an **R-item**
+in Action items instead of requiring a trader to notice and hand-calculate
+it during a later book review.
+
+**Scope and known approximation:** flags the BUY leg's STANDALONE
+annualized cost, not a spread's net debit — a multi-leg structure's short
+legs would reduce the true cost, so this deliberately overstates cost on
+spreads rather than attempting to reconstruct net debit from unordered
+fills. Requires `option_meta` (right/strike/expiry); IB-sourced trades
+without it are silently skipped (this is a known Layer B limitation, not
+a false "compliant" signal — see `data-sources.md` "IB option trades
+carry no strike/expiry/right"). Only runs when the caller supplies
+`nlv` to `run_review` — omitted (not run) when NLV isn't available that
+day, never against a fabricated NLV.
+
 ## Layer C — Cross-cut (advisory, judgment-only)
 
 **No algorithmic scorecard. No `followed × correct` quadrant. No automated reconciliation.** Per hard rule #9, the framework refuses to auto-join archive (Layer A) and broker (Layer B) data — those are independent streams answering separate questions.
@@ -495,8 +521,13 @@ rule additions or pitfall promotion.
 
 ## Action items
 
-Four groups, mirroring the book-review structure:
+Five groups, mirroring the book-review structure:
 
+- **R1, R2, …** — Hedge cost outliers (U6/F3) — manually-placed hedge-like
+  option legs that ran over the macro-hedge annualized cost cap without
+  ever passing through `build_macro_hedge`'s enforcement (see
+  `flag_hedge_cost_outliers`). Only appears when `run_review(nlv=...)`
+  is supplied.
 - **S1, S2, …** — Skill rules to add (e.g., "skill is wrong on TSLA 4/4
   times — add CLAUDE.md rule downweighting directional signals for TSLA
   during sustained negative dealer gamma")
@@ -509,9 +540,9 @@ Four groups, mirroring the book-review structure:
   used BSM fallback — getting macmini DB online would tighten Layer 2
   fidelity")
 
-Each line carries a one-line description + a trigger phrase ("S1 add",
-"P1 promote", "T1 update", "D1 fix") so the trader picks fast. The
-framework waits for the trader to pick — never auto-applies.
+Each line carries a one-line description + a trigger phrase ("R1 review",
+"S1 add", "P1 promote", "T1 update", "D1 fix") so the trader picks fast.
+The framework waits for the trader to pick — never auto-applies.
 
 ## Auto-writeback to archive Outcome section
 
@@ -741,6 +772,7 @@ report = run_review(
     cross_cut_advisory=advisory,
     drafts_dir=Path(".../pitfalls/_drafts"),
     ledger_section=ledger_section,
+    nlv=nlv,  # U6/F3 — omit (None) if NLV isn't available this run
 )
 rendered = render_report(report)
 print(rendered)

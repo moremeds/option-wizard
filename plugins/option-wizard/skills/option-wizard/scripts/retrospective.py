@@ -62,6 +62,11 @@ TIER_VALUES: frozenset[str] = frozenset(
     {"NO_TRADE", "PROBE", "SMALL", "NORMAL", "HIGH_CONVICTION", "EXCEPTIONAL"}
 )
 
+# Default annualized cost cap for hedge-like long-option legs (U6/F3),
+# matching scripts.macro_hedge::build_macro_hedge's default
+# max_annual_cost_pct — see flag_hedge_cost_outliers.
+DEFAULT_MACRO_HEDGE_ANNUAL_COST_CAP = 0.015
+
 # Minimum SCORED calls (CORRECT/WRONG, excludes UNKNOWN/NEUTRAL) before a
 # by-ticker / by-tier hit rate is reported — guards against the "TSLA: 0%
 # over 7 calls" overfitting trap observed 2026-07-02, where only 1 of 7
@@ -227,6 +232,11 @@ class ReviewReport:
     # Pre-rendered by the caller (`scripts.ledger.render_ledger_section`) so
     # this module never imports ledger.py; empty string omits the section.
     ledger_section: str = ""
+    # Hedge cost outliers (U6/F3) — reverse cost-cap check on Layer B BUY
+    # option legs that read as long insurance. Computed only when the
+    # caller supplies `nlv` to run_review; empty list otherwise (never
+    # a false "clean" signal — render_report notes when the check ran).
+    hedge_cost_outliers: list[dict[str, Any]] = field(default_factory=list)
 
 
 # --- Frontmatter parsing --------------------------------------------
@@ -938,6 +948,87 @@ def realized_pnl_by_currency(trades: list[Trade]) -> dict[str, dict[str, Any]]:
     return out
 
 
+def flag_hedge_cost_outliers(
+    trades: list[Trade],
+    *,
+    nlv: float,
+    max_annual_cost_pct: float = DEFAULT_MACRO_HEDGE_ANNUAL_COST_CAP,
+) -> list[dict[str, Any]]:
+    """Layer B only — retroactive reverse cost-cap check (U6/F3).
+
+    `scripts.macro_hedge::build_macro_hedge` enforces `max_annual_cost_pct`
+    (default 1.5% NLV) — but only for trades routed through it. A trade
+    placed directly in the broker's app skips that check entirely, and
+    nothing else catches it: the 2026-07-01 monthly skill audit found a
+    manual VIX Aug 20/30 call spread running at ~8% NLV annualized cost,
+    discovered only by a trader hand-calculating it during a book review
+    weeks later (hard rule #3's preflight requirement was simply bypassed
+    — this can't prevent that, only surface it after the fact).
+
+    Heuristic scope: single BUY option legs that read as long insurance —
+    long puts (any ticker) or long VIX calls — since `build_macro_hedge`'s
+    six structures (butterfly / put_spread / long_put / vix_call_ladder /
+    iwm_putspread / qqq_longput) all buy one of these as the core leg.
+    A multi-leg spread's short legs reduce net cost — this flags the BUY
+    leg's STANDALONE cost, deliberately overstating a spread's true cost
+    rather than attempting a precise net-debit reconstruction from
+    unordered fills. Requires `option_meta` (right/strike/expiry_iso) —
+    trades without it (IB-sourced fills before enrichment; see
+    `data-sources.md` "IB option trades carry no strike/expiry/right")
+    are silently skipped, not flagged as compliant.
+
+    Args:
+        trades: Layer B trades for the window (any source).
+        nlv: net liquidation value at time of trade (or a reasonable
+            point-in-time proxy) — same denominator `build_macro_hedge`
+            uses for `portfolio_notional`.
+        max_annual_cost_pct: cap, default matches `build_macro_hedge`.
+
+    Returns:
+        List of outlier dicts (empty if none), each carrying enough for
+        both the render and a D-item: ticker, trade_date, right, strike,
+        expiry, quantity, cost, dte, annualized_cost_pct, cap_pct.
+
+    Raises:
+        ValueError: if nlv is non-positive.
+    """
+    if nlv <= 0:
+        raise ValueError(f"nlv must be positive; got {nlv}")
+    out: list[dict[str, Any]] = []
+    for t in trades:
+        if t.contract_type != "OPT" or t.side != "BUY" or not t.option_meta:
+            continue
+        right = str(t.option_meta.get("right", "")).upper()
+        is_hedge_like = right == "P" or (right == "C" and t.ticker == "VIX")
+        if not is_hedge_like:
+            continue
+        try:
+            expiry = date.fromisoformat(str(t.option_meta.get("expiry_iso", "")))
+        except ValueError:
+            continue
+        dte = (expiry - t.trade_date).days
+        if dte <= 0:
+            continue
+        cost = t.fill_price * 100 * abs(t.quantity)
+        annualized_pct = (cost / nlv) * (365 / dte)
+        if annualized_pct > max_annual_cost_pct:
+            out.append(
+                {
+                    "ticker": t.ticker,
+                    "trade_date": t.trade_date.isoformat(),
+                    "right": right,
+                    "strike": t.option_meta.get("strike"),
+                    "expiry": t.option_meta.get("expiry_iso"),
+                    "quantity": t.quantity,
+                    "cost": round(cost, 2),
+                    "dte": dte,
+                    "annualized_cost_pct": annualized_pct,
+                    "cap_pct": max_annual_cost_pct,
+                }
+            )
+    return out
+
+
 def aggregate_trade_markout(
     trade_markouts: list[TradeMarkout],
 ) -> dict[int, dict[str, Any]]:
@@ -1021,7 +1112,26 @@ def detect_pattern_anomalies(
 
 def generate_action_items(report: ReviewReport) -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
-    counter = {"S": 1, "P": 1, "T": 1, "D": 1}
+    counter = {"S": 1, "P": 1, "T": 1, "D": 1, "R": 1}
+
+    # R — hedge cost outliers (U6/F3), mirrors book-review's R-group
+    # (book-level risks) since this is the same category discovered
+    # retroactively instead of live.
+    for o in report.hedge_cost_outliers:
+        items.append(
+            {
+                "id": f"R{counter['R']}",
+                "desc": (
+                    f"{o['ticker']} {o['trade_date']} long {o['right']} "
+                    f"{o['strike']} exp {o['expiry']}: "
+                    f"{o['annualized_cost_pct']:.1%} annualized cost "
+                    f"(cap {o['cap_pct']:.1%}) — manual order bypassed "
+                    "build_macro_hedge's cost_cap; hard rule #3 preflight skipped"
+                ),
+                "trigger": f"R{counter['R']} review",
+            }
+        )
+        counter["R"] += 1
 
     # S — skill rule suggestions from pattern outliers.
     if report.pattern_analysis:
@@ -1330,6 +1440,27 @@ def render_report(report: ReviewReport) -> str:
             f"| T+{h}d | {_fmt_pct_or_na(row.get('avg_trade_markout'))} | {row.get('n_trades', 0)} |"
         )
     lines.append("")
+
+    # ----- Hedge cost outliers (U6/F3, reverse cost-cap) -----
+    if report.hedge_cost_outliers:
+        lines.append(
+            f"**Hedge cost outliers ({len(report.hedge_cost_outliers)}, "
+            "reverse cost-cap check — see R-items in Action items):**"
+        )
+        lines.append("")
+        lines.append(
+            "| Ticker | Trade date | Right | Strike | Expiry | Cost | Annualized % | Cap |"
+        )
+        lines.append(
+            "|--------|-----------|-------|--------|--------|------|---------------|-----|"
+        )
+        for o in report.hedge_cost_outliers:
+            lines.append(
+                f"| {o['ticker']} | {o['trade_date']} | {o['right']} | {o['strike']} "
+                f"| {o['expiry']} | ${o['cost']:,.2f} | {o['annualized_cost_pct']:.1%} "
+                f"| {o['cap_pct']:.1%} |"
+            )
+        lines.append("")
 
     # ----- Layer C — Cross-cut advisory (judgment-only) -----
     lines.append("## Layer C — Cross-cut (advisory, judgment-only)")
@@ -1663,6 +1794,8 @@ def run_review(
     generate_drafts: bool = True,
     include_archive: bool = False,
     ledger_section: str = "",
+    nlv: float | None = None,
+    max_annual_cost_pct: float = DEFAULT_MACRO_HEDGE_ANNUAL_COST_CAP,
 ) -> ReviewReport:
     """End-to-end pure-function pipeline (3-layer per hard rule #9).
 
@@ -1676,6 +1809,12 @@ def run_review(
     `scripts.ledger.render_ledger_section(load_ledger(default_ledger_path()), today)`
     — a fourth, independent source (not Layer A, B, or C) surfacing open
     action items from prior 决策块 / book reviews. Empty string omits it.
+
+    `nlv` (U6/F3) enables `flag_hedge_cost_outliers` over `trades` —
+    Layer B's reverse cost-cap check on manually-placed hedge-like option
+    legs. Omit (default None) when NLV isn't available (e.g. both brokers
+    unreachable that day); the check is simply skipped, never run against
+    a fabricated NLV.
 
     `include_archive=False` (default) restricts Layer A to the active
     subtree (`references/private/{ticker,market,review}/`). Pass True for
@@ -1700,6 +1839,13 @@ def run_review(
         for t in trades
     ]
     trade_aggregate = aggregate_trade_markout(trade_markouts)
+    hedge_cost_outliers = (
+        flag_hedge_cost_outliers(
+            trades, nlv=nlv, max_annual_cost_pct=max_annual_cost_pct
+        )
+        if nlv is not None
+        else []
+    )
     # Layer C (passed in)
     advisory = cross_cut_advisory or []
 
@@ -1720,6 +1866,7 @@ def run_review(
         pitfall_candidates=[],
         skipped_archives=skipped,
         ledger_section=ledger_section,
+        hedge_cost_outliers=hedge_cost_outliers,
     )
     report.action_items = generate_action_items(report)
     if generate_drafts and drafts_dir is not None:

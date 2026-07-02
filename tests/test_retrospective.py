@@ -1668,3 +1668,202 @@ def test_save_review_report_overwrites_same_day_same_window(tmp_path: Path):
     assert saved1 == saved2
     assert "second render" in saved2.read_text(encoding="utf-8")
     assert "first render" not in saved2.read_text(encoding="utf-8")
+
+
+# ----- U6 (2026-07-02): flag_hedge_cost_outliers (F3, reverse cost-cap) -----
+
+
+def _opt_trade(
+    *,
+    ticker,
+    side,
+    right,
+    strike,
+    expiry_iso,
+    fill_price,
+    quantity=1,
+    trade_date=date(2026, 6, 5),
+):
+    from scripts.retrospective import flag_hedge_cost_outliers  # noqa: F401 (import check)
+
+    return Trade(
+        ticker=ticker,
+        trade_date=trade_date,
+        side=side,
+        quantity=quantity,
+        fill_price=fill_price,
+        contract_type="OPT",
+        option_meta={"right": right, "strike": strike, "expiry_iso": expiry_iso},
+    )
+
+
+def test_flag_hedge_cost_outliers_catches_r1_vix_call_spread():
+    """R1 case: manual VIX Aug 20/30 call spread ~8% NLV annualized, found
+    only by hand-calculation weeks later per the 2026-07-01 skill audit."""
+    from scripts.retrospective import flag_hedge_cost_outliers
+
+    # BUY leg only (the SELL leg isn't hedge-like — filtered out by design,
+    # see docstring: this overstates spread cost on purpose).
+    trades = [
+        _opt_trade(
+            ticker="VIX",
+            side="BUY",
+            right="C",
+            strike=20,
+            expiry_iso="2026-08-21",
+            fill_price=5.0,  # $500/contract
+            quantity=25,
+            trade_date=date(2026, 6, 5),
+        )
+    ]
+    # 77 DTE (6/5 -> 8/21). cost = 500*25 = 12,500. NLV small enough to trip 1.5% cap.
+    out = flag_hedge_cost_outliers(trades, nlv=100_000)
+    assert len(out) == 1
+    assert out[0]["ticker"] == "VIX"
+    assert out[0]["annualized_cost_pct"] > 0.015
+
+
+def test_flag_hedge_cost_outliers_within_cap_not_flagged():
+    from scripts.retrospective import flag_hedge_cost_outliers
+
+    trades = [
+        _opt_trade(
+            ticker="QQQ",
+            side="BUY",
+            right="P",
+            strike=600,
+            expiry_iso="2026-12-18",  # ~196 DTE, standing hedge
+            fill_price=2.0,
+            quantity=5,
+            trade_date=date(2026, 6, 5),
+        )
+    ]
+    # cost = 200*5 = 1,000. NLV = 1,000,000 -> annualized well under 1.5%.
+    out = flag_hedge_cost_outliers(trades, nlv=1_000_000)
+    assert out == []
+
+
+def test_flag_hedge_cost_outliers_ignores_non_hedge_shapes():
+    from scripts.retrospective import flag_hedge_cost_outliers
+
+    trades = [
+        # SELL leg -> not a BUY, never flagged regardless of cost.
+        _opt_trade(
+            ticker="VIX", side="SELL", right="C", strike=30,
+            expiry_iso="2026-08-21", fill_price=50.0, quantity=25,
+        ),
+        # long call on a non-VIX ticker -> not hedge-like.
+        _opt_trade(
+            ticker="NVDA", side="BUY", right="C", strike=200,
+            expiry_iso="2026-07-17", fill_price=50.0, quantity=10,
+        ),
+        # stock trade -> not OPT, skipped.
+        Trade(
+            ticker="SPY", trade_date=date(2026, 6, 5), side="BUY",
+            quantity=100, fill_price=700.0, contract_type="STK", option_meta=None,
+        ),
+    ]
+    assert flag_hedge_cost_outliers(trades, nlv=100_000) == []
+
+
+def test_flag_hedge_cost_outliers_skips_missing_option_meta():
+    from scripts.retrospective import flag_hedge_cost_outliers
+
+    trades = [
+        Trade(
+            ticker="VIX", trade_date=date(2026, 6, 5), side="BUY",
+            quantity=25, fill_price=50.0, contract_type="OPT", option_meta=None,
+        ),
+    ]
+    assert flag_hedge_cost_outliers(trades, nlv=100_000) == []
+
+
+def test_flag_hedge_cost_outliers_skips_expired_or_unparseable_expiry():
+    from scripts.retrospective import flag_hedge_cost_outliers
+
+    trades = [
+        _opt_trade(
+            ticker="VIX", side="BUY", right="C", strike=20,
+            expiry_iso="not-a-date", fill_price=50.0, quantity=25,
+        ),
+        _opt_trade(
+            ticker="VIX", side="BUY", right="C", strike=20,
+            expiry_iso="2026-06-01",  # before trade_date 2026-06-05 -> dte<=0
+            fill_price=50.0, quantity=25, trade_date=date(2026, 6, 5),
+        ),
+    ]
+    assert flag_hedge_cost_outliers(trades, nlv=100_000) == []
+
+
+def test_flag_hedge_cost_outliers_raises_on_non_positive_nlv():
+    from scripts.retrospective import flag_hedge_cost_outliers
+
+    with pytest.raises(ValueError, match="positive"):
+        flag_hedge_cost_outliers([], nlv=0)
+
+
+# ----- U6 wiring: run_review(nlv=...) -> report.hedge_cost_outliers / R-items -----
+
+
+def test_run_review_nlv_none_skips_hedge_check(tmp_path: Path):
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="weekly",
+        today=date(2026, 6, 5),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[_opt_trade(ticker="VIX", side="BUY", right="C", strike=20,
+                            expiry_iso="2026-08-21", fill_price=50.0, quantity=25)],
+        trade_sources=["IB"],
+        write_back=False,
+        generate_drafts=False,
+    )
+    assert report.hedge_cost_outliers == []
+    assert not any(i["id"].startswith("R") for i in report.action_items)
+
+
+def test_run_review_nlv_supplied_flags_outlier_and_emits_r_item(tmp_path: Path):
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="weekly",
+        today=date(2026, 6, 5),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[_opt_trade(ticker="VIX", side="BUY", right="C", strike=20,
+                            expiry_iso="2026-08-21", fill_price=50.0, quantity=25)],
+        trade_sources=["IB"],
+        write_back=False,
+        generate_drafts=False,
+        nlv=100_000,
+    )
+    assert len(report.hedge_cost_outliers) == 1
+    r_items = [i for i in report.action_items if i["id"].startswith("R")]
+    assert len(r_items) == 1
+    assert "VIX" in r_items[0]["desc"] and "annualized" in r_items[0]["desc"]
+
+
+def test_render_report_shows_hedge_cost_outlier_table(tmp_path: Path):
+    from scripts.retrospective import render_report
+
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="weekly",
+        today=date(2026, 6, 5),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[_opt_trade(ticker="VIX", side="BUY", right="C", strike=20,
+                            expiry_iso="2026-08-21", fill_price=50.0, quantity=25)],
+        trade_sources=["IB"],
+        write_back=False,
+        generate_drafts=False,
+        nlv=100_000,
+    )
+    rendered = render_report(report)
+    assert "Hedge cost outliers (1" in rendered
+    assert "VIX" in rendered
