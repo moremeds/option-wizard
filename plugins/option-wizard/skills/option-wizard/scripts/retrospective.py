@@ -55,6 +55,24 @@ OUT_OF_SCOPE_STRUCTURE_TAGS: frozenset[str] = frozenset(
     {"fcn", "aq", "dq", "accumulator", "decumulator", "eln"}
 )
 
+# Valid call_type / aggression-tier vocab for structured `calls:` frontmatter
+# entries (U2, decision-doctrine.md §"Aggression tiers").
+CALL_TYPES: frozenset[str] = frozenset({"directional", "vol_regime", "structure"})
+TIER_VALUES: frozenset[str] = frozenset(
+    {"NO_TRADE", "PROBE", "SMALL", "NORMAL", "HIGH_CONVICTION", "EXCEPTIONAL"}
+)
+
+# Default annualized cost cap for hedge-like long-option legs (U6/F3),
+# matching scripts.macro_hedge::build_macro_hedge's default
+# max_annual_cost_pct — see flag_hedge_cost_outliers.
+DEFAULT_MACRO_HEDGE_ANNUAL_COST_CAP = 0.015
+
+# Minimum SCORED calls (CORRECT/WRONG, excludes UNKNOWN/NEUTRAL) before a
+# by-ticker / by-tier hit rate is reported — guards against the "TSLA: 0%
+# over 7 calls" overfitting trap observed 2026-07-02, where only 1 of 7
+# calls actually had a verdict.
+PATTERN_MIN_SCORED = 3
+
 # Structure → direction sign convention. +1 long delta / -1 short delta / 0 range.
 STRUCTURE_DIRECTION: dict[str, int] = {
     "csp": +1,
@@ -112,7 +130,15 @@ VOL_REGIME_CHEAP_KEYWORDS = ("cheap", "buy premium", "long vol", "vol expansion"
 
 @dataclass(frozen=True)
 class Call:
-    """One falsifiable claim extracted from an archived analysis."""
+    """One falsifiable claim extracted from an archived analysis.
+
+    `tier` / `crowding_flags` / `opposite_case_first` (U2, 2026-07-02) are
+    populated only when the archive uses the structured `calls:` frontmatter
+    (see `parse_structured_calls`); prose-classified calls leave them None.
+    They let pattern analysis answer decision-doctrine questions the prose
+    extractor never could: "did the PROBE-tier calls actually underperform
+    HIGH_CONVICTION?", "does the crowding check improve hit rate?".
+    """
 
     ticker: str
     analysis_date: date
@@ -121,6 +147,9 @@ class Call:
     structure: str | None  # e.g. "bull_put_spread"; None for non-structure types
     archive_path: Path
     notes: str  # excerpt from TL;DR / Decision for traceability
+    tier: str | None = None  # aggression tier at time of call, e.g. "PROBE"
+    crowding_flags: int | None = None  # count of crowding-check flags that fired
+    opposite_case_first: bool | None = None  # crowding check forced opposite-case-first
 
     @property
     def archive_stem(self) -> str:
@@ -142,6 +171,7 @@ class Trade:
     group_key: str | None = (
         None  # legs entered same day with same group share one Trade
     )
+    currency: str = "USD"  # broker-reported settlement currency of the fill
 
     @property
     def signed_qty(self) -> int:
@@ -198,6 +228,15 @@ class ReviewReport:
     action_items: list[dict[str, str]]
     pitfall_candidates: list[dict[str, Any]]
     skipped_archives: list[dict[str, str]]  # filename + reason
+    # Decision ledger (U3, scripts/ledger.py) — a fourth, independent source.
+    # Pre-rendered by the caller (`scripts.ledger.render_ledger_section`) so
+    # this module never imports ledger.py; empty string omits the section.
+    ledger_section: str = ""
+    # Hedge cost outliers (U6/F3) — reverse cost-cap check on Layer B BUY
+    # option legs that read as long insurance. Computed only when the
+    # caller supplies `nlv` to run_review; empty list otherwise (never
+    # a false "clean" signal — render_report notes when the check ran).
+    hedge_cost_outliers: list[dict[str, Any]] = field(default_factory=list)
 
 
 # --- Frontmatter parsing --------------------------------------------
@@ -305,6 +344,95 @@ def _extract_notes(body: str) -> str:
     return first_para.replace("\n", " ").strip()[:200]
 
 
+# --- Structured `calls:` frontmatter (U2) ----------------------------
+#
+# Prose classification (`_classify_directional` / `_classify_vol_regime`)
+# is a keyword-scan fallback that misreads mixed-language calls (a "roll
+# judgment" call scored as directional), false-ticker rows from
+# multi-ticker book reviews, and can't carry the decision-doctrine tier /
+# crowding-check fields at all. Archives written after 2026-07-02 should
+# declare calls explicitly:
+#
+#   calls: ["NVDA|structure|-1|bear_call_spread|PROBE|3|true", "TSLA|directional|+1||NORMAL|0|false"]
+#
+# Field order: ticker|call_type|direction|structure|tier|crowding_flags|opposite_case_first
+# `structure` / `tier` / `crowding_flags` / `opposite_case_first` may be
+# empty. When the `calls` key is present (even as `[]`), it takes full
+# precedence over the structure-tag and prose branches for that file.
+
+
+def _parse_one_structured_call(
+    raw: str,
+    *,
+    analysis_date: date,
+    archive_path: Path,
+    notes: str,
+) -> tuple[Call | None, str | None]:
+    """Parse one `calls:` entry. Returns (Call, None) or (None, reason)."""
+    parts = [p.strip() for p in raw.split("|")]
+    if len(parts) != 7:
+        return (
+            None,
+            f"malformed calls entry (want 7 |-separated fields, got {len(parts)}): {raw!r}",
+        )
+    ticker, call_type, direction_s, structure_s, tier, flags_s, opp_s = parts
+    if not ticker:
+        return None, f"calls entry missing ticker: {raw!r}"
+    if call_type not in CALL_TYPES:
+        return None, f"calls entry unknown call_type {call_type!r}: {raw!r}"
+    try:
+        direction = int(direction_s)
+    except ValueError:
+        return None, f"calls entry unparseable direction {direction_s!r}: {raw!r}"
+    if direction not in (-1, 0, 1):
+        return None, f"calls entry direction must be -1/0/+1, got {direction}: {raw!r}"
+    if tier and tier not in TIER_VALUES:
+        return None, f"calls entry unknown tier {tier!r}: {raw!r}"
+    try:
+        crowding_flags = int(flags_s) if flags_s else None
+    except ValueError:
+        return None, f"calls entry unparseable crowding_flags {flags_s!r}: {raw!r}"
+    opposite_case_first = opp_s.lower() == "true" if opp_s else None
+    return (
+        Call(
+            ticker=ticker.upper(),
+            analysis_date=analysis_date,
+            call_type=call_type,  # type: ignore[arg-type]
+            direction=direction,
+            structure=structure_s or None,
+            archive_path=archive_path,
+            notes=notes,
+            tier=tier or None,
+            crowding_flags=crowding_flags,
+            opposite_case_first=opposite_case_first,
+        ),
+        None,
+    )
+
+
+def parse_structured_calls(
+    raw_calls: list[str] | str,
+    *,
+    analysis_date: date,
+    archive_path: Path,
+    notes: str,
+) -> tuple[list[Call], list[str]]:
+    """Parse a `calls:` frontmatter value into (calls, malformed_reasons)."""
+    if isinstance(raw_calls, str):
+        raw_calls = [raw_calls]
+    calls: list[Call] = []
+    reasons: list[str] = []
+    for raw in raw_calls:
+        call, reason = _parse_one_structured_call(
+            raw, analysis_date=analysis_date, archive_path=archive_path, notes=notes
+        )
+        if call is None:
+            reasons.append(reason or f"malformed calls entry: {raw!r}")
+        else:
+            calls.append(call)
+    return calls, reasons
+
+
 # --- Active vs cold archive iteration -------------------------------
 #
 # Hard rule #9 + 30-day TTL: active subtree is `references/private/{ticker,
@@ -381,6 +509,19 @@ def extract_calls_from_archive(
             continue
         body = text[len(_FRONTMATTER_RE.match(text).group(0)) :]  # type: ignore[union-attr]
         notes = _extract_notes(body)
+        if "calls" in fm:
+            # Structured calls (U2) take full precedence over the
+            # structure-tag and prose branches below for this file.
+            file_calls, malformed = parse_structured_calls(
+                fm["calls"],
+                analysis_date=analysis_date,
+                archive_path=md_path,
+                notes=notes,
+            )
+            calls.extend(file_calls)
+            for reason in malformed:
+                skipped.append({"file": md_path.name, "reason": reason})
+            continue
         structures = fm.get("structures", [])
         if isinstance(structures, str):
             structures = [structures]
@@ -788,6 +929,112 @@ def aggregate_call_markout(
     return out
 
 
+def realized_pnl_by_currency(trades: list[Trade]) -> dict[str, dict[str, Any]]:
+    """Layer B only — realized P&L on closing legs, grouped by currency.
+
+    Never sums across currencies (R4 fix, 2026-07-02): IB reports
+    `realized_pnl` for KRW/JPY-denominated contracts in the raw local
+    currency, and Futu mixes JPY names into a USD book. A naive sum showed
+    IB June 2026 at "−$1,056,703" (actually −1,069,456 KRW + $12,673 USD).
+    Callers report each currency separately; FX conversion is out of scope
+    (no fabricated rates).
+
+    Checks `is not None`, not truthiness (Pass-2 codex-review fix,
+    2026-07-02): a genuine break-even close carries `realized_pnl == 0.0`,
+    which is a real closing trade — truthiness silently dropped it from
+    both the sum and `n_closes`, undercounting the window's actual close
+    count with no error or gap notice.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for t in trades:
+        if t.realized_pnl is not None:
+            row = out.setdefault(t.currency, {"realized": 0.0, "n_closes": 0})
+            row["realized"] += t.realized_pnl
+            row["n_closes"] += 1
+    return out
+
+
+def flag_hedge_cost_outliers(
+    trades: list[Trade],
+    *,
+    nlv: float,
+    max_annual_cost_pct: float = DEFAULT_MACRO_HEDGE_ANNUAL_COST_CAP,
+) -> list[dict[str, Any]]:
+    """Layer B only — retroactive reverse cost-cap check (U6/F3).
+
+    `scripts.macro_hedge::build_macro_hedge` enforces `max_annual_cost_pct`
+    (default 1.5% NLV) — but only for trades routed through it. A trade
+    placed directly in the broker's app skips that check entirely, and
+    nothing else catches it: the 2026-07-01 monthly skill audit found a
+    manual VIX Aug 20/30 call spread running at ~8% NLV annualized cost,
+    discovered only by a trader hand-calculating it during a book review
+    weeks later (hard rule #3's preflight requirement was simply bypassed
+    — this can't prevent that, only surface it after the fact).
+
+    Heuristic scope: single BUY option legs that read as long insurance —
+    long puts (any ticker) or long VIX calls — since `build_macro_hedge`'s
+    six structures (butterfly / put_spread / long_put / vix_call_ladder /
+    iwm_putspread / qqq_longput) all buy one of these as the core leg.
+    A multi-leg spread's short legs reduce net cost — this flags the BUY
+    leg's STANDALONE cost, deliberately overstating a spread's true cost
+    rather than attempting a precise net-debit reconstruction from
+    unordered fills. Requires `option_meta` (right/strike/expiry_iso) —
+    trades without it (IB-sourced fills before enrichment; see
+    `data-sources.md` "IB option trades carry no strike/expiry/right")
+    are silently skipped, not flagged as compliant.
+
+    Args:
+        trades: Layer B trades for the window (any source).
+        nlv: net liquidation value at time of trade (or a reasonable
+            point-in-time proxy) — same denominator `build_macro_hedge`
+            uses for `portfolio_notional`.
+        max_annual_cost_pct: cap, default matches `build_macro_hedge`.
+
+    Returns:
+        List of outlier dicts (empty if none), each carrying enough for
+        both the render and a D-item: ticker, trade_date, right, strike,
+        expiry, quantity, cost, dte, annualized_cost_pct, cap_pct.
+
+    Raises:
+        ValueError: if nlv is non-positive.
+    """
+    if nlv <= 0:
+        raise ValueError(f"nlv must be positive; got {nlv}")
+    out: list[dict[str, Any]] = []
+    for t in trades:
+        if t.contract_type != "OPT" or t.side != "BUY" or not t.option_meta:
+            continue
+        right = str(t.option_meta.get("right", "")).upper()
+        is_hedge_like = right == "P" or (right == "C" and t.ticker == "VIX")
+        if not is_hedge_like:
+            continue
+        try:
+            expiry = date.fromisoformat(str(t.option_meta.get("expiry_iso", "")))
+        except ValueError:
+            continue
+        dte = (expiry - t.trade_date).days
+        if dte <= 0:
+            continue
+        cost = t.fill_price * 100 * abs(t.quantity)
+        annualized_pct = (cost / nlv) * (365 / dte)
+        if annualized_pct > max_annual_cost_pct:
+            out.append(
+                {
+                    "ticker": t.ticker,
+                    "trade_date": t.trade_date.isoformat(),
+                    "right": right,
+                    "strike": t.option_meta.get("strike"),
+                    "expiry": t.option_meta.get("expiry_iso"),
+                    "quantity": t.quantity,
+                    "cost": round(cost, 2),
+                    "dte": dte,
+                    "annualized_cost_pct": annualized_pct,
+                    "cap_pct": max_annual_cost_pct,
+                }
+            )
+    return out
+
+
 def aggregate_trade_markout(
     trade_markouts: list[TradeMarkout],
 ) -> dict[int, dict[str, Any]]:
@@ -806,31 +1053,64 @@ def aggregate_trade_markout(
 # --- Pattern analysis (monthly only) --------------------------------
 
 
+def _scored(items: list[CallMarkout]) -> list[CallMarkout]:
+    return [cm for cm in items if cm.verdict in ("CORRECT", "WRONG")]
+
+
+def _hit_rate(items: list[CallMarkout]) -> float | None:
+    scored = _scored(items)
+    if not scored:
+        return None
+    return sum(1 for cm in scored if cm.verdict == "CORRECT") / len(scored)
+
+
 def detect_pattern_anomalies(
     call_markouts: list[CallMarkout],
 ) -> dict[str, Any]:
-    """Hit rate breakdowns by call type / ticker / direction. Monthly only."""
+    """Hit rate breakdowns by call type / ticker / tier. Monthly only.
 
-    def hit_rate(items: list[CallMarkout]) -> float | None:
-        scored = [cm for cm in items if cm.verdict in ("CORRECT", "WRONG")]
-        if not scored:
-            return None
-        return sum(1 for cm in scored if cm.verdict == "CORRECT") / len(scored)
-
+    Every breakdown carries both `n` (raw calls) and `n_scored`
+    (CORRECT/WRONG only, excludes UNKNOWN/NEUTRAL) — `n` alone hid the
+    2026-07-02 overfitting trap where "TSLA: 0% over 7 calls" meant 1
+    scored call and 6 UNKNOWN (T+21 not yet matured). Grouping thresholds
+    gate on `n_scored`, not `n`.
+    """
     by_type: dict[str, dict[str, Any]] = {}
     for ct in ("directional", "vol_regime", "structure"):
         sub = [cm for cm in call_markouts if cm.call.call_type == ct]
-        by_type[ct] = {"n": len(sub), "hit_rate": hit_rate(sub)}
+        by_type[ct] = {
+            "n": len(sub),
+            "n_scored": len(_scored(sub)),
+            "hit_rate": _hit_rate(sub),
+        }
 
-    # By ticker (only tickers with ≥3 calls).
+    # By ticker (only tickers with ≥PATTERN_MIN_SCORED SCORED calls).
     by_ticker: dict[str, dict[str, Any]] = {}
     tickers = sorted({cm.call.ticker for cm in call_markouts})
     for tk in tickers:
         sub = [cm for cm in call_markouts if cm.call.ticker == tk]
-        if len(sub) >= 3:
-            by_ticker[tk] = {"n": len(sub), "hit_rate": hit_rate(sub)}
+        if len(_scored(sub)) >= PATTERN_MIN_SCORED:
+            by_ticker[tk] = {
+                "n": len(sub),
+                "n_scored": len(_scored(sub)),
+                "hit_rate": _hit_rate(sub),
+            }
 
-    return {"by_call_type": by_type, "by_ticker_min3": by_ticker}
+    # By aggression tier (U2) — only calls extracted from structured
+    # `calls:` frontmatter carry a tier; prose-classified calls are
+    # excluded here (their tier is unknown, not NO_TRADE).
+    by_tier: dict[str, dict[str, Any]] = {}
+    tiers = sorted({cm.call.tier for cm in call_markouts if cm.call.tier})
+    for tier in tiers:
+        sub = [cm for cm in call_markouts if cm.call.tier == tier]
+        if len(_scored(sub)) >= PATTERN_MIN_SCORED:
+            by_tier[tier] = {
+                "n": len(sub),
+                "n_scored": len(_scored(sub)),
+                "hit_rate": _hit_rate(sub),
+            }
+
+    return {"by_call_type": by_type, "by_ticker_min3": by_ticker, "by_tier": by_tier}
 
 
 # --- Action items + pitfall drafts ----------------------------------
@@ -838,7 +1118,26 @@ def detect_pattern_anomalies(
 
 def generate_action_items(report: ReviewReport) -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
-    counter = {"S": 1, "P": 1, "T": 1, "D": 1}
+    counter = {"S": 1, "P": 1, "T": 1, "D": 1, "R": 1}
+
+    # R — hedge cost outliers (U6/F3), mirrors book-review's R-group
+    # (book-level risks) since this is the same category discovered
+    # retroactively instead of live.
+    for o in report.hedge_cost_outliers:
+        items.append(
+            {
+                "id": f"R{counter['R']}",
+                "desc": (
+                    f"{o['ticker']} {o['trade_date']} long {o['right']} "
+                    f"{o['strike']} exp {o['expiry']}: "
+                    f"{o['annualized_cost_pct']:.1%} annualized cost "
+                    f"(cap {o['cap_pct']:.1%}) — manual order bypassed "
+                    "build_macro_hedge's cost_cap; hard rule #3 preflight skipped"
+                ),
+                "trigger": f"R{counter['R']} review",
+            }
+        )
+        counter["R"] += 1
 
     # S — skill rule suggestions from pattern outliers.
     if report.pattern_analysis:
@@ -849,7 +1148,8 @@ def generate_action_items(report: ReviewReport) -> list[dict[str, str]]:
                     {
                         "id": f"S{counter['S']}",
                         "desc": (
-                            f"Ticker {tk}: hit rate {hit:.0%} over {stats['n']} calls — "
+                            f"Ticker {tk}: hit rate {hit:.0%} over "
+                            f"{stats['n_scored']}/{stats['n']} scored calls — "
                             f"flag for skill-level downweight rule on directional signals for {tk}"
                         ),
                         "trigger": f"S{counter['S']} add",
@@ -925,14 +1225,23 @@ def generate_pitfall_drafts(
     drafts_dir: Path,
     review_date: date,
 ) -> list[Path]:
-    """Write a draft pitfall file for each WRONG call. Idempotent on filename."""
+    """Write a draft pitfall file for each WRONG call. Idempotent on filename.
+
+    Filename carries ticker + call_type so a multi-ticker archive with
+    several WRONG calls emits one draft per call instead of the first call
+    swallowing the rest (R2 fix, 2026-07-02 June review — SPY/QQQ/VIX WRONG
+    on the same 6/4 snapshot collapsed into a single draft).
+    """
     drafts_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for cm in wrong_call_markouts:
         if cm.verdict != "WRONG":
             continue
         slug = cm.call.archive_stem
-        path = drafts_dir / f"pitfall-{slug}.md"
+        path = (
+            drafts_dir
+            / f"pitfall-{slug}-{cm.call.ticker.lower()}-{cm.call.call_type}.md"
+        )
         if path.exists():
             continue  # idempotency: don't overwrite trader's in-progress edits
         markout_lines = [
@@ -973,8 +1282,11 @@ _OUTCOME_HEADER_RE = re.compile(r"^## Outcome\s*/\s*Lesson\s*$", re.MULTILINE)
 def write_back_outcome(call_markouts: list[CallMarkout], review_date: date) -> int:
     """Append verdict block to each source file's Outcome / Lesson section.
 
-    Idempotent: skips files that already contain a 'Verdict (复盘 <review_date>'
-    line. Returns count of files modified.
+    Idempotent **per call**: the marker carries ticker + call_type, so a
+    multi-ticker archive (e.g. a macro snapshot emitting SPY/QQQ/VIX calls)
+    receives one block per call instead of only the first (R1 fix,
+    2026-07-02 June review — the date-only marker made call #2+ on the same
+    file look already-written). Returns count of blocks written.
     """
     modified = 0
     for cm in call_markouts:
@@ -982,7 +1294,10 @@ def write_back_outcome(call_markouts: list[CallMarkout], review_date: date) -> i
             continue
         path = cm.call.archive_path
         text = path.read_text(encoding="utf-8")
-        marker = f"**Verdict (复盘 {review_date.isoformat()},"
+        marker = (
+            f"**Verdict (复盘 {review_date.isoformat()}, "
+            f"{cm.call.ticker} {cm.call.call_type}):**"
+        )
         if marker in text:
             continue
         match = _OUTCOME_HEADER_RE.search(text)
@@ -1009,7 +1324,8 @@ def write_back_outcome(call_markouts: list[CallMarkout], review_date: date) -> i
         )
         block = (
             f"\n"
-            f"**Verdict (复盘 {review_date.isoformat()}, {cm.call.call_type}):** "
+            f"**Verdict (复盘 {review_date.isoformat()}, "
+            f"{cm.call.ticker} {cm.call.call_type}):** "
             f"{cm.verdict}\n"
             f"**Markout:**\n"
             + "\n".join(markout_lines)
@@ -1054,6 +1370,12 @@ def render_report(report: ReviewReport) -> str:
     if report.skipped_archives:
         lines.append(f"**Skipped archives:** {len(report.skipped_archives)} (see end)")
     lines.append("")
+
+    # ----- Decision ledger (U3) — opens with "what did I say to do last
+    # time?" before diving into markout scoring. Independent of Layer A/B. -----
+    if report.ledger_section:
+        lines.append(report.ledger_section)
+        lines.append("")
 
     # ----- Layer A — Analysis quality (archive only) -----
     lines.append("## Layer A — Analysis quality (archive)")
@@ -1103,6 +1425,17 @@ def render_report(report: ReviewReport) -> str:
         "Actual fills + execution markout — never inferred from archive._"
     )
     lines.append("")
+    lines.append("**Realized P&L on closed legs (by currency — never summed across):**")
+    lines.append("")
+    lines.append("| Currency | Realized | n_closes |")
+    lines.append("|----------|----------|----------|")
+    realized = realized_pnl_by_currency([tm.trade for tm in report.trades])
+    if not realized:
+        lines.append("| — | (no closing legs in window) | 0 |")
+    for ccy in sorted(realized):
+        row = realized[ccy]
+        lines.append(f"| {ccy} | {row['realized']:+,.2f} | {row['n_closes']} |")
+    lines.append("")
     lines.append("**Aggregate trade markout (Layer B):**")
     lines.append("")
     lines.append("| Horizon | Avg trade markout | n_trades |")
@@ -1113,6 +1446,27 @@ def render_report(report: ReviewReport) -> str:
             f"| T+{h}d | {_fmt_pct_or_na(row.get('avg_trade_markout'))} | {row.get('n_trades', 0)} |"
         )
     lines.append("")
+
+    # ----- Hedge cost outliers (U6/F3, reverse cost-cap) -----
+    if report.hedge_cost_outliers:
+        lines.append(
+            f"**Hedge cost outliers ({len(report.hedge_cost_outliers)}, "
+            "reverse cost-cap check — see R-items in Action items):**"
+        )
+        lines.append("")
+        lines.append(
+            "| Ticker | Trade date | Right | Strike | Expiry | Cost | Annualized % | Cap |"
+        )
+        lines.append(
+            "|--------|-----------|-------|--------|--------|------|---------------|-----|"
+        )
+        for o in report.hedge_cost_outliers:
+            lines.append(
+                f"| {o['ticker']} | {o['trade_date']} | {o['right']} | {o['strike']} "
+                f"| {o['expiry']} | ${o['cost']:,.2f} | {o['annualized_cost_pct']:.1%} "
+                f"| {o['cap_pct']:.1%} |"
+            )
+        lines.append("")
 
     # ----- Layer C — Cross-cut advisory (judgment-only) -----
     lines.append("## Layer C — Cross-cut (advisory, judgment-only)")
@@ -1142,15 +1496,32 @@ def render_report(report: ReviewReport) -> str:
         for ct, stats in bt.items():
             hit = stats.get("hit_rate")
             hit_s = f"{hit:.0%}" if hit is not None else "n/a"
-            lines.append(f"- {ct}: {stats['n']} calls, hit rate {hit_s}")
+            lines.append(
+                f"- {ct}: {stats['n_scored']}/{stats['n']} scored, hit rate {hit_s}"
+            )
         lines.append("")
         bk = report.pattern_analysis.get("by_ticker_min3", {})
         if bk:
-            lines.append("**By ticker (≥3 calls):**")
+            lines.append(f"**By ticker (≥{PATTERN_MIN_SCORED} scored calls):**")
             for tk, stats in bk.items():
                 hit = stats.get("hit_rate")
                 hit_s = f"{hit:.0%}" if hit is not None else "n/a"
-                lines.append(f"- {tk}: {stats['n']} calls, hit rate {hit_s}")
+                lines.append(
+                    f"- {tk}: {stats['n_scored']}/{stats['n']} scored, hit rate {hit_s}"
+                )
+            lines.append("")
+        by_tier = report.pattern_analysis.get("by_tier", {})
+        if by_tier:
+            lines.append(
+                f"**By aggression tier (≥{PATTERN_MIN_SCORED} scored calls, "
+                "structured `calls:` frontmatter only):**"
+            )
+            for tier, stats in by_tier.items():
+                hit = stats.get("hit_rate")
+                hit_s = f"{hit:.0%}" if hit is not None else "n/a"
+                lines.append(
+                    f"- {tier}: {stats['n_scored']}/{stats['n']} scored, hit rate {hit_s}"
+                )
             lines.append("")
 
     # Action items.
@@ -1221,6 +1592,7 @@ def parse_ib_trades(
                 realized_pnl=(
                     float(tr["realized_pnl"]) if tr.get("realized_pnl") else None
                 ),
+                currency=str(tr.get("currency", "USD")).upper(),
             )
         )
     return out
@@ -1257,6 +1629,7 @@ def _futu_leg_to_trade(
         contract_type="OPT" if is_option else "STK",
         option_meta=option_meta,
         realized_pnl=realized_pnl,
+        currency=str(leg.get("currency", "USD")).upper(),
     )
 
 
@@ -1273,6 +1646,7 @@ def parse_futu_trades(
     window_end: date,
     *,
     allow_stale: bool = False,
+    min_lookback_days: int = 0,
 ) -> list[Trade]:
     """Convert portfolio-analyser JSON report → Trade[].
 
@@ -1291,8 +1665,31 @@ def parse_futu_trades(
     (from the report JSON) MUST be >= the last trading day at or before
     `window_end`. Raises `ValueError` if stale. Pass `allow_stale=True`
     to opt out (e.g., backfills, deliberate historical reviews).
+
+    Lookback gate (`min_lookback_days`, R3 fix 2026-07-02): the CLI's pair
+    matcher only sees trades inside its `--range`. A June review fed a
+    `--range 1m` report matches June closes only against June opens —
+    every close of a position opened in May lands in `unmatchedTrades`
+    with no realizedPnl and silently drops out of the realized sum (this
+    sign-flipped June 2026 realized P&L: −$9.9k under 1m vs +$9.7k under
+    3m). Pass `min_lookback_days=60` for monthly reviews: raises
+    ValueError when `dateRange.from` starts later than
+    `window_start − min_lookback_days`, telling the caller to re-pull
+    with `--range 3m`. Default 0 preserves legacy behavior.
     """
     trades_block = futu_report.get("trades", {})
+    if min_lookback_days:
+        from_date = _iso_to_date(str(trades_block.get("dateRange", {}).get("from", "")))
+        earliest_needed = window_start - timedelta(days=min_lookback_days)
+        if from_date is not None and from_date > earliest_needed:
+            raise ValueError(
+                f"Futu report lookback too short: dateRange.from is {from_date}, "
+                f"but min_lookback_days={min_lookback_days} requires coverage "
+                f"from {earliest_needed} so the pair matcher can attach realized "
+                "P&L to closes of positions opened before the review window. "
+                "Re-pull with `cd ~/projects/portfolio-analyser && npx tsx "
+                "src/cli.ts ft --range 3m --rerun` (or longer)."
+            )
     if not allow_stale:
         to_iso = str(trades_block.get("dateRange", {}).get("to", ""))
         to_date = _iso_to_date(to_iso)
@@ -1370,6 +1767,7 @@ def parse_xenon_blotter(
                     contract_type=ctype,
                     option_meta=None,
                     realized_pnl=attach_pnl,
+                    currency=str(tr.get("currency", "USD")).upper(),
                 )
             )
     return out
@@ -1401,6 +1799,9 @@ def run_review(
     write_back: bool = True,
     generate_drafts: bool = True,
     include_archive: bool = False,
+    ledger_section: str = "",
+    nlv: float | None = None,
+    max_annual_cost_pct: float = DEFAULT_MACRO_HEDGE_ANNUAL_COST_CAP,
 ) -> ReviewReport:
     """End-to-end pure-function pipeline (3-layer per hard rule #9).
 
@@ -1409,6 +1810,17 @@ def run_review(
     observations relating A↔B, never auto-derived. Caller is responsible
     for filling B's trades from ALL configured brokers (IB + Futu per
     `trader-profile.md`) and tagging `trade_sources` accordingly.
+
+    `ledger_section` (U3) is pre-rendered by the caller via
+    `scripts.ledger.render_ledger_section(load_ledger(default_ledger_path()), today)`
+    — a fourth, independent source (not Layer A, B, or C) surfacing open
+    action items from prior 决策块 / book reviews. Empty string omits it.
+
+    `nlv` (U6/F3) enables `flag_hedge_cost_outliers` over `trades` —
+    Layer B's reverse cost-cap check on manually-placed hedge-like option
+    legs. Omit (default None) when NLV isn't available (e.g. both brokers
+    unreachable that day); the check is simply skipped, never run against
+    a fabricated NLV.
 
     `include_archive=False` (default) restricts Layer A to the active
     subtree (`references/private/{ticker,market,review}/`). Pass True for
@@ -1433,6 +1845,13 @@ def run_review(
         for t in trades
     ]
     trade_aggregate = aggregate_trade_markout(trade_markouts)
+    hedge_cost_outliers = (
+        flag_hedge_cost_outliers(
+            trades, nlv=nlv, max_annual_cost_pct=max_annual_cost_pct
+        )
+        if nlv is not None
+        else []
+    )
     # Layer C (passed in)
     advisory = cross_cut_advisory or []
 
@@ -1452,6 +1871,8 @@ def run_review(
         action_items=[],
         pitfall_candidates=[],
         skipped_archives=skipped,
+        ledger_section=ledger_section,
+        hedge_cost_outliers=hedge_cost_outliers,
     )
     report.action_items = generate_action_items(report)
     if generate_drafts and drafts_dir is not None:
@@ -1471,6 +1892,76 @@ def _default_archive_dir() -> Path:
 def _default_drafts_dir() -> Path:
     skill_root = Path(__file__).resolve().parent.parent
     return skill_root / "references" / "pitfalls" / "_drafts"
+
+
+def save_review_report(
+    report: ReviewReport,
+    rendered: str,
+    *,
+    base_dir: Path | None = None,
+) -> Path:
+    """Auto-archive the rendered 复盘 report itself (F2 fix, 2026-07-02).
+
+    The 2026-07-01 monthly skill audit found a 2026-06-14 weekly review
+    that drove real code fixes (commit b6b5057) but was never saved — its
+    findings beyond the commit message are permanently unrecoverable. 复盘
+    is the skill's own audit trail; losing the report defeats its purpose.
+    This is a narrow, deliberate exception to SKILL.md §"Reporting &
+    archive"'s general "screen first, explicit save" rule — scoped to 复盘
+    reports specifically, not book reviews or ticker analyses. CLI default
+    is archive-ON; `--no-archive` opts out (exploratory runs).
+
+    Filename matches the SKILL.md archive convention:
+    `references/private/review/{window_end}-book-mixed-{window}-retrospective.md`.
+    Overwrites same-day same-window re-runs by design — the R5 two-pass
+    monthly cadence (facts pass early in the month, T+21-matured verdict
+    backfill pass later) produces two DIFFERENT dates in practice, but a
+    same-day re-run (e.g. re-running after fixing a data gap) should
+    replace, not duplicate. A pre-existing file's `## Outcome / Lesson`
+    content (the trader's own hand-filled notes, per SKILL.md's archive
+    convention) is preserved verbatim across an overwrite — only the
+    auto-generated body above it is refreshed.
+
+    Stamps `calls: []` (U2) into the frontmatter — WITHOUT it, this
+    auto-archived report would itself be picked up by a future
+    `extract_calls_from_archive` sweep (nothing in `_is_in_scope` blocks
+    `structures: [retrospective]`) and prose-classified into a garbage
+    "BOOK" ticker call from keywords inside its own rendered tables —
+    exactly the noise 28 of the June review's original 67 calls turned
+    out to be. `calls: []` short-circuits that entirely (see
+    `extract_calls_from_archive`'s `"calls" in fm` precedence check).
+    """
+    root = base_dir or (
+        Path(__file__).resolve().parent.parent / "references" / "private"
+    )
+    review_dir = root / "review"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    date_s = report.window_end.isoformat()
+    path = review_dir / f"{date_s}-book-mixed-{report.window}-retrospective.md"
+    frontmatter = (
+        "---\n"
+        "ticker: BOOK\n"
+        f"event: {report.window.title()} 复盘 — auto-archived\n"
+        f"date: {date_s}\n"
+        "status: analysis-only\n"
+        "result: pending\n"
+        "structures: [retrospective]\n"
+        f"tags: [{report.window}-review, auto-archived]\n"
+        "calls: []\n"
+        "---\n\n"
+    )
+    body = rendered
+    existing_outcome = None
+    if path.exists():
+        match = _OUTCOME_HEADER_RE.search(path.read_text(encoding="utf-8"))
+        if match:
+            existing_outcome = path.read_text(encoding="utf-8")[match.start() :]
+    if existing_outcome:
+        body += f"\n\n{existing_outcome}"
+    elif "## Outcome / Lesson" not in body:
+        body += "\n\n## Outcome / Lesson\n\n_(auto-archived — trader fills in)_\n"
+    path.write_text(frontmatter + body, encoding="utf-8")
+    return path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1502,6 +1993,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--no-writeback", action="store_true")
     parser.add_argument("--no-pitfall-drafts", action="store_true")
+    parser.add_argument(
+        "--no-archive",
+        action="store_true",
+        help="Skip auto-archiving the rendered 复盘 report itself to "
+        "references/private/review/ (default: archived — F2 fix, see "
+        "save_review_report docstring). Use for exploratory runs.",
+    )
     parser.add_argument(
         "--validate-archive",
         action="store_true",
@@ -1550,7 +2048,14 @@ def main(argv: list[str] | None = None) -> int:
         generate_drafts=not args.no_pitfall_drafts,
         include_archive=args.include_archive,
     )
-    print(render_report(report))
+    rendered = render_report(report)
+    print(rendered)
+    if not args.no_archive:
+        # base_dir mirrors --archive-dir so a non-default archive root
+        # (e.g. a test fixture) doesn't silently fall through to the
+        # module's real references/private/ default.
+        saved_path = save_review_report(report, rendered, base_dir=args.archive_dir)
+        print(f"\n[复盘 report auto-archived to {saved_path}]", file=sys.stderr)
     return 0
 
 

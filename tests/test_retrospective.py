@@ -15,6 +15,8 @@ refactor; their tests are gone.
 
 from __future__ import annotations
 
+import json
+import re
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -22,6 +24,7 @@ import pytest
 from scripts.retrospective import (
     DIRECTIONAL_NOISE_BAND,
     MARKOUT_HORIZONS,
+    STRUCTURE_DIRECTION,
     VOL_REGIME_IV_RANK_BAND,
     Call,
     Trade,
@@ -36,6 +39,7 @@ from scripts.retrospective import (
     generate_action_items,
     generate_pitfall_drafts,
     parse_archive_frontmatter,
+    parse_structured_calls,
     run_review,
     validate_archive_dir,
     write_back_outcome,
@@ -1241,3 +1245,883 @@ def test_parse_xenon_blotter_filters_to_window():
     trades = parse_xenon_blotter(_BLOTTER, date(2026, 6, 14), date(2026, 6, 30))
     # only the 6/16 fill is in-window
     assert len(trades) == 1 and trades[0].fill_price == 22.69
+
+
+# ----- U1 fixes (2026-07-02 June review): R1-R4 -----
+
+
+def test_r1_writeback_multi_ticker_archive_writes_all_verdicts(tmp_path: Path):
+    """R1: marker carries ticker+type, so every call on a shared archive lands."""
+    base = date(2026, 5, 1)
+    archive = _write_archive(
+        tmp_path,
+        name="macro-2026-05-01.md",
+        ticker="SPY, QQQ",
+        date_iso=base.isoformat(),
+        structures=[],
+        body="\n## Outcome / Lesson\n\n(empty)\n",
+    )
+    spot = {
+        "SPY": {base: 100.0, _horizon_date(base, 21): 110.0},
+        "QQQ": {base: 100.0, _horizon_date(base, 21): 90.0},
+    }
+    cms = [
+        compute_call_markout(
+            Call(tk, base, "directional", +1, None, archive, "bull"),
+            spot_history=spot,
+        )
+        for tk in ("SPY", "QQQ")
+    ]
+    review_date = base + timedelta(days=30)
+    n1 = write_back_outcome(cms, review_date)
+    assert n1 == 2  # both tickers written, not just the first
+    text = archive.read_text()
+    assert f"复盘 {review_date.isoformat()}, SPY directional):** CORRECT" in text
+    assert f"复盘 {review_date.isoformat()}, QQQ directional):** WRONG" in text
+    # idempotent per call on re-run
+    assert write_back_outcome(cms, review_date) == 0
+
+
+def test_r2_pitfall_drafts_unique_per_ticker(tmp_path: Path):
+    """R2: two WRONG calls from the same archive emit two draft files."""
+    base = date(2026, 5, 1)
+    shared = Path("macro-2026-05-01.md")
+    spot = {
+        "SPY": {base: 100.0, _horizon_date(base, 21): 90.0},
+        "QQQ": {base: 100.0, _horizon_date(base, 21): 90.0},
+    }
+    cms = [
+        compute_call_markout(
+            Call(tk, base, "directional", +1, None, shared, "bull"),
+            spot_history=spot,
+        )
+        for tk in ("SPY", "QQQ")
+    ]
+    assert all(cm.verdict == "WRONG" for cm in cms)
+    written = generate_pitfall_drafts(cms, tmp_path / "drafts", base)
+    assert len(written) == 2
+    names = {p.name for p in written}
+    assert names == {
+        "pitfall-macro-2026-05-01-spy-directional.md",
+        "pitfall-macro-2026-05-01-qqq-directional.md",
+    }
+
+
+def test_r3_parse_futu_trades_min_lookback_guard():
+    """R3: short-lookback report raises so cross-month realized isn't dropped."""
+    from scripts.retrospective import parse_futu_trades
+
+    report = {
+        "trades": {
+            "dateRange": {"from": "2026-06-01T00:00:00Z", "to": "2026-07-01T00:00:00Z"},
+            "matchedTrades": [],
+            "unmatchedTrades": [],
+        }
+    }
+    with pytest.raises(ValueError, match="lookback too short"):
+        parse_futu_trades(
+            report, date(2026, 6, 1), date(2026, 6, 30), min_lookback_days=60
+        )
+    # default (0) preserves legacy behavior; long-enough lookback passes
+    assert parse_futu_trades(report, date(2026, 6, 1), date(2026, 6, 30)) == []
+    report["trades"]["dateRange"]["from"] = "2026-04-01T00:00:00Z"
+    assert (
+        parse_futu_trades(
+            report, date(2026, 6, 1), date(2026, 6, 30), min_lookback_days=60
+        )
+        == []
+    )
+
+
+def test_r4_realized_pnl_by_currency_never_mixes():
+    """R4: KRW closes group separately from USD — no cross-currency sum."""
+    from scripts.retrospective import parse_ib_trades, realized_pnl_by_currency
+
+    resp = {
+        "trades": [
+            {
+                "symbol": "000660",
+                "sec_type": "STK",
+                "side": "SELL",
+                "size": 9,
+                "price": 2858000,
+                "trade_time": "2026-06-22T05:30:00Z",
+                "realized_pnl": -595618.2,
+                "currency": "KRW",
+            },
+            {
+                "symbol": "SPX",
+                "sec_type": "OPT",
+                "side": "SELL",
+                "size": 1,
+                "price": 21.7,
+                "trade_time": "2026-06-23T15:30:00Z",
+                "realized_pnl": 726.7185,
+                "currency": "USD",
+            },
+            {
+                # opening leg: no realized -> excluded from the P&L table
+                "symbol": "QQQ",
+                "sec_type": "OPT",
+                "side": "BUY",
+                "size": 1,
+                "price": 5.52,
+                "trade_time": "2026-06-30T15:30:00Z",
+                "realized_pnl": 0,
+                "currency": "USD",
+            },
+        ]
+    }
+    trades = parse_ib_trades(resp, date(2026, 6, 1), date(2026, 6, 30))
+    assert [t.currency for t in trades] == ["KRW", "USD", "USD"]
+    grouped = realized_pnl_by_currency(trades)
+    assert grouped["KRW"] == {"realized": -595618.2, "n_closes": 1}
+    assert grouped["USD"]["n_closes"] == 1
+    assert grouped["USD"]["realized"] == pytest.approx(726.7185)
+    assert set(grouped) == {"KRW", "USD"}
+
+
+# ----- U2 (2026-07-02): structured `calls:` frontmatter -----
+
+
+def _write_archive_with_calls(
+    dir_: Path,
+    *,
+    name: str,
+    ticker: str,
+    date_iso: str,
+    calls_line: str,
+    body: str = "",
+) -> Path:
+    p = dir_ / name
+    fm_lines = [
+        "---",
+        f"ticker: {ticker}",
+        f"date: {date_iso}",
+        "structures: []",
+        "tags: []",
+        calls_line,
+        "---",
+    ]
+    p.write_text("\n".join(fm_lines) + "\n" + body, encoding="utf-8")
+    return p
+
+
+def test_structured_calls_take_precedence_over_prose(tmp_path: Path):
+    archive = _write_archive_with_calls(
+        tmp_path,
+        name="nvda-2026-07-02.md",
+        ticker="NVDA",
+        date_iso="2026-07-02",
+        calls_line=(
+            'calls: ["NVDA|structure|-1|bull_put_spread|PROBE|3|true", '
+            '"TSLA|directional|+1||NORMAL|0|false"]'
+        ),
+        # Body would classify bullish via prose keywords if it were read —
+        # proves the structured branch short-circuits prose entirely.
+        body="## TL;DR\n\nbullish 做多 buy the dip\n",
+    )
+    calls, skipped = extract_calls_from_archive(
+        tmp_path, date(2026, 7, 1), date(2026, 7, 3)
+    )
+    assert skipped == []
+    assert len(calls) == 2
+    nvda, tsla = calls
+    assert nvda.ticker == "NVDA" and nvda.call_type == "structure"
+    assert nvda.direction == -1 and nvda.structure == "bull_put_spread"
+    assert nvda.tier == "PROBE" and nvda.crowding_flags == 3
+    assert nvda.opposite_case_first is True
+    assert tsla.ticker == "TSLA" and tsla.call_type == "directional"
+    assert tsla.direction == +1 and tsla.structure is None
+    assert tsla.tier == "NORMAL" and tsla.crowding_flags == 0
+    assert tsla.opposite_case_first is False
+    assert calls[0].archive_path == archive
+
+
+def test_structured_calls_empty_list_yields_no_calls_and_skips_prose(tmp_path: Path):
+    _write_archive_with_calls(
+        tmp_path,
+        name="macro-2026-07-02.md",
+        ticker="SPX",
+        date_iso="2026-07-02",
+        calls_line="calls: []",
+        body="## TL;DR\n\nbullish 做多\n",
+    )
+    calls, skipped = extract_calls_from_archive(
+        tmp_path, date(2026, 7, 1), date(2026, 7, 3)
+    )
+    assert calls == []
+    assert skipped == []  # explicit empty calls is not an error
+
+
+def test_structured_calls_malformed_entry_reported_not_silently_dropped(
+    tmp_path: Path,
+):
+    _write_archive_with_calls(
+        tmp_path,
+        name="bad-2026-07-02.md",
+        ticker="NVDA",
+        date_iso="2026-07-02",
+        calls_line='calls: ["NVDA|not_a_type|+1||PROBE|0|false"]',
+    )
+    calls, skipped = extract_calls_from_archive(
+        tmp_path, date(2026, 7, 1), date(2026, 7, 3)
+    )
+    assert calls == []
+    assert len(skipped) == 1
+    assert "unknown call_type" in skipped[0]["reason"]
+
+
+def test_structured_calls_reject_unknown_tier(tmp_path: Path):
+    calls, reasons = parse_structured_calls(
+        ["NVDA|directional|+1||MEGA_YOLO|0|false"],
+        analysis_date=date(2026, 7, 2),
+        archive_path=Path("x.md"),
+        notes="",
+    )
+    assert calls == []
+    assert len(reasons) == 1 and "unknown tier" in reasons[0]
+
+
+def test_pattern_analysis_by_tier_only_counts_structured_calls():
+    base = date(2026, 5, 1)
+    spot = {
+        "NVDA": {
+            base: 100.0,
+            _horizon_date(base, 21): 90.0,  # bullish -> WRONG
+            base + timedelta(days=7): 100.0,
+            _horizon_date(base + timedelta(days=7), 21): 88.0,
+            base + timedelta(days=14): 100.0,
+            _horizon_date(base + timedelta(days=14), 21): 85.0,
+        }
+    }
+    tiered_calls = [
+        Call(
+            "NVDA",
+            base + timedelta(days=7 * i),
+            "directional",
+            +1,
+            None,
+            Path(f"n{i}.md"),
+            "",
+            tier="PROBE",
+        )
+        for i in range(3)
+    ]
+    untiered_call = Call("NVDA", base, "directional", +1, None, Path("legacy.md"), "")
+    cms = [compute_call_markout(c, spot_history=spot) for c in tiered_calls]
+    cms.append(compute_call_markout(untiered_call, spot_history=spot))
+    pat = detect_pattern_anomalies(cms)
+    assert pat["by_tier"]["PROBE"]["n_scored"] == 3
+    assert pat["by_tier"]["PROBE"]["hit_rate"] == 0.0
+    assert None not in pat["by_tier"]  # untiered call excluded, no crash
+
+
+def test_k4_action_item_reports_scored_over_raw_not_raw_alone(tmp_path: Path):
+    """K4 fix: 'TSLA: 0% over 7 calls' when only 1 was scored is the
+    overfitting trap the 2026-07-02 June review flagged — S1 must show
+    scored/raw, and the ≥3 threshold gates on SCORED count."""
+    base = date(2026, 5, 1)
+    # 1 scored (WRONG) + 2 UNKNOWN (missing spot at horizon) => below the
+    # PATTERN_MIN_SCORED=3 gate, so no S-item should fire at all.
+    spot = {"TSLA": {base: 100.0, _horizon_date(base, 21): 90.0}}
+    archive = tmp_path / "private"
+    archive.mkdir()
+    for i in range(3):
+        _write_archive(
+            archive,
+            name=f"tsla-{i}.md",
+            ticker="TSLA",
+            date_iso=(base + timedelta(days=7 * i)).isoformat(),
+            structures=["long_call"],
+        )
+    report = run_review(
+        window="monthly",
+        today=base + timedelta(days=14),
+        archive_dir=archive,
+        spot_history=spot,  # only base has spot data -> other 2 calls UNKNOWN
+        iv_rank_history=None,
+        trades=[],
+        trade_sources=[],
+        write_back=False,
+        generate_drafts=False,
+    )
+    s_items = [i for i in report.action_items if i["id"].startswith("S")]
+    assert s_items == []  # 1 scored < PATTERN_MIN_SCORED=3 -> ticker excluded
+
+
+# ----- U3 (2026-07-02): decision ledger section wiring -----
+
+
+def test_ledger_section_included_in_render_report(tmp_path: Path):
+    from scripts.retrospective import render_report
+
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="weekly",
+        today=date(2026, 7, 2),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[],
+        trade_sources=[],
+        write_back=False,
+        generate_drafts=False,
+        ledger_section="## Decision ledger\n\n- **L1** TSLA: roll down [NORMAL] due 2026-06-25 ⚠ OVERDUE",
+    )
+    rendered = render_report(report)
+    assert "## Decision ledger" in rendered
+    assert "L1" in rendered and "OVERDUE" in rendered
+    # Decision ledger section appears before Layer A in the rendered order.
+    assert rendered.index("## Decision ledger") < rendered.index("## Layer A")
+
+
+def test_ledger_section_omitted_when_empty(tmp_path: Path):
+    from scripts.retrospective import render_report
+
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="weekly",
+        today=date(2026, 7, 2),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[],
+        trade_sources=[],
+        write_back=False,
+        generate_drafts=False,
+    )
+    assert "## Decision ledger" not in render_report(report)
+
+
+# ----- U5 (2026-07-02): save_review_report auto-archive -----
+
+
+def test_save_review_report_writes_expected_path_and_frontmatter(tmp_path: Path):
+    from scripts.retrospective import render_report, save_review_report
+
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="weekly",
+        today=date(2026, 7, 2),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[],
+        trade_sources=[],
+        write_back=False,
+        generate_drafts=False,
+    )
+    rendered = render_report(report)
+    saved = save_review_report(report, rendered, base_dir=archive)
+    expected = archive / "review" / "2026-07-02-book-mixed-weekly-retrospective.md"
+    assert saved == expected
+    assert saved.exists()
+    text = saved.read_text(encoding="utf-8")
+    assert text.startswith("---\n")
+    assert "ticker: BOOK" in text
+    assert "date: 2026-07-02" in text
+    assert "tags: [weekly-review, auto-archived]" in text
+    assert "# 复盘 — Weekly review" in text  # rendered body preserved
+
+
+def test_save_review_report_appends_outcome_section_when_missing(tmp_path: Path):
+    from scripts.retrospective import render_report, save_review_report
+
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="monthly",
+        today=date(2026, 7, 2),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[],
+        trade_sources=[],
+        write_back=False,
+        generate_drafts=False,
+    )
+    rendered = render_report(report)
+    assert "## Outcome / Lesson" not in rendered  # render_report never emits one
+    saved = save_review_report(report, rendered, base_dir=archive)
+    assert "## Outcome / Lesson" in saved.read_text(encoding="utf-8")
+
+
+def test_save_review_report_overwrites_same_day_same_window(tmp_path: Path):
+    from scripts.retrospective import save_review_report
+
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="weekly",
+        today=date(2026, 7, 2),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[],
+        trade_sources=[],
+        write_back=False,
+        generate_drafts=False,
+    )
+    saved1 = save_review_report(report, "first render", base_dir=archive)
+    saved2 = save_review_report(report, "second render", base_dir=archive)
+    assert saved1 == saved2
+    assert "second render" in saved2.read_text(encoding="utf-8")
+    assert "first render" not in saved2.read_text(encoding="utf-8")
+
+
+# ----- U6 (2026-07-02): flag_hedge_cost_outliers (F3, reverse cost-cap) -----
+
+
+def _opt_trade(
+    *,
+    ticker,
+    side,
+    right,
+    strike,
+    expiry_iso,
+    fill_price,
+    quantity=1,
+    trade_date=date(2026, 6, 5),
+):
+    from scripts.retrospective import (
+        flag_hedge_cost_outliers,  # noqa: F401 (import check)
+    )
+
+    return Trade(
+        ticker=ticker,
+        trade_date=trade_date,
+        side=side,
+        quantity=quantity,
+        fill_price=fill_price,
+        contract_type="OPT",
+        option_meta={"right": right, "strike": strike, "expiry_iso": expiry_iso},
+    )
+
+
+def test_flag_hedge_cost_outliers_catches_r1_vix_call_spread():
+    """R1 case: manual VIX Aug 20/30 call spread ~8% NLV annualized, found
+    only by hand-calculation weeks later per the 2026-07-01 skill audit."""
+    from scripts.retrospective import flag_hedge_cost_outliers
+
+    # BUY leg only (the SELL leg isn't hedge-like — filtered out by design,
+    # see docstring: this overstates spread cost on purpose).
+    trades = [
+        _opt_trade(
+            ticker="VIX",
+            side="BUY",
+            right="C",
+            strike=20,
+            expiry_iso="2026-08-21",
+            fill_price=5.0,  # $500/contract
+            quantity=25,
+            trade_date=date(2026, 6, 5),
+        )
+    ]
+    # 77 DTE (6/5 -> 8/21). cost = 500*25 = 12,500. NLV small enough to trip 1.5% cap.
+    out = flag_hedge_cost_outliers(trades, nlv=100_000)
+    assert len(out) == 1
+    assert out[0]["ticker"] == "VIX"
+    assert out[0]["annualized_cost_pct"] > 0.015
+
+
+def test_flag_hedge_cost_outliers_within_cap_not_flagged():
+    from scripts.retrospective import flag_hedge_cost_outliers
+
+    trades = [
+        _opt_trade(
+            ticker="QQQ",
+            side="BUY",
+            right="P",
+            strike=600,
+            expiry_iso="2026-12-18",  # ~196 DTE, standing hedge
+            fill_price=2.0,
+            quantity=5,
+            trade_date=date(2026, 6, 5),
+        )
+    ]
+    # cost = 200*5 = 1,000. NLV = 1,000,000 -> annualized well under 1.5%.
+    out = flag_hedge_cost_outliers(trades, nlv=1_000_000)
+    assert out == []
+
+
+def test_flag_hedge_cost_outliers_ignores_non_hedge_shapes():
+    from scripts.retrospective import flag_hedge_cost_outliers
+
+    trades = [
+        # SELL leg -> not a BUY, never flagged regardless of cost.
+        _opt_trade(
+            ticker="VIX",
+            side="SELL",
+            right="C",
+            strike=30,
+            expiry_iso="2026-08-21",
+            fill_price=50.0,
+            quantity=25,
+        ),
+        # long call on a non-VIX ticker -> not hedge-like.
+        _opt_trade(
+            ticker="NVDA",
+            side="BUY",
+            right="C",
+            strike=200,
+            expiry_iso="2026-07-17",
+            fill_price=50.0,
+            quantity=10,
+        ),
+        # stock trade -> not OPT, skipped.
+        Trade(
+            ticker="SPY",
+            trade_date=date(2026, 6, 5),
+            side="BUY",
+            quantity=100,
+            fill_price=700.0,
+            contract_type="STK",
+            option_meta=None,
+        ),
+    ]
+    assert flag_hedge_cost_outliers(trades, nlv=100_000) == []
+
+
+def test_flag_hedge_cost_outliers_skips_missing_option_meta():
+    from scripts.retrospective import flag_hedge_cost_outliers
+
+    trades = [
+        Trade(
+            ticker="VIX",
+            trade_date=date(2026, 6, 5),
+            side="BUY",
+            quantity=25,
+            fill_price=50.0,
+            contract_type="OPT",
+            option_meta=None,
+        ),
+    ]
+    assert flag_hedge_cost_outliers(trades, nlv=100_000) == []
+
+
+def test_flag_hedge_cost_outliers_skips_expired_or_unparseable_expiry():
+    from scripts.retrospective import flag_hedge_cost_outliers
+
+    trades = [
+        _opt_trade(
+            ticker="VIX",
+            side="BUY",
+            right="C",
+            strike=20,
+            expiry_iso="not-a-date",
+            fill_price=50.0,
+            quantity=25,
+        ),
+        _opt_trade(
+            ticker="VIX",
+            side="BUY",
+            right="C",
+            strike=20,
+            expiry_iso="2026-06-01",  # before trade_date 2026-06-05 -> dte<=0
+            fill_price=50.0,
+            quantity=25,
+            trade_date=date(2026, 6, 5),
+        ),
+    ]
+    assert flag_hedge_cost_outliers(trades, nlv=100_000) == []
+
+
+def test_flag_hedge_cost_outliers_raises_on_non_positive_nlv():
+    from scripts.retrospective import flag_hedge_cost_outliers
+
+    with pytest.raises(ValueError, match="positive"):
+        flag_hedge_cost_outliers([], nlv=0)
+
+
+# ----- U6 wiring: run_review(nlv=...) -> report.hedge_cost_outliers / R-items -----
+
+
+def test_run_review_nlv_none_skips_hedge_check(tmp_path: Path):
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="weekly",
+        today=date(2026, 6, 5),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[
+            _opt_trade(
+                ticker="VIX",
+                side="BUY",
+                right="C",
+                strike=20,
+                expiry_iso="2026-08-21",
+                fill_price=50.0,
+                quantity=25,
+            )
+        ],
+        trade_sources=["IB"],
+        write_back=False,
+        generate_drafts=False,
+    )
+    assert report.hedge_cost_outliers == []
+    assert not any(i["id"].startswith("R") for i in report.action_items)
+
+
+def test_run_review_nlv_supplied_flags_outlier_and_emits_r_item(tmp_path: Path):
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="weekly",
+        today=date(2026, 6, 5),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[
+            _opt_trade(
+                ticker="VIX",
+                side="BUY",
+                right="C",
+                strike=20,
+                expiry_iso="2026-08-21",
+                fill_price=50.0,
+                quantity=25,
+            )
+        ],
+        trade_sources=["IB"],
+        write_back=False,
+        generate_drafts=False,
+        nlv=100_000,
+    )
+    assert len(report.hedge_cost_outliers) == 1
+    r_items = [i for i in report.action_items if i["id"].startswith("R")]
+    assert len(r_items) == 1
+    assert "VIX" in r_items[0]["desc"] and "annualized" in r_items[0]["desc"]
+
+
+def test_render_report_shows_hedge_cost_outlier_table(tmp_path: Path):
+    from scripts.retrospective import render_report
+
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="weekly",
+        today=date(2026, 6, 5),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[
+            _opt_trade(
+                ticker="VIX",
+                side="BUY",
+                right="C",
+                strike=20,
+                expiry_iso="2026-08-21",
+                fill_price=50.0,
+                quantity=25,
+            )
+        ],
+        trade_sources=["IB"],
+        write_back=False,
+        generate_drafts=False,
+        nlv=100_000,
+    )
+    rendered = render_report(report)
+    assert "Hedge cost outliers (1" in rendered
+    assert "VIX" in rendered
+
+
+# ----- Pass-1 self-review fixes (2026-07-02): save_review_report -----
+
+
+def test_save_review_report_stamps_empty_calls_to_prevent_self_extraction(
+    tmp_path: Path,
+):
+    """Without calls: [], this auto-archived file would itself be swept up
+    by a future extract_calls_from_archive as a garbage 'BOOK' ticker call
+    — exactly the noise class U2 exists to eliminate."""
+    from scripts.retrospective import render_report, save_review_report
+
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="weekly",
+        today=date(2026, 7, 2),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[],
+        trade_sources=[],
+        write_back=False,
+        generate_drafts=False,
+    )
+    saved = save_review_report(report, render_report(report), base_dir=archive)
+    assert "calls: []" in saved.read_text(encoding="utf-8")
+
+    # Confirm the self-extraction guard actually works end to end: a
+    # subsequent extraction sweep over the SAME archive must not pick up
+    # this file as a Call at all.
+    calls, skipped = extract_calls_from_archive(
+        archive, date(2026, 6, 25), date(2026, 7, 3)
+    )
+    assert calls == []
+    assert skipped == []
+
+
+def test_save_review_report_preserves_hand_edited_outcome_on_rerun(tmp_path: Path):
+    """A same-day re-run (e.g. after fixing a data gap) must not clobber
+    Outcome/Lesson notes the trader already hand-wrote into the auto-
+    archived file — only the auto-generated body above it refreshes."""
+    from scripts.retrospective import save_review_report
+
+    archive = tmp_path / "private"
+    archive.mkdir()
+    report = run_review(
+        window="weekly",
+        today=date(2026, 7, 2),
+        archive_dir=archive,
+        spot_history={},
+        iv_rank_history=None,
+        trades=[],
+        trade_sources=[],
+        write_back=False,
+        generate_drafts=False,
+    )
+    path = save_review_report(report, "first render", base_dir=archive)
+    # Simulate the trader hand-editing the Outcome/Lesson section in place.
+    text = path.read_text(encoding="utf-8")
+    text = text.replace(
+        "_(auto-archived — trader fills in)_",
+        "交易者手动记录：这周判断偏乐观，实际打脸。",
+    )
+    path.write_text(text, encoding="utf-8")
+
+    saved2 = save_review_report(
+        report, "second render (data gap fixed)", base_dir=archive
+    )
+    final = saved2.read_text(encoding="utf-8")
+    assert "second render (data gap fixed)" in final
+    assert "交易者手动记录：这周判断偏乐观，实际打脸。" in final
+    assert "first render" not in final
+
+
+# ----- Pass-2 codex-review fixes (2026-07-02): realized_pnl_by_currency -----
+
+
+def test_realized_pnl_by_currency_counts_exact_zero_close():
+    """A genuine break-even close (realized_pnl == 0.0) is still a real
+    closing trade — truthiness silently dropped it (codex-review finding)."""
+    from scripts.retrospective import realized_pnl_by_currency
+
+    trades = [
+        Trade(
+            ticker="QQQ",
+            trade_date=date(2026, 6, 5),
+            side="SELL",
+            quantity=1,
+            fill_price=5.0,
+            contract_type="OPT",
+            option_meta=None,
+            realized_pnl=0.0,
+            currency="USD",
+        ),
+        Trade(
+            ticker="SPY",
+            trade_date=date(2026, 6, 5),
+            side="SELL",
+            quantity=1,
+            fill_price=5.0,
+            contract_type="OPT",
+            option_meta=None,
+            realized_pnl=None,
+            currency="USD",  # opening leg
+        ),
+    ]
+    out = realized_pnl_by_currency(trades)
+    assert out == {"USD": {"realized": 0.0, "n_closes": 1}}
+
+
+# ----- Pass-3 adversarial: unbracketed single calls: scalar -----
+
+
+def test_structured_calls_unbracketed_single_entry_still_parses(tmp_path: Path):
+    """calls: "TICKER|..." (no [] brackets) hits parse_archive_frontmatter's
+    scalar branch, not the inline-list branch — confirm the str path in
+    parse_structured_calls handles it (a plausible single-call archive)."""
+    p = tmp_path / "single-call.md"
+    p.write_text(
+        "---\n"
+        "ticker: NVDA\n"
+        "date: 2026-07-02\n"
+        "structures: []\n"
+        "tags: []\n"
+        'calls: "NVDA|directional|+1||PROBE|0|false"\n'
+        "---\n"
+        "body\n",
+        encoding="utf-8",
+    )
+    calls, skipped = extract_calls_from_archive(
+        tmp_path, date(2026, 7, 1), date(2026, 7, 3)
+    )
+    assert skipped == []
+    assert len(calls) == 1
+    assert calls[0].ticker == "NVDA" and calls[0].tier == "PROBE"
+
+
+# ----- Post-review fix (2026-07-02): documented `calls:` examples must parse -----
+#
+# F1/F2 (found re-reviewing PR #30 after the TSLA test-drive archive got
+# rejected by this exact parser): SKILL.md's own worked example had an
+# extra `|` (8 fields, not 7) and paired direction=-1 with bull_put_spread
+# (STRUCTURE_DIRECTION says +1) — an LLM copying either example verbatim
+# produces a skipped call or a call scored backwards. Both docs (SKILL.md
+# and this module's own `calls:` docstring) must stay parseable and
+# direction-consistent, checked directly against the source strings so a
+# future doc edit can't silently reintroduce either bug.
+
+
+def test_skill_md_calls_example_parses_without_malformed_reasons():
+    skill_md = (
+        Path(__file__).resolve().parent.parent
+        / "plugins"
+        / "option-wizard"
+        / "skills"
+        / "option-wizard"
+        / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"Example: `calls: (\[.*?\])`", skill_md)
+    assert match, "SKILL.md `calls:` worked example not found — did the section move?"
+    raw_calls = json.loads(match.group(1))
+    calls, reasons = parse_structured_calls(
+        raw_calls, analysis_date=date(2026, 7, 2), archive_path=Path("x.md"), notes=""
+    )
+    assert reasons == []
+    assert len(calls) == len(raw_calls)
+    for c in calls:
+        expected_dir = STRUCTURE_DIRECTION.get(c.structure) if c.structure else None
+        if expected_dir is not None:
+            assert c.direction == expected_dir, (
+                f"{c.ticker} example pairs direction={c.direction} with "
+                f"structure={c.structure!r}, but STRUCTURE_DIRECTION says "
+                f"{expected_dir} — scores backwards if copied verbatim"
+            )
+
+
+def test_retrospective_module_calls_docstring_example_parses():
+    src = (
+        Path(__file__).resolve().parent.parent
+        / "plugins"
+        / "option-wizard"
+        / "skills"
+        / "option-wizard"
+        / "scripts"
+        / "retrospective.py"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"#\s+calls: (\[.*?\])", src)
+    assert match, "retrospective.py `calls:` docstring example not found — did it move?"
+    raw_calls = json.loads(match.group(1))
+    calls, reasons = parse_structured_calls(
+        raw_calls, analysis_date=date(2026, 7, 2), archive_path=Path("x.md"), notes=""
+    )
+    assert reasons == []
+    assert len(calls) == len(raw_calls)

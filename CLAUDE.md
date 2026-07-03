@@ -1,21 +1,48 @@
-# option-wizard working agreements
+# CLAUDE.md
 
-This file is loaded automatically when Claude Code runs in this repo.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Dev commands
+
+```bash
+uv sync --all-extras          # install deps + dev extras
+.venv/bin/pytest              # run full unit suite
+.venv/bin/pytest tests/test_xenon_client.py -v   # single file
+.venv/bin/pytest tests/test_xenon_client.py::test_health -v  # single test
+XENON_KEY=... XENON_BASE=http://... .venv/bin/pytest tests/integration/ -v -s
+uv run ruff check .           # lint (ruff is a dev dep)
+```
+
+## Architecture
+
+All skill logic lives under `plugins/option-wizard/skills/option-wizard/`:
+- **`scripts/`** — business logic. Each module is one workflow stage.
+- **`scripts/_clients/`** — thin HTTP wrappers (`xenon.py`, `uw.py`, `tv.py`, `ib.py`, `fred.py`). No business logic; just auth + HTTP + retry.
+- **`references/`** — authoritative policy docs (`SKILL.md`, `analysis-runbook.md`, `review-framework.md`, etc.). These are the source of truth for trading rules; the code enforces them.
+- **`tests/`** at repo root. `tests/conftest.py` inserts the skill root onto `sys.path` so tests import `from scripts.X import Y` directly — no install needed.
+- **`tests/integration/`** — live smoke tests, skipped unless `XENON_KEY` is set.
+
+Key scripts and their role:
+| Script | Role |
+|---|---|
+| `manage_positions.py` | Daily scan — reads book + greeks from xenon, runs `defined_risk_audit`, emails report |
+| `live_quote.py` | `live_quote()` — xenon `/options/greeks` primary, ib_insync fallback, no BSM |
+| `xenon_normalize.py` | Pure JSON→internal-shape mappers from xenon `/portfolio` + `/futu/portfolio` |
+| `retrospective.py` | 复盘 weekly/monthly review — markout scoring via `parse_xenon_blotter()` + archive |
+| `defined_risk_audit.py` | `audit_book()` — flags uncovered CSPs / naked shorts against cash balance |
+| `xenon.py` | CLI shim: `python -m scripts.xenon <path> [-p K=V]` for ad-hoc xenon probing |
+
+`private/` is gitignored — personal profile, NLV, journal, positions never leave the machine. Copy `docs/setup/trader-profile.md.example` → `private/trader-profile.md` to activate personal overrides.
+
+Required env vars (`.env`, gitignored — see `.env.example`): `XENON_BASE`, `XENON_KEY`, `UW_API_KEY`, `IB_HOST`, `IB_PORT`.
+
+---
+
+## Trading policy (working agreements)
+
 Generic skill philosophy below; personal trader preferences (broker
 setup, language, response style, macro budget) come from
 `private/trader-profile.md` when present.
-
-## Customize for your trading style
-
-```bash
-mkdir -p private/
-cp docs/setup/trader-profile.md.example private/trader-profile.md
-$EDITOR private/trader-profile.md
-```
-
-The skill runs without this file using the generic defaults documented
-below. `private/` is gitignored — your profile, NLV, positions, and
-trade journal never leave your machine.
 
 ## Data source order (universal)
 
@@ -54,6 +81,14 @@ text. Summary:
    honest (state what was tried) and are never extrapolated/fabricated.
 8. **Ticker analysis structure non-negotiable** — opens with the Layer
    Coverage table from `references/analysis-runbook.md`.
+9. **复盘 source separation** — archive = analysis quality only; broker
+   (IB + Futu, both required) = trade flow only; never cross-infer.
+10. **Decision doctrine** — every actionable rec carries an aggression
+    tier (PROBE → EXCEPTIONAL, max loss hard-capped at 5% NLV at every
+    tier), competing hypotheses, a crowding check (one-sided consensus →
+    the opposite case written first), ≥2 structures compared, and closes
+    with the 决策块 decision block. Conviction never exceeds evidence
+    quality. Full text: `references/decision-doctrine.md`.
 
 ## Trader-policy defaults
 
@@ -66,10 +101,6 @@ These have sensible defaults but can be overridden in
   (with English technical terms) or any other style in the profile.
 - **Tone:** concrete numbers, structures, verdicts; avoid hedging
   language ("you might consider", "可以考虑").
-
-## Python environment
-
-`uv` only. Venv at `.venv`. Python 3.13. Test with `.venv/bin/pytest`.
 
 ---
 

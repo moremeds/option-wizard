@@ -3,7 +3,7 @@ type: Index
 title: option-wizard Knowledge Base — Bundle Root
 description: OKF v0.1 entry point for the option-wizard reference bundle — frameworks, runbooks, pitfalls, case studies, and source-discipline reference.
 tags: [index, okf, bundle-root, options-trading]
-timestamp: 2026-06-22T15:49:54Z
+timestamp: 2026-07-02T02:20:29Z
 ---
 
 # option-wizard Knowledge Base
@@ -19,6 +19,7 @@ The curated knowledge bundle behind the `option-wizard` skill. It is an **[Open 
 
 | File | What it covers |
 |---|---|
+| [`decision-doctrine.md`](decision-doctrine.md) | How evidence becomes a decision: phases A–G, aggression tiers (PROBE→EXCEPTIONAL, 5% NLV max-loss hard cap), contrarian crowding check, dynamic risk re-rating, missing-data taxonomy, adversarial QC, 决策块 decision block. |
 | [`strategies.md`](strategies.md) | Regime × structure matrix, strong-bullish-conviction veto, LEAPS stock replacement, position management, macro-hedge trigger heuristics. |
 | [`gamma-framework.md`](gamma-framework.md) | Dealer GEX → gamma flip / put wall / call wall; oi_cluster vs aggregate for short-dated. |
 | [`price-action-framework.md`](price-action-framework.md) | Orderbook microstructure mental model; tape / news / catalyst-clock validation. |

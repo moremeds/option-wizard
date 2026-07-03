@@ -71,6 +71,37 @@ post-mortems separately.
 | **Weekly review** | 7 calendar days back from invocation date | Micro-feedback loop: did this week's calls hold up? What position changes happened? | Layer A per-call scorecard + Layer B trade log + Layer C advisory observations. No pattern aggregation (sample too small). |
 | **Monthly review** | 30 calendar days back | Pattern detection: systematic miss on a call type / ticker / regime? Roll cadence / execution drift? | Everything from weekly + Layer A pattern analysis (hit rate by call type / ticker / regime) + action items proposing skill rule changes |
 
+### Two-pass monthly cadence (U5/R5)
+
+Running a monthly review on the 1st structurally starves directional and
+structure verdicts regardless of data quality: `DEFAULT_DIRECTIONAL_VERDICT_HORIZON = 21`
+trading days from a call made on the 3rd-to-last week of the month hasn't
+matured by month-end, and the earliest calls' T+21 lands a few days INTO
+the following month. Observed 2026-07-01: a monthly run over June found
+directional/structure calls scattered from early-June still short of
+T+21 — the calendar hadn't caught up, independent of whether the
+underlying spot/IV data was pulled correctly. Run the monthly review
+**twice**:
+
+1. **Facts pass** (month-start, ~day 1-2): Layer B realized P&L,
+   vol-regime verdicts (T+10 horizon — matures fast), pattern analysis on
+   whatever IS scored, action items. This is the primary monthly report.
+2. **Verdict backfill pass** (~3 weeks later, once the month's T+21
+   horizons have matured — typically the 3rd week of the FOLLOWING
+   month): re-run the same window with `--no-pitfall-drafts` (drafts
+   already exist from pass 1) to backfill directional/structure verdicts
+   into the SAME archive files via `write_back_outcome`'s per-call
+   idempotent marker (U2/R1) — re-running is safe, already-verdicted
+   calls are skipped. This is what finally resolves questions like "was
+   the anchoring-bias pattern real?" that pass 1 can only flag as
+   provisional.
+
+Both passes' rendered reports auto-archive to different filenames if run
+on different calendar dates (U5/F2 below) — the backfill pass's `today`
+argument should still be the ORIGINAL window's `today` for consistent
+verdict horizons, so pass the same `--today` explicitly to avoid
+`save_review_report` computing a different `window_end` than pass 1.
+
 CLI:
 
 ```bash
@@ -79,8 +110,9 @@ CLI:
 .venv/bin/python -m scripts.retrospective --window monthly --no-writeback --no-pitfall-drafts
 ```
 
-Default behavior writes verdicts back to source archive files and emits
-pitfall draft candidates. Flags opt out.
+Default behavior writes verdicts back to source archive files, emits
+pitfall draft candidates, **and auto-archives the rendered report itself**
+(U5/F2 — see `save_review_report`). All three opt out via flags.
 
 ## Layer A — Analysis quality (archive only)
 
@@ -97,6 +129,29 @@ The framework recognizes three types. **Source is `references/private/{ticker,ma
 
 **FCN / AQ / DQ structure recommendations are filtered out** at the
 extraction stage — they live in PB workflows.
+
+### Extraction precedence: structured `calls:` vs prose (U2, 2026-07-02)
+
+Two extraction paths, in priority order:
+
+1. **Structured `calls:` frontmatter** (SKILL.md §"Reporting & archive") —
+   explicit `ticker|call_type|direction|structure|tier|crowding_flags|opposite_case_first`
+   entries written when the archive is saved from a 决策块. Carries the
+   decision-doctrine `tier` and crowding-check outcome that prose can
+   never recover. When the `calls` key is present (even `calls: []`), it
+   takes **full precedence** for that file — the prose branch below never
+   runs, including for multi-ticker files.
+2. **Prose classification** (legacy / pre-doctrine archives) — keyword
+   scan over the structure tag or TL;DR text, as documented below. This
+   is a fallback, not the source of truth: it misclassifies mixed-language
+   calls (e.g. a "lock in roll profit" call scored as a pure directional
+   bet — see the 2026-07-01 skill-audit archive's TSLA 6/3 case) and
+   cannot carry `tier` at all.
+
+Malformed `calls:` entries (wrong field count, unknown `call_type` /
+`tier`, unparseable direction) are never silently dropped — they land in
+`skipped_archives` with the parse reason, same discipline as a missing
+frontmatter field.
 
 > ¹ **Markout-truth fetch path (read before quoting any spot).**
 > `opencli tradingview` exposes only a live `quote` (current spot) — it has
@@ -231,6 +286,24 @@ quallitative-first is to be lenient enough to learn from the data, not
 to assert precision the sample size doesn't support. Tighten once data
 accumulates.
 
+### Four scoring dimensions (layer-mapped)
+
+Each reviewed decision is assessed on four independent dimensions.
+Outcome ≠ decision quality: a profitable trade can have poor process, a
+losing trade can be a high-quality decision. Layer assignment is strict
+per hard rule #9:
+
+| Dimension | Question | Layer / source |
+|---|---|---|
+| Thesis quality | Was the market interpretation right? | **A** — archive markout only |
+| Structure quality | Did the chosen structure express the thesis efficiently, vs the Phase-E alternatives recorded in the archive? | **A** — archive only |
+| Process quality | Were doctrine phases followed — hypotheses built, crowding checked, tier justified, invalidation falsifiable (`decision-doctrine.md`)? | **A** — archive only |
+| Execution quality | Timing, limit-vs-fill slippage, bracket placement, roll timing | **B** — broker blotter only |
+
+No per-decision join across A and B — "thesis was right AND execution
+was late" about the same trade is a Layer C judgment-only observation,
+never an algorithmic score.
+
 ## Layer B — Trade flow (broker only: IB + Futu)
 
 **Both brokers required every review** (per `private/trader-profile.md`
@@ -247,9 +320,12 @@ Check freshness via the blotter `as_of` and the Futu `is_stale` flag on
 then call the matching parser:
 
 - **IB**: `mcp__claude_ai_Interactive_Brokers_IBKR__get_account_trades period=DAYS_7|DAYS_30` → `parse_ib_trades(response, window_start, window_end) → list[Trade]`
-- **Futu**: `cd ~/projects/portfolio-analyser && npx tsx src/cli.ts ft --range 1m --rerun` (writes JSON report under `reports/`) → `parse_futu_trades(report_json, window_start, window_end) → list[Trade]`. **`--rerun` is mandatory for every review.** The CLI caches trades by ISO week, so without it a freshly-*named* report can still carry a stale `trades.dateRange.to` (observed 2026-06-14: a report file stamped 06-12 whose trade data ended 06-08, silently dropping the entire week's Futu flow). Before trusting any pre-existing report, verify `trades.dateRange.to ≥ the last trading day at or before window_end`; `parse_futu_trades` raises `ValueError` on stale data as a backstop, but the orchestrator should pass `--rerun` so it never trips.
+- **Futu**: `cd ~/projects/portfolio-analyser && npx tsx src/cli.ts ft --range 3m --rerun` (writes JSON report under `reports/`) → `parse_futu_trades(report_json, window_start, window_end, min_lookback_days=60) → list[Trade]`. **`--rerun` is mandatory for every review.** The CLI caches trades by ISO week, so without it a freshly-*named* report can still carry a stale `trades.dateRange.to` (observed 2026-06-14: a report file stamped 06-12 whose trade data ended 06-08, silently dropping the entire week's Futu flow). Before trusting any pre-existing report, verify `trades.dateRange.to ≥ the last trading day at or before window_end`; `parse_futu_trades` raises `ValueError` on stale data as a backstop, but the orchestrator should pass `--rerun` so it never trips.
+  **`--range` must extend well past the review window** (R3, observed 2026-07-02): the CLI's pair matcher only sees trades inside its range, so a June monthly review fed a `--range 1m` report attaches realized P&L only to intra-June round trips — every June close of a May-opened position lands in `unmatchedTrades` with no `realizedPnl` and silently drops out of the realized sum. This sign-flipped June 2026 realized P&L (−$9.9k under 1m vs +$9.7k under 3m; 39 cross-month pairs incl. MU +$10.2k / ORCL +$9.5k / QQQ +$6.4k were being discarded). Monthly reviews: `--range 3m` + `min_lookback_days=60` (raises when the report's `dateRange.from` starts too late). Weekly reviews: `--range 3m` is still the safe default — short round trips dominate weeklies, but cross-week closes are common.
 
 Tag `trade_sources=["IB", "Futu"]` (or whichever subset succeeded) on the `ReviewReport`. If a broker pull fails or returns empty, surface that as a **data gap in Layer B's output**, never silently drop. The `cross_cut_advisory` is computed only against the brokers actually pulled.
+
+**Realized P&L is reported per currency, never summed across currencies** (R4, observed twice in June 2026): IB `get_account_trades` returns `realized_pnl` for KRW-denominated contracts (000660 / 005930) in raw KRW, and the Futu book mixes JPY names (6981) into a USD account. A naive sum showed IB June at "−$1,056,703". `realized_pnl_by_currency(trades)` groups closing legs by the fill's `currency` field; `render_report` prints one row per currency. FX conversion is deliberately out of scope — no fabricated rates.
 
 For every fill within the window:
 
@@ -282,13 +358,22 @@ This is the **same** check Workflow 3 (book review) runs in real-time
 hasn't run a book review since the positions were opened still sees
 the regime.
 
-**Mechanics:**
-- Pull `get_chains_for_expiry` for each held expiry (ATM ± 3 strikes
-  is enough — full chain is wasteful here).
-- Extract ATM IV per expiry via
-  `scripts.term_curve.atm_iv_from_chain_rows(rows, spot)`.
-- Label adjacent pairs via
-  `scripts.term_curve.label_regime(atm_iv_by_expiry)` →
+**Mechanics (U4, R6 — `iv_term_structure`-first, chain-pull fallback):**
+- **Primary**: one `UWClient.iv_term_structure(ticker)` call covers the
+  ticker's full listed term structure. Extract ATM IV for the held
+  expiries via `scripts.term_curve.atm_iv_by_expiry_from_term_structure(rows, held_expiries)`
+  — cheaper than pulling a chain per expiry (one API call regardless of
+  how many expiries are held).
+- **Fallback**: any held expiry NOT covered by `iv_term_structure`
+  (observed missing for SPX weeklies like 2026-07-10 / 2026-07-13
+  alongside covered monthlies on the same day) falls back to
+  `get_chains_for_expiry` (ATM ± 3 strikes is enough — full chain is
+  wasteful here) → `scripts.term_curve.atm_iv_from_chain_rows(rows, spot)`.
+  This function auto-pivots the actual MCP per-contract row shape (one
+  row per strike+option_type, single `iv` field) — no manual transform
+  needed.
+- Merge both dicts (term-structure hits ∪ chain-pull fallback hits) and
+  label adjacent pairs via `scripts.term_curve.label_regime(atm_iv_by_expiry)` →
   list of `{from_expiry, to_expiry, iv_from, iv_to, basis, regime}`.
 - Collapse with `scripts.term_curve.summarize_regime(pairs)` →
   one of `all_contango`, `all_inverted`, `all_flat`,
@@ -312,6 +397,32 @@ be intentionally structured that way (e.g., long the inverted expiry
 as a vol-crush hedge against the contango short). Whether to roll
 the inverted leg out is a trader-judgment decision and surfaces in
 Layer C if the trader chooses to flag it.
+
+### Hedge cost outliers — reverse cost-cap check (U6/F3)
+
+`scripts.retrospective.flag_hedge_cost_outliers(trades, nlv=..., max_annual_cost_pct=0.015)`
+retroactively re-checks every BUY option leg that reads as long insurance
+(long put on any ticker, or a long VIX call) against the same
+`max_annual_cost_pct` cap `scripts.macro_hedge::build_macro_hedge`
+enforces on structures routed through it. This closes a gap the 2026-07-01
+monthly skill audit found: a manual VIX Aug 20/30 call spread ran at
+~8% NLV annualized cost — 5× the 1.5% cap — because it was placed
+directly in the broker's app, never touching `build_macro_hedge`'s
+enforcement (hard rule #3's preflight requirement was simply bypassed).
+The check can't prevent that trade; it surfaces the miss as an **R-item**
+in Action items instead of requiring a trader to notice and hand-calculate
+it during a later book review.
+
+**Scope and known approximation:** flags the BUY leg's STANDALONE
+annualized cost, not a spread's net debit — a multi-leg structure's short
+legs would reduce the true cost, so this deliberately overstates cost on
+spreads rather than attempting to reconstruct net debit from unordered
+fills. Requires `option_meta` (right/strike/expiry); IB-sourced trades
+without it are silently skipped (this is a known Layer B limitation, not
+a false "compliant" signal — see `data-sources.md` "IB option trades
+carry no strike/expiry/right"). Only runs when the caller supplies
+`nlv` to `run_review` — omitted (not run) when NLV isn't available that
+day, never against a fabricated NLV.
 
 ## Layer C — Cross-cut (advisory, judgment-only)
 
@@ -376,16 +487,24 @@ Weekly reviews skip this — sample too small. Monthly reviews aggregate:
 | Breakdown | Computed |
 |---|---|
 | Hit rate by call type | `% CORRECT` for directional / vol regime / structure each |
-| Hit rate by ticker | Tickers with ≥3 calls in window: per-ticker correct% |
+| Hit rate by ticker | Tickers with ≥`PATTERN_MIN_SCORED` (3) **scored** calls in window: per-ticker correct% |
+| Hit rate by aggression tier (U2) | Tiers with ≥`PATTERN_MIN_SCORED` (3) scored calls: per-tier correct% — structured `calls:` frontmatter only, answers "does higher conviction actually perform better?" **NO_TRADE is scoreable too** once `decision-doctrine.md`'s shadow-trade requirement is followed — the archived direction is the judgment the constraint suppressed, so this tier answers "was the underlying read right even when something else forced a pass?" |
 | Hit rate by vol regime | Hit rate when analysis labeled RICH vs NEUTRAL vs CHEAP |
 | Hit rate by data source | Hit rate when call rested primarily on UW signal vs TV chart vs IB account state |
 
-Outliers (e.g., TSLA at 0% hit rate over 4 calls; CHEAP regime at 80%
-hit rate vs RICH at 30%) get flagged in action items as candidates for
+Every breakdown reports both `n` (raw calls) and `n_scored` (excludes
+UNKNOWN/NEUTRAL) — the grouping threshold gates on `n_scored`, not `n`.
+This closes a 2026-07-02 overfitting trap: a ticker showing "0% hit rate
+over 7 calls" had only 1 scored call and 6 still UNKNOWN (T+21 hadn't
+matured) — the other 6 were noise, not evidence.
+
+Outliers (e.g., TSLA at 0% hit rate over 4 scored calls; CHEAP regime at
+80% hit rate vs RICH at 30%) get flagged in action items as candidates for
 rule additions or pitfall promotion.
 
 ## Output structure (4 stages, mirrors book-review)
 
+0. **Decision ledger (U3)** — `scripts.ledger.render_ledger_section(load_ledger(default_ledger_path()), today)`, passed into `run_review(ledger_section=...)`. Opens the report with open action items from prior reviews (flagging any past their `due` date) before any markout scoring — a fourth source, independent of Layer A/B, never joined against either per hard rule #9.
 1. **Data pull**
    - Window dates + count of archive files scanned
    - IB trade pull result (count, date range) — note any pull failures
@@ -396,14 +515,19 @@ rule additions or pitfall promotion.
    - Columns: `ticker | date | type | direction | T+1 | T+5 | T+10 | T+21 | T+45 | verdict`
    - Sorted by date descending
 3. **Side-by-side markout table** (the central deliverable)
-4. **Discipline 4-quadrant** + per-quadrant avg markout
+4. **Per-layer aggregates** (Layer A call markout · Layer B trade flow) + Layer C advisory observations — no A↔B quadrant (removed in v0.3 source separation, hard rule #9)
 5. **Pattern analysis** (monthly only)
 6. **Action items — END only, never mid-flow**
 
 ## Action items
 
-Four groups, mirroring the book-review structure:
+Five groups, mirroring the book-review structure:
 
+- **R1, R2, …** — Hedge cost outliers (U6/F3) — manually-placed hedge-like
+  option legs that ran over the macro-hedge annualized cost cap without
+  ever passing through `build_macro_hedge`'s enforcement (see
+  `flag_hedge_cost_outliers`). Only appears when `run_review(nlv=...)`
+  is supplied.
 - **S1, S2, …** — Skill rules to add (e.g., "skill is wrong on TSLA 4/4
   times — add CLAUDE.md rule downweighting directional signals for TSLA
   during sustained negative dealer gamma")
@@ -416,9 +540,9 @@ Four groups, mirroring the book-review structure:
   used BSM fallback — getting macmini DB online would tighten Layer 2
   fidelity")
 
-Each line carries a one-line description + a trigger phrase ("S1 add",
-"P1 promote", "T1 update", "D1 fix") so the trader picks fast. The
-framework waits for the trader to pick — never auto-applies.
+Each line carries a one-line description + a trigger phrase ("R1 review",
+"S1 add", "P1 promote", "T1 update", "D1 fix") so the trader picks fast.
+The framework waits for the trader to pick — never auto-applies.
 
 ## Auto-writeback to archive Outcome section
 
@@ -470,6 +594,30 @@ duplicates.
 
 Opt-out: `--no-pitfall-drafts` flag skips draft emission.
 
+### Promotion lifecycle + overfitting gate
+
+Status flow for any candidate rule — pitfall or S-item skill rule:
+
+`OBSERVATION` (draft in `_drafts/`) → `CANDIDATE` (trader picks "P1
+promote" / "S1 add") → `ACTIVE` (numbered `pitfalls/NN-slug.md`, or
+SKILL.md / trader-profile rule) → `RETIRED` (marked retired in the
+index — never deleted, so the same bad idea isn't rediscovered).
+
+Trader approval is required for every promotion to `ACTIVE` — the
+framework never auto-applies. Before promoting, run the overfitting gate:
+
+- One memorable loss, or a repeated pattern? Label the evidence:
+  anecdotal / emerging / statistically meaningful / structurally
+  established. Anecdotal findings stay `OBSERVATION`.
+- Does it generalize across tickers and regimes, or fit one incident?
+- Does it improve expected value, or only historical fit?
+- Could it suppress valid future opportunities?
+- Was the original decision actually wrong, or was the data
+  unavailable / stale at the time?
+- Does it survive transaction costs and realistic fills?
+
+Prefer small reversible rules over sweeping ones.
+
 ## Integration with existing skill components
 
 - **Archive Outcome section** — SKILL.md §"Reporting & archive" already
@@ -514,6 +662,21 @@ surfaced four gaps. All four are now closed:
   missing required fields (`ticker` / `date` / `structures` / `tags`),
   unparseable date, missing `## Outcome / Lesson` section. Exits
   non-zero if any file has issues so it can be wired into CI.
+
+## Fixes from the June 2026 monthly run (v0.4)
+
+The first full monthly review (June 2026, run 2026-07-02) surfaced four
+Layer-mechanics bugs, all fixed:
+
+- **R1 — writeback marker was date-only.** A multi-ticker archive (macro
+  snapshot emitting SPY/QQQ/IWM/DIA/VIX calls) got only its FIRST call's
+  verdict written; the marker check treated the rest as duplicates. Marker
+  now carries `ticker + call_type`.
+- **R2 — pitfall drafts keyed by archive stem only.** Three WRONG calls on
+  the same 6/4 snapshot collapsed into one draft file. Filenames now carry
+  `-{ticker}-{call_type}`.
+- **R3 — Futu matcher lookback** (see Layer B section above).
+- **R4 — cross-currency realized P&L** (see Layer B section above).
 
 ## Architectural refactor (v0.3 — source separation)
 
@@ -608,9 +771,26 @@ report = run_review(
     trades=trades, trade_sources=["IB", "Futu"],
     cross_cut_advisory=advisory,
     drafts_dir=Path(".../pitfalls/_drafts"),
+    ledger_section=ledger_section,
+    nlv=nlv,  # U6/F3 — omit (None) if NLV isn't available this run
 )
-print(render_report(report))
+rendered = render_report(report)
+print(rendered)
+
+# Auto-archive the report itself (U5/F2, default ON — see save_review_report
+# docstring). Skip this call entirely for exploratory / throwaway runs.
+from scripts.retrospective import save_review_report
+saved_path = save_review_report(report, rendered)
+print(f"[archived to {saved_path}]")
 '
+```
+
+Stage 0 — decision ledger (U3, `scripts/ledger.py`):
+
+```python
+from scripts.ledger import default_ledger_path, load_ledger, render_ledger_section
+
+ledger_section = render_ledger_section(load_ledger(default_ledger_path()), window_end)
 ```
 
 Orchestrator CLI (Phase 1 scaffold — data fetchers still need to be wired in by the trader):
@@ -622,8 +802,8 @@ Orchestrator CLI (Phase 1 scaffold — data fetchers still need to be wired in b
 # Monthly review with pattern analysis
 .venv/bin/python -m scripts.retrospective --window monthly
 
-# Exploratory run — no archive edits, no drafts
-.venv/bin/python -m scripts.retrospective --window monthly --no-writeback --no-pitfall-drafts
+# Exploratory run — no archive edits, no drafts, no auto-archived report
+.venv/bin/python -m scripts.retrospective --window monthly --no-writeback --no-pitfall-drafts --no-archive
 
 # Validate archive frontmatter / Outcome section format (S2).
 # Exits non-zero on any issue → suitable for CI.

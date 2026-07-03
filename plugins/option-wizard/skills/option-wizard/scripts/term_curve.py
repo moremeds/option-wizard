@@ -139,6 +139,45 @@ def summarize_regime(pairs: Iterable[dict]) -> str:
     return "mixed_with_flat"
 
 
+def _pivot_uw_contract_rows(
+    rows: list[dict], *, strike_key: str, call_iv_key: str, put_iv_key: str
+) -> list[dict]:
+    """Pivot per-contract chain rows into the per-strike {call_iv, put_iv}
+    shape `atm_iv_from_chain_rows` expects.
+
+    `get_chains_for_expiry` (the MCP tool actually used at Workflow-6
+    step 3b) returns one row per (strike, option_type) with a single `iv`
+    field — e.g. `{"strike": "7215", "option_type": "put", "iv": null}` —
+    not the {strike, call_iv, put_iv} wide shape this module was designed
+    against. Observed live 2026-07-02: every caller had to hand-write this
+    same defaultdict pivot before the ATM lookup worked at all.
+
+    Writes into `call_iv_key`/`put_iv_key` (Pass-2 codex-review fix,
+    2026-07-02) rather than hardcoded `"call_iv"`/`"put_iv"` — a caller
+    combining custom key names with per-contract-shaped rows previously
+    got a silent `None` back: the pivot wrote hardcoded keys, then the
+    caller's lookup under its own custom key names found nothing.
+    """
+    by_strike: dict[float, dict] = {}
+    for r in rows:
+        s = float(r[strike_key])
+        entry = by_strike.setdefault(s, {strike_key: s})
+        iv = r.get("iv")
+        if iv is None:
+            continue
+        side = str(r.get("option_type", "")).lower()
+        key = (
+            call_iv_key
+            if side.startswith("c")
+            else put_iv_key
+            if side.startswith("p")
+            else None
+        )
+        if key:
+            entry[key] = iv
+    return list(by_strike.values())
+
+
 def atm_iv_from_chain_rows(
     rows: list[dict],
     spot: float,
@@ -154,9 +193,13 @@ def atm_iv_from_chain_rows(
     None if neither side has a valid IV at the closest strike.
 
     Args:
-        rows: list of per-strike rows from `get_chains_for_expiry`. Each
-            row must carry a strike and at least one of call_iv / put_iv.
-            Missing / null IV fields are tolerated.
+        rows: list of rows from `get_chains_for_expiry`. Accepts either
+            shape: the per-strike {strike, call_iv, put_iv} shape (pass
+            straight through), or the actual MCP per-contract shape — one
+            row per (strike, option_type) carrying a single `iv` field —
+            which is auto-pivoted via `_pivot_uw_contract_rows` when
+            detected (rows carry `option_type` but not `call_iv_key`).
+            Missing / null IV fields are tolerated either way.
         spot: current spot price of the underlying.
         strike_key, call_iv_key, put_iv_key: column names. Defaults match
             the canonical UW shape; override for alternate providers.
@@ -172,6 +215,11 @@ def atm_iv_from_chain_rows(
         raise ValueError("rows is empty; cannot pick ATM strike")
     if spot <= 0:
         raise ValueError(f"spot must be positive; got {spot}")
+
+    if "option_type" in rows[0] and call_iv_key not in rows[0]:
+        rows = _pivot_uw_contract_rows(
+            rows, strike_key=strike_key, call_iv_key=call_iv_key, put_iv_key=put_iv_key
+        )
 
     def _strike(row: dict) -> float:
         return float(row[strike_key])
@@ -196,3 +244,42 @@ def atm_iv_from_chain_rows(
     if not ivs:
         return None
     return sum(ivs) / len(ivs)
+
+
+def atm_iv_by_expiry_from_term_structure(
+    rows: list[dict],
+    expiries: Iterable[str],
+    *,
+    expiry_key: str = "expiry",
+    iv_key: str = "volatility",
+) -> dict[str, float]:
+    """Extract ATM IV per held expiry from a UW `iv_term_structure` response.
+
+    One `iv_term_structure(ticker)` call covers the ticker's full listed
+    term structure (verified live 2026-07-02: `dte: 0` through the
+    furthest-dated contract, `volatility` field per row) — far cheaper
+    than pulling `get_chains_for_expiry` once per expiry via
+    `atm_iv_from_chain_rows`. Use this first; fall back to
+    `atm_iv_from_chain_rows` only for expiries this doesn't cover (some
+    non-monthly/quarterly dates are absent — observed missing for SPX
+    2026-07-10 and 2026-07-13 the same day).
+
+    Args:
+        rows: `iv_term_structure(ticker)["data"]`.
+        expiries: ISO expiry strings to extract (the trader's held dates).
+        expiry_key, iv_key: column names; defaults match the UW shape.
+
+    Returns:
+        dict mapping only the FOUND expiries to their ATM IV (float).
+        Missing expiries are simply absent from the result — the caller
+        chains `atm_iv_from_chain_rows` for those, then feeds the union
+        into `label_regime`.
+    """
+    by_expiry = {str(r[expiry_key]): r for r in rows}
+    out: dict[str, float] = {}
+    for exp in expiries:
+        row = by_expiry.get(exp)
+        if row is None or row.get(iv_key) is None:
+            continue
+        out[exp] = float(row[iv_key])
+    return out
