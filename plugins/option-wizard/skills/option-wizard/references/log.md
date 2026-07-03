@@ -10,6 +10,26 @@ timestamp: 2026-07-02T02:20:29Z
 
 OKF reserved `log.md` — chronological history of this knowledge bundle, most recent first. Seeded from git history; append a dated entry whenever you add or materially revise a concept (see [`OKF.md`](OKF.md) conformance checklist). For the full commit-level history, `git log -- plugins/option-wizard/skills/option-wizard/references/`.
 
+## 2026-07-03 — Pitfall 06 + crowding-check × catalyst escalation rule
+
+TSLA Q2 delivery print (2026-07-02) beat consensus by 18% — and every
+public bull estimate — yet the stock fell 7.5%, its worst day in a year
+("buy the rumor, sell the news"). The same-day pre-print analysis had
+already fired the crowding check (dealer gamma / price action / flow all
+one-sided bullish), but a falling IV rank into the print was read as a
+standalone "market isn't pricing risk" signal that overrode the crowding
+flag instead of escalating it — the two questions (does the options
+market charge event premium vs. will the crowd's one-sided position get
+sold) got collapsed into one.
+
+- Added [`pitfalls/06-crowded-into-catalyst-iv-rank-trap.md`](pitfalls/06-crowded-into-catalyst-iv-rank-trap.md).
+- `decision-doctrine.md` §Crowding check gained a **mandatory escalation**
+  sub-rule: crowding check fired + a scheduled binary catalyst inside the
+  analysis window → IV-rank / term-structure trend can no longer override
+  the crowding flag; requires a two-sided reaction scenario table
+  (beat-and-held / beat-and-sold / miss) naming the crowding-driven
+  downside case before the IV evidence feeds into the bull case.
+
 ## 2026-07-02 — Re-review fixes + 决策块 shadow trade
 
 Re-reviewed PR #30 after the first live end-to-end test (TSLA, U1–U6

@@ -19,6 +19,7 @@ Analytical mistakes and the rules they generated. One file per rule (`NN-slug.md
 | 03 | HIGH | Put ratio backspreads are short-skew premium capture, not tail hedges | [`03-ratio-backspreads-not-tail-hedges.md`](03-ratio-backspreads-not-tail-hedges.md) |
 | 04 | HIGH | ER range structures — set strikes at entry, add a bearish-breakdown veto | [`04-er-range-structure-strike-staleness.md`](04-er-range-structure-strike-staleness.md) |
 | 05 | HIGH | Macro prints are not single-name ER — buy the hedge BEFORE the print | [`05-macro-print-no-post-event-iv-crush.md`](05-macro-print-no-post-event-iv-crush.md) |
+| 06 | HIGH | Crowding check fired + known binary catalyst — a falling IV rank is not a bullish all-clear | [`06-crowded-into-catalyst-iv-rank-trap.md`](06-crowded-into-catalyst-iv-rank-trap.md) |
 
 ## Lookup by trade type
 
@@ -26,6 +27,7 @@ Analytical mistakes and the rules they generated. One file per rule (`NN-slug.md
 - **Hedge timing / vol mechanics** → 05 (pre-event window), 01 (contango bleed).
 - **Earnings vol-selling** → 04 (strike staleness + bearish-breakdown veto).
 - **PB structured products (AQ/DQ)** → 02 (implicit yield).
+- **Event-risk / crowded pre-catalyst positioning** → 06 (crowding + IV-rank trap), 04 (strike staleness), 05 (macro prints).
 
 ## Adding a pitfall
 
