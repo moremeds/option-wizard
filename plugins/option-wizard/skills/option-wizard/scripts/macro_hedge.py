@@ -957,7 +957,7 @@ def build_macro_hedge(
         "scenario": scenario,
         "spot": spot,
         "horizon_days": hedge_horizon_days,
-        "legs": [l for l in legs if l["qty"] > 0],
+        "legs": [leg for leg in legs if leg["qty"] > 0],
         "cost_dollar": round(cost, 2),
         "cost_pct_of_portfolio_annualized": (
             round(cost / portfolio_notional / t_years, 4) if t_years > 0 else None

@@ -19,6 +19,14 @@ import math
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
+from scipy.stats import norm
+
+# Chain-lookup primitives are shared via scripts._market. We re-export them
+# under the original `_underscore` names so existing callers and tests
+# don't break.
+from scripts._market import nearest_expiry_to_tenor as _nearest_expiry_to_tenor
+from scripts._market import read_chain_mid as _read_chain_mid
+
 # ─── Data contracts ──────────────────────────────────────────
 
 
@@ -609,10 +617,10 @@ def build_counter_offer_email(
         return cn, en
 
     lever_lines_cn = "\n".join(
-        f"  {i + 1}. {_describe_lever(l)[0]}" for i, l in enumerate(levers)
+        f"  {i + 1}. {_describe_lever(lv)[0]}" for i, lv in enumerate(levers)
     )
     lever_lines_en = "\n".join(
-        f"  {i + 1}. {_describe_lever(l)[1]}" for i, l in enumerate(levers)
+        f"  {i + 1}. {_describe_lever(lv)[1]}" for i, lv in enumerate(levers)
     )
 
     # Mode-aware preamble: markup-comparison shows "PB quoted yield vs fair";
@@ -1084,8 +1092,6 @@ def _earnings_in_middle_50pct(
     return 0.25 <= pct <= 0.75
 
 
-from scipy.stats import norm
-
 # Broadie-Glasserman (1997) discrete-monitoring constant. Derived from the
 # Riemann zeta function ζ(1/2). Shifts the effective barrier away from spot
 # by `BETA * sigma * sqrt(T/n)` to correct for discrete observation.
@@ -1196,17 +1202,6 @@ def _accumulation_pv(
     discount = math.exp(-r * avg_time_yr)
 
     return daily_notional * alive_obs * discount
-
-
-# Chain-lookup primitives are now shared via scripts._market. We re-export
-# them under the original `_underscore` names so existing callers and tests
-# don't break.
-from scripts._market import (
-    nearest_expiry_to_tenor as _nearest_expiry_to_tenor,
-)
-from scripts._market import (
-    read_chain_mid as _read_chain_mid,
-)
 
 
 def _expected_alive_obs(ko_prob_total: float, n_obs: int) -> float:

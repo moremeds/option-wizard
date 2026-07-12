@@ -11,10 +11,9 @@ ATM 30d proxy for SPX, VIX9D for short-tenor VIX option IV proxy.
 
 from __future__ import annotations
 
-import json
 import math
-from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
@@ -114,7 +113,6 @@ def get_close(panel, ticker, dt):
     df = panel.get(ticker)
     if df is None:
         return None
-    idx = df.index
     # find idx <= dt
     sub = df[df.index <= pd.Timestamp(dt)]
     if sub.empty:
@@ -603,7 +601,7 @@ def calm_year_carry(panel, year):
         spot_exit = float(spx_exit["Close"].iloc[0])
         iv = float(vix[vix.index <= entry_dt]["Close"].iloc[-1]) / 100
         T_entry = (exit_dt - entry_dt).days / 365
-        T_exit = 0  # held to expiry effectively for cost analysis
+        # held to expiry effectively for cost analysis
 
         contracts = max(1, int(round(NOTIONAL / (spot * 100))))
 
@@ -653,10 +651,6 @@ def calm_year_carry(panel, year):
 
         # Weekly 25C, 7DTE, roll weekly approx as monthly*4 spend
         # Simplified: 4 rolls/month
-        cost_pu_w = bs_call(v, 25, 7 / 365, iv_v_entry)
-        contracts_w = (
-            max(1, int(target_spend / (cost_pu_w * 100))) if cost_pu_w > 0.01 else 0
-        )
         # We approximate weekly carry by sampling exit at +7 days vs entry, four times
         weekly_pnl = 0
         weekly_cost = 0
@@ -713,7 +707,6 @@ def calm_year_carry(panel, year):
 
 def precondition_signals(panel, event):
     peak = event.peak_date
-    t10 = trading_offset(panel, "^VIX", peak, -10)
     rows = []
     for label, offset in [("T-10", -10), ("T-5", -5), ("T-2", -2)]:
         dt = trading_offset(panel, "^VIX", peak, offset)
@@ -857,7 +850,7 @@ def main():
     def to_num(x):
         try:
             return float(x)
-        except:
+        except Exception:
             return None
 
     df["conv_num"] = df["convexity"].apply(to_num)

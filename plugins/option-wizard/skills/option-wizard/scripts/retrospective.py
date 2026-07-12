@@ -24,7 +24,7 @@ import math
 import re
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
@@ -637,7 +637,7 @@ def render_validation_report(entries: list[dict[str, Any]]) -> str:
     lines: list[str] = []
     clean = sum(1 for e in entries if not e["issues"])
     total = len(entries)
-    lines.append(f"# Archive validation report")
+    lines.append("# Archive validation report")
     lines.append("")
     lines.append(
         f"**Scanned:** {total} files | **Clean:** {clean} | **Issues:** {total - clean}"
@@ -1262,11 +1262,11 @@ def generate_pitfall_drafts(
             f"## Truth data (markout per horizon)\n\n"
             + "\n".join(markout_lines)
             + "\n\n"
-            f"## What went wrong\n\n"
-            f"(trader fills in)\n\n"
-            f"## Rule going forward\n\n"
-            f"(trader fills in — strip account-specific numbers before promoting "
-            f"to references/pitfalls/NN-slug.md)\n"
+            "## What went wrong\n\n"
+            "(trader fills in)\n\n"
+            "## Rule going forward\n\n"
+            "(trader fills in — strip account-specific numbers before promoting "
+            "to references/pitfalls/NN-slug.md)\n"
         )
         path.write_text(body, encoding="utf-8")
         written.append(path)

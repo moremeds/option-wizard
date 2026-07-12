@@ -1,6 +1,6 @@
 import pytest
 from scripts.ib_order import (
-    REJECTED_STRUCTURES,
+    build_brackets,
     build_pl_matrix,
     build_preflight,
     validate_structure,
@@ -163,9 +163,6 @@ def test_preflight_includes_required_blocks():
     assert preflight["account_check"]["sufficient_buying_power"] is True
 
 
-from scripts.ib_order import build_brackets
-
-
 def test_brackets_default_50pct_take_profit_and_full_stop_for_spread():
     opening = {
         "structure": "bull_put_spread",
@@ -203,7 +200,13 @@ def test_build_preflight_tags_mid_source_unspecified_by_default():
     from scripts.ib_order import build_preflight
 
     legs = [
-        {"action": "SELL", "right": "P", "strike": 420.0, "qty": 1, "limit_price": 1.50},
+        {
+            "action": "SELL",
+            "right": "P",
+            "strike": 420.0,
+            "qty": 1,
+            "limit_price": 1.50,
+        },
         {"action": "BUY", "right": "P", "strike": 415.0, "qty": 1, "limit_price": 0.50},
     ]
     pf = build_preflight(
@@ -226,10 +229,22 @@ def test_build_preflight_preserves_caller_supplied_mid_source():
     from scripts.ib_order import build_preflight
 
     legs = [
-        {"action": "SELL", "right": "P", "strike": 420.0, "qty": 1,
-         "limit_price": 1.50, "mid_source": "IB"},
-        {"action": "BUY", "right": "P", "strike": 415.0, "qty": 1,
-         "limit_price": 0.50, "mid_source": "IB"},
+        {
+            "action": "SELL",
+            "right": "P",
+            "strike": 420.0,
+            "qty": 1,
+            "limit_price": 1.50,
+            "mid_source": "IB",
+        },
+        {
+            "action": "BUY",
+            "right": "P",
+            "strike": 415.0,
+            "qty": 1,
+            "limit_price": 0.50,
+            "mid_source": "IB",
+        },
     ]
     pf = build_preflight(
         structure="bull_put_spread",
@@ -265,8 +280,10 @@ def test_build_preflight_preserves_mid_provenance_from_macro_hedge():
         },
     }
     hedge = build_macro_hedge(
-        portfolio_notional=50_000_000, hedge_horizon_days=70,
-        scenario="deep_correction_-10", structure="put_spread",
+        portfolio_notional=50_000_000,
+        hedge_horizon_days=70,
+        scenario="deep_correction_-10",
+        structure="put_spread",
         snapshot=snapshot,
     )
     # Sanity: macro_hedge legs carry mid_provenance with UW source

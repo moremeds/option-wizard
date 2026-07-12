@@ -1,5 +1,9 @@
-import sys, os, json
+import os
+import sys
+
 sys.path.insert(0, "plugins/option-wizard/skills/option-wizard")
+
+
 def load_env(path):
     with open(path) as f:
         for line in f:
@@ -8,8 +12,11 @@ def load_env(path):
                 continue
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
 load_env(".env")
-from scripts._clients.uw import UWClient
+from scripts._clients.uw import UWClient  # noqa: E402
+
 c = UWClient()
 try:
     ivr = c.iv_rank("VIX")["data"]

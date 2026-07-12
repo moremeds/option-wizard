@@ -132,12 +132,12 @@ def test_to_audit_positions_round_trips_through_audit_book():
 
 def test_to_manage_legs_options_only_with_signed_qty_and_yyyymmdd():
     legs = to_manage_legs(IB_PORTFOLIO)
-    syms = [(l["symbol"], l["right"], l["expiry"], l["qty"]) for l in legs]
+    syms = [(leg["symbol"], leg["right"], leg["expiry"], leg["qty"]) for leg in legs]
     assert ("QQQ", "P", "20260717", -1.0) in syms
     assert ("SPX", "P", "20260717", 1.0) in syms
     # stock excluded
-    assert all(l["right"] in ("P", "C") for l in legs)
-    qqq = next(l for l in legs if l["symbol"] == "QQQ")
+    assert all(leg["right"] in ("P", "C") for leg in legs)
+    qqq = next(leg for leg in legs if leg["symbol"] == "QQQ")
     assert qqq["conId"] == 884159412
     assert qqq["strike"] == 692.0
     assert qqq["market_price"] == 10.74

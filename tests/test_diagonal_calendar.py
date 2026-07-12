@@ -1,11 +1,11 @@
 """Tests for scripts.diagonal_calendar."""
 
-import math
-
 import pytest
 from scripts.diagonal_calendar import (
     _bs_put_greeks,
     _strike_for_put_delta,
+    build_diagonal_calendar,
+    build_short_leg_roll,
 )
 
 
@@ -44,8 +44,6 @@ def test_strike_for_put_delta_invalid_target_raises():
 
 # --- Tasks 5+6+7 — mode dispatch, max_loss, breakevens, greeks, roll matrix ---
 
-from scripts.diagonal_calendar import build_diagonal_calendar
-
 RUT_SNAPSHOT_BSM = {
     "iv_atm_short": 0.28,
     "iv_atm_long": 0.30,
@@ -60,8 +58,8 @@ def test_calendar_mode_same_strike():
     )
     assert out["mode"] == "calendar"
     assert len(out["legs"]) == 2
-    long_leg = next(l for l in out["legs"] if l["action"] == "buy")
-    short_leg = next(l for l in out["legs"] if l["action"] == "sell")
+    long_leg = next(leg for leg in out["legs"] if leg["action"] == "buy")
+    short_leg = next(leg for leg in out["legs"] if leg["action"] == "sell")
     assert long_leg["strike"] == pytest.approx(short_leg["strike"], rel=1e-6), (
         "calendar mode requires Ks == Kl"
     )
@@ -72,8 +70,8 @@ def test_protective_strike_invariant_ks_below_kl():
     out = build_diagonal_calendar(
         spot=2300.0, mode="protective", snapshot=RUT_SNAPSHOT_BSM
     )
-    long_leg = next(l for l in out["legs"] if l["action"] == "buy")
-    short_leg = next(l for l in out["legs"] if l["action"] == "sell")
+    long_leg = next(leg for leg in out["legs"] if leg["action"] == "buy")
+    short_leg = next(leg for leg in out["legs"] if leg["action"] == "sell")
     assert short_leg["strike"] < long_leg["strike"]
 
 
@@ -81,8 +79,8 @@ def test_aggressive_mode_short_above_long():
     out = build_diagonal_calendar(
         spot=2300.0, mode="aggressive", snapshot=RUT_SNAPSHOT_BSM
     )
-    long_leg = next(l for l in out["legs"] if l["action"] == "buy")
-    short_leg = next(l for l in out["legs"] if l["action"] == "sell")
+    long_leg = next(leg for leg in out["legs"] if leg["action"] == "buy")
+    short_leg = next(leg for leg in out["legs"] if leg["action"] == "sell")
     assert short_leg["strike"] > long_leg["strike"], "aggressive: Ks > Kl"
 
 
@@ -118,7 +116,7 @@ def test_calendar_max_loss_close_to_net_debit():
     out = build_diagonal_calendar(
         spot=2300.0, mode="calendar", snapshot=RUT_SNAPSHOT_BSM
     )
-    long_leg = next(l for l in out["legs"] if l["action"] == "buy")
+    long_leg = next(leg for leg in out["legs"] if leg["action"] == "buy")
     discount_carry_ceiling = long_leg["strike"] * 0.01 * 100
     assert (
         out["net_debit_dollar"]
@@ -134,8 +132,8 @@ def test_protective_max_loss_close_to_net_debit():
     out = build_diagonal_calendar(
         spot=2300.0, mode="protective", snapshot=RUT_SNAPSHOT_BSM
     )
-    long_leg = next(l for l in out["legs"] if l["action"] == "buy")
-    short_leg = next(l for l in out["legs"] if l["action"] == "sell")
+    long_leg = next(leg for leg in out["legs"] if leg["action"] == "buy")
+    short_leg = next(leg for leg in out["legs"] if leg["action"] == "sell")
     width_dollars = (long_leg["strike"] - short_leg["strike"]) * 100
     # Must be ≪ width (would be off by ~$5,000+ if width term incorrectly added)
     assert out["max_loss_dollar"] < out["net_debit_dollar"] + width_dollars * 0.5
@@ -151,8 +149,8 @@ def test_aggressive_max_loss_width_plus_debit_plus_discount_carry():
     out = build_diagonal_calendar(
         spot=2300.0, mode="aggressive", snapshot=RUT_SNAPSHOT_BSM
     )
-    long_leg = next(l for l in out["legs"] if l["action"] == "buy")
-    short_leg = next(l for l in out["legs"] if l["action"] == "sell")
+    long_leg = next(leg for leg in out["legs"] if leg["action"] == "buy")
+    short_leg = next(leg for leg in out["legs"] if leg["action"] == "sell")
     width = short_leg["strike"] - long_leg["strike"]
     lower_bound = width * 100 + out["net_debit_dollar"]
     upper_bound = lower_bound + long_leg["strike"] * 0.01 * 100
@@ -229,7 +227,7 @@ def test_roll_matrix_short_put_pl_at_credit_above_strike():
     out = build_diagonal_calendar(
         spot=2300.0, mode="protective", snapshot=RUT_SNAPSHOT_BSM
     )
-    short_leg = next(l for l in out["legs"] if l["action"] == "sell")
+    short_leg = next(leg for leg in out["legs"] if leg["action"] == "sell")
     ks = short_leg["strike"]
     short_credit = short_leg["limit_price"] * 100
     up_row = next(r for r in out["roll_matrix"] if r["spot_scenario"] == 0.10)
@@ -314,7 +312,7 @@ def test_chain_path_consumes_greeks_when_provided():
         },
     }
     out = build_diagonal_calendar(spot=2300.0, mode="calendar", snapshot=snap)
-    long_leg = next(l for l in out["legs"] if l["action"] == "buy")
+    long_leg = next(leg for leg in out["legs"] if leg["action"] == "buy")
     assert long_leg["greeks_source"] == "UW", (
         f"long leg should consume chain greeks; got {long_leg['greeks_source']}"
     )
@@ -339,8 +337,6 @@ def test_regime_check_no_warning_when_match():
 
 
 # --- Task 9 — build_short_leg_roll ---
-
-from scripts.diagonal_calendar import build_short_leg_roll
 
 
 def test_roll_triggers_close_when_long_dte_too_short():

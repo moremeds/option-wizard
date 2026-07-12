@@ -92,7 +92,7 @@ def test_audit_flags_naked_residual_short_put_in_same_bucket():
     findings = audit_book(positions, cash_balance=0.0)
     nvda = next(f for f in findings if f["underlying"] == "NVDA")
     assert nvda["fails"] == "cash_secured_put"
-    assert sum(abs(l["position"]) for l in nvda["short_legs"]) == 10
+    assert sum(abs(leg["position"]) for leg in nvda["short_legs"]) == 10
 
 
 def test_audit_does_not_treat_calendar_as_protected():
@@ -106,4 +106,4 @@ def test_audit_does_not_treat_calendar_as_protected():
     findings = audit_book(positions, cash_balance=0.0)
     tsla = next(f for f in findings if f["underlying"] == "TSLA")
     assert tsla["fails"] == "cash_secured_put"
-    assert sum(abs(l["position"]) for l in tsla["short_legs"]) == 10
+    assert sum(abs(leg["position"]) for leg in tsla["short_legs"]) == 10
