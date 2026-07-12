@@ -82,3 +82,30 @@ Day-1 checklist:
 - Email not arriving → check
   `~/.config/option-wizard/email-errors.log` and re-run
   `docs/setup/gmail-app-password.md` setup steps.
+
+## Second cron job: daily regime snapshot
+
+`scripts/regime_snapshot.py` (capability audit R1) persists a daily regime
+state vector — IV rank per ticker, term-structure regime label, GEX levels,
+market-tide EOD, HY OAS — to
+`plugins/option-wizard/skills/option-wizard/references/private/market/regime-log.jsonl`
+(gitignored). This is a separate cron entry from the 9:30 AM position scan
+above: it runs after the 16:00 ET close so the day's IV rank / term
+structure / GEX reads are final settle values, not an intraday snapshot.
+
+```bash
+crontab -e
+# 16:35 ET (after close), Monday-Friday. Sourcing .env is required — UW_API_KEY
+# / FRED_API_KEY live there, and UWClient()/FREDClient() raise RuntimeError
+# without them.
+TZ=America/New_York
+35 16 * * 1-5  cd /Users/chenxi/projects/option-wizard && set -a && . ./.env && set +a && .venv/bin/python -m scripts.regime_snapshot >> /Users/chenxi/.config/option-wizard/regime.log 2>&1
+```
+
+Verify: `crontab -l` shows the entry; the next trading day after 16:35 ET,
+`tail /Users/chenxi/.config/option-wizard/regime.log` shows a line like
+`regime snapshot 2026-07-13 -> .../regime-log.jsonl (N gaps: [...])`, and the
+JSONL log has a new line for that date. Gaps are expected and honest — e.g.
+FRED (HY OAS) is a known-flaky dependency from this network; the script
+still writes the rest of the snapshot and records the miss in `gaps` rather
+than failing the whole run.
