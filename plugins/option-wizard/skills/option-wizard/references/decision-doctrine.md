@@ -1,9 +1,9 @@
 ---
 type: Framework
 title: Decision Doctrine — reasoning phases, aggression tiers, crowding check, adversarial QC
-description: How evidence becomes a decision — define the decision, competing hypotheses, disconfirmation + crowding check, ≥2-structure comparison, aggression tiers (PROBE→EXCEPTIONAL with a 5% NLV max-loss hard cap), dynamic risk re-rating, 12-class missing-data taxonomy, adversarial QC checklist, and the 决策块 final decision block.
+description: How evidence becomes a decision — define the decision, competing hypotheses, disconfirmation + crowding check (incl. mandatory escalation when crowding fires alongside a scheduled binary catalyst), ≥2-structure comparison, aggression tiers (PROBE→EXCEPTIONAL with a 5% NLV max-loss hard cap), dynamic risk re-rating, 12-class missing-data taxonomy, adversarial QC checklist, and the 决策块 final decision block.
 tags: [decision-doctrine, sizing, aggression-tiers, crowding, contrarian, adversarial-qc, scenarios, invalidation]
-timestamp: 2026-07-02T02:20:29Z
+timestamp: 2026-07-03T14:00:00Z
 ---
 
 # Decision Doctrine
@@ -114,6 +114,34 @@ first**, state what the crowd is missing that justifies joining it, and
 prefer convex defined-risk expressions over short-vol carry. Symmetric on
 crowded pessimism: surface squeeze / upside risk before any bearish or
 short-call recommendation.
+
+### Crowding check × scheduled binary catalyst (mandatory escalation)
+
+When the crowding check fires **and** a scheduled binary catalyst
+(earnings, delivery/production print, FDA date, macro release) falls
+inside the analysis window, a falling IV rank / compressed term structure
+into that catalyst must **not** be read as a standalone bullish "market
+isn't pricing risk" signal that overrides the crowding flag. IV rank
+trend answers "is the options market charging a premium for this event" —
+it does not answer "will the crowd's one-sided position get sold when the
+event lands." Compressed IV plus one-sided positioning is the textbook
+precondition for a "buy the rumor, sell the news" reversal — including on
+a **beat**: crowded longs who already priced in a strong outcome have no
+incremental buyer left once it prints, and no vol cushion to absorb any
+narrative caveat (sustainability, margins, guidance) attached to the
+headline number.
+
+Required output when both conditions hold: a **two-sided reaction
+scenario table** — beat-and-held / beat-and-sold / miss, each naming the
+crowding-driven downside case explicitly — before letting the IV-rank
+trend feed into the bull case. IV rank / term-structure evidence still
+describes what the options market is pricing; it does not settle whether
+the crowd itself will sell a good number. See pitfall
+`06-crowded-into-catalyst-iv-rank-trap.md` (TSLA 2026-07-02 delivery
+print — dealer gamma / price action / flow all one-sided bullish, IV rank
+falling into the print, crowding check fired but the falling-IV-rank
+reading was allowed to override it instead of triggering this escalation;
+stock fell 7.5% on a delivery beat that topped every public estimate).
 
 ## Dynamic risk management
 
