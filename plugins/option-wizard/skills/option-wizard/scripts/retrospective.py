@@ -748,6 +748,30 @@ def _nearest_horizon(h: int) -> int:
     return min(MARKOUT_HORIZONS, key=lambda x: abs(x - h))
 
 
+def _series_value_at_or_near(
+    series: dict[date, float], target: date, analysis_date: date, tol: int = 4
+) -> float | None:
+    """Value at `target`, or the nearest series date within ±tol days that is
+    strictly after analysis_date. `daily_closes` / the regime log are
+    trading-day-only, but `_horizon_date` is a 5-day/week CALENDAR
+    approximation, so a Friday-dated T+21 horizon lands on a weekend (holidays
+    shift any horizon) — an exact lookup would leave those calls permanently,
+    silently UNKNOWN. Excluding dates <= analysis_date stops a short horizon
+    (e.g. T+1 on a Friday) from collapsing onto the entry bar. Ties → later date."""
+    if target in series:
+        return series[target]
+    best: tuple[int, date] | None = None
+    for d in series:
+        if d <= analysis_date:
+            continue
+        dist = abs((d - target).days)
+        if dist > tol:
+            continue
+        if best is None or dist < best[0] or (dist == best[0] and d > best[1]):
+            best = (dist, d)
+    return series[best[1]] if best else None
+
+
 def compute_call_markout(
     call: Call,
     *,
@@ -771,7 +795,9 @@ def compute_call_markout(
     spot_0 = ticker_spots.get(call.analysis_date)
     if call.call_type == "directional":
         for h in MARKOUT_HORIZONS:
-            spot_t = ticker_spots.get(_horizon_date(call.analysis_date, h))
+            spot_t = _series_value_at_or_near(
+                ticker_spots, _horizon_date(call.analysis_date, h), call.analysis_date
+            )
             if spot_0 is None or spot_t is None or spot_0 <= 0:
                 horizons[h] = None
                 mark_sources[h] = "missing"
@@ -811,7 +837,9 @@ def compute_call_markout(
                 horizons[h] = None
                 mark_sources[h] = "skipped"
                 continue
-            rank_t = ranks.get(_horizon_date(call.analysis_date, h))
+            rank_t = _series_value_at_or_near(
+                ranks, _horizon_date(call.analysis_date, h), call.analysis_date
+            )
             if rank_0 is None or rank_t is None:
                 horizons[h] = None
                 mark_sources[h] = "missing"
@@ -839,7 +867,9 @@ def compute_call_markout(
         # which isn't reliably parsed from the archive frontmatter today.
         # Mark source flagged "model_delta1" so trader sees the approximation.
         for h in MARKOUT_HORIZONS:
-            spot_t = ticker_spots.get(_horizon_date(call.analysis_date, h))
+            spot_t = _series_value_at_or_near(
+                ticker_spots, _horizon_date(call.analysis_date, h), call.analysis_date
+            )
             if spot_0 is None or spot_t is None or spot_0 <= 0:
                 horizons[h] = None
                 mark_sources[h] = "missing"

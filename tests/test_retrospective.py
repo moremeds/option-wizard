@@ -276,6 +276,28 @@ def test_directional_markout_unknown_when_data_missing():
     assert all(v is None for v in cm.horizons.values())
 
 
+def test_verdict_horizon_snaps_to_nearest_trading_day_for_friday_call():
+    # Friday-dated call: _horizon_date(Fri, 21) lands on a Saturday absent from
+    # the trading-day series → without the snap this call is permanently UNKNOWN.
+    # Real GOOGL closes (xenon daily bars): 2026-05-08 (Fri) 400.8;
+    # 2026-06-05 368.53 = nearest trading day to the Sat 2026-06-06 T+21 horizon.
+    d0 = date(2026, 5, 8)
+    assert _horizon_date(d0, 21).weekday() >= 5  # sanity: horizon is a weekend
+    call = Call(
+        ticker="GOOGL",
+        analysis_date=d0,
+        call_type="directional",
+        direction=+1,
+        structure=None,
+        archive_path=Path("g.md"),
+        notes="",
+    )
+    spots = {"GOOGL": {date(2026, 5, 8): 400.8, date(2026, 6, 5): 368.53}}
+    cm = compute_call_markout(call, spot_history=spots)
+    assert cm.horizons[21] is not None  # resolved via snap, not None
+    assert cm.verdict == "WRONG"  # -8.05% < -0.02 fixed band (2 closes → σ fallback)
+
+
 # ----- Markout: vol regime -----
 
 
