@@ -10,6 +10,32 @@ timestamp: 2026-07-02T02:20:29Z
 
 OKF reserved `log.md` — chronological history of this knowledge bundle, most recent first. Seeded from git history; append a dated entry whenever you add or materially revise a concept (see [`OKF.md`](OKF.md) conformance checklist). For the full commit-level history, `git log -- plugins/option-wizard/skills/option-wizard/references/`.
 
+## 2026-07-08 — Pitfall 07: index pre-market feeds frozen → IB-live-first
+
+Pre-market SPX diagnosis quoted UW `futures_indices` (pinned to prior-evening
+`updated_at` 23:22Z) and `market_tide` (no 7/08 rows) as the live pre-market
+state, concluding "flat / calm" while ES was actually −1.05% and VIX +14.8% on
+a Trump "Iran deal over" headline. A live IB pull (ES front future + VIX index)
+showed the market had already gapped through the 7500 gamma flip. Root cause: a
+reachable live source existed and was not pulled first — a direct hard-rule-#7
+(freshness gate) miss, because the stale UW numbers *looked* like a pre-market
+quote and the `updated_at` was not checked. Added [`pitfalls/07-index-premarket-uw-feed-frozen.md`](pitfalls/07-index-premarket-uw-feed-frozen.md):
+for any index overnight/pre-market read, pull IB ES front-month future + IB VIX
+index snapshot FIRST, and treat any UW feed whose `updated_at` is not the
+current RTH session as a gap, not data.
+
+Also promoted the rule from a lookup-only pitfall into the **load-bearing
+spine** so it can't be skipped: (1) SKILL.md hard rule #7 now states every
+"pull live X" step is a MANDATORY execution gate with a timestamp-verify
+requirement, and calls out index pre-market as the load-bearing case; (2)
+`workflows-overview.md` Workflow 2a gains a **Step 0 — MANDATORY live-pull
+gate** (IB ES front future + VIX index FIRST, never open with UW
+`futures_indices`/`market_tide`) plus a cross-workflow enforcement line; (3)
+`data-sources.md` acquisition ladder gains dedicated **index pre-market
+spot** and **index pre-market VIX** rows (IB-live-first) and the avoidable-gap
+definition now covers "a cached/RTH feed read outside its session — a feed
+returning a number is not a live number."
+
 ## 2026-07-03 — Pitfall 06 + crowding-check × catalyst escalation rule
 
 TSLA Q2 delivery print (2026-07-02) beat consensus by 18% — and every
