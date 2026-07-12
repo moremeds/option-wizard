@@ -20,7 +20,8 @@ Source order (per CLAUDE.md + SKILL.md hard rule #2):
 - **TV via `finance-data-providers:tradingview-reader`**: price + technical
   indicators **only** — spot, OHLCV, volume bars, SMA(20/50/200), EMA, RSI,
   MACD, BBANDS, ATR, chart structure, news.
-- **IB**: account state — positions, balances, margin.
+- **xenon**: account state — positions, balances, margin, via `/portfolio`
+  + `/futu/portfolio` (IB MCP fallback).
 
 Never recompute a number UW serves directly. Never use UW for price or
 technical indicators (SKILL.md hard rule #2). Freshness: every quoted
@@ -37,7 +38,7 @@ appear under "What this analysis is missing" at the end.
 ```
 | Layer | Status | Source | Data freshness |
 |---|---|---|---|
-| L0 Account state          | ✓ / skipped | IB MCP                | live / T-1 / gap (>1 day = gap) |
+| L0 Account state          | ✓ / skipped | xenon `/portfolio` + `/futu/portfolio` (IB MCP fallback) | live / T-1 / gap (>1 day = gap) |
 | L1 Vol / dealer regime    | ✓ / skipped | UW                    | T-0 or T-1 / gap |
 | L2 IV term + skew         | ✓ / skipped | UW                    | T-0 or T-1 / gap |
 | L3 Price action           | ✓ / skipped | **TV ONLY** (no UW)   | live / T-1 / gap |
@@ -53,14 +54,17 @@ one is not (SKILL.md hard rule #8).
 
 ---
 
-## Layer 0 — Account state (IB)
+## Layer 0 — Account state (xenon)
 
 **Why first:** every downstream sizing and refusal depends on it.
 
 **Pull:**
-- `IBClient.get_positions()` — does the trader already hold the ticker?
-- `IBClient.get_account_summary()` — `TotalCashValue`, `NetLiquidation`,
-  `AvailableFunds`, `BuyingPower`, `InitMarginReq`, `MaintMarginReq`.
+- `XenonClient.ib_portfolio()` — does the trader already hold the ticker?
+  Fallback: `futu_portfolio()` for Futu-held positions; IB MCP if xenon is
+  unreachable.
+- xenon `/portfolio` account summary fields — `TotalCashValue`,
+  `NetLiquidation`, `AvailableFunds`, `BuyingPower`, `InitMarginReq`,
+  `MaintMarginReq`.
 
 **Compute:**
 - Margin utilization = `InitMarginReq / NetLiquidation`. Over ~50% means

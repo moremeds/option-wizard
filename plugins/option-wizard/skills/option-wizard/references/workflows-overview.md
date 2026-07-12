@@ -1,14 +1,15 @@
 ---
 type: Runbook
-title: Workflows Overview — routing index for the 4 workflows
-description: Routing index for the workflows (analyze stock / analyze index / analyze positions / analyze FCN); read first to pick the workflow, then drill into the deep-reference file it points to.
+title: Workflows Overview — routing index for the 7 workflows
+description: Routing index for the 7 workflows (W1 ticker / W2a macro hedge / W2b index premium / W3 positions / W4 FCN / W5 AQ-DQ / W6 复盘); read first to pick the workflow, then drill into the deep-reference file it points to.
 tags: [runbook, workflows, routing, overview]
 timestamp: 2026-06-18T13:09:06Z
 ---
 
 # Workflows Overview
 
-Routing index for the 6 distinct workflows. Read this **first** when a
+Routing index for the 7 workflows (W1 ticker / W2a macro hedge / W2b
+index premium / W3 positions / W4 FCN / W5 AQ-DQ / W6 复盘). Read this **first** when a
 trader request comes in — match the request to a workflow, then drill
 into the linked deep-reference file for the per-step detail.
 
@@ -110,7 +111,7 @@ overnight spot/vol).
 | Stage | Action | Tooling |
 |---|---|---|
 | **1. Data pull (BOTH brokers via xenon)** | xenon Query API primary: `XenonClient.ib_portfolio()` + `futu_portfolio()`; `scripts.xenon_normalize.to_audit_positions` / `to_futu_audit_positions` translate both to IB shape (`contract_description` / `position`) before the audit pipeline. Fallbacks: IB MCP `get_account_summary`/`get_account_positions`/`get_account_orders` + Futu `portfolio-analyser` CLI. Report broker pull success/failure + data gaps (xenon `last_sync` / Futu `is_stale`) | xenon `/portfolio` + `/futu/portfolio` (IB MCP + Futu CLI fallback) |
-| **2. Book-level analysis** | (a) Concentration: abs MV % + Δ-1 notional vs NLV. (b) Net Greeks: Δ / Γ / Θ / V + Δ-1 single-name bars. (c) Every leg listed. (d) **Defined-risk audit verdict** (`scripts.defined_risk_audit::audit_book`) with $20 strike-width false-positive callouts. (e) 22-45 DTE watchlist. (f) Catalyst clock per ticker (ER, FOMC). (g) Data quality flags (stale price, missing field). (h) **IV term verification across held expiries** — for any ticker with positions across ≥2 expiries, extract ATM IV per held expiry via `scripts.term_curve.atm_iv_by_expiry_from_term_structure` (`iv_term_structure`, one call per ticker) falling back to `get_chains_for_expiry` (ATM ± 3 strikes) → `scripts.term_curve.atm_iv_from_chain_rows` for any expiry it doesn't cover, label adjacent pairs with **`scripts.term_curve.label_regime`**, and collapse with `summarize_regime`. Surface the per-pair regime table + the aggregate label (`all_contango` / `mixed_contango_inverted` / `all_inverted` / etc.) per ticker. Single-ticker IV rank / 52w percentile is NOT a substitute — see `analysis-runbook.md` L2 §"Position-review mode" | `scripts.manage_positions --audit-only --no-email` (or call constituents directly) + `scripts.term_curve` |
+| **2. Book-level analysis** | (a) Concentration: abs MV % + Δ-1 notional vs NLV. (b) Net Greeks: Δ / Γ / Θ / V + Δ-1 single-name bars. (c) Every leg listed. (d) **Defined-risk audit verdict** (`scripts.defined_risk_audit::audit_book`). (e) 22-45 DTE watchlist. (f) Catalyst clock per ticker (ER, FOMC). (g) Data quality flags (stale price, missing field). (h) **IV term verification across held expiries** — for any ticker with positions across ≥2 expiries, extract ATM IV per held expiry via `scripts.term_curve.atm_iv_by_expiry_from_term_structure` (`iv_term_structure`, one call per ticker) falling back to `get_chains_for_expiry` (ATM ± 3 strikes) → `scripts.term_curve.atm_iv_from_chain_rows` for any expiry it doesn't cover, label adjacent pairs with **`scripts.term_curve.label_regime`**, and collapse with `summarize_regime`. Surface the per-pair regime table + the aggregate label (`all_contango` / `mixed_contango_inverted` / `all_inverted` / etc.) per ticker. Single-ticker IV rank / 52w percentile is NOT a substitute — see `analysis-runbook.md` L2 §"Position-review mode" | `scripts.manage_positions --audit-only --no-email` (or call constituents directly) + `scripts.term_curve` |
 | **3. NO mid-flow decision** | 21 DTE positions, approaching-21 DTE, ER catalyst, large shorts, data anomalies — **observed in stage 2, NOT acted on yet** | — |
 | **4. Consolidated Action items (at the END, all together)** | 4 groups: **P1, P2, …** position-level (close/roll/hold menu inline); **D1, D2, …** data quality; **R1, R2, …** book-level risks (concentration, macro delta, cover failure); **I1, I2, …** infra. Each line ends with trigger phrase ("P1 submit" / "D2 verify"). **Wait** for trader to pick → then hard-rule-#3 preflight expands | — |
 
@@ -150,7 +151,7 @@ overnight spot/vol).
 
 **Pipeline (6 steps):**
 
-1. **Refusal red-line check** — `aq-dq-framework.md` §6. Six hard refusals (doubling ≥ 3×, IV rank < 30 + AQ, KO < 1 ATR, single notional > 10% NLV, tenor > 18M, ER in tenor midpoint). If ANY triggers, output `decision='REFUSE'` + reasons + stop. No chain pull.
+1. **Refusal red-line check** — `aq-dq-framework.md` §6. Seven hard refusals (52w peak-to-trough > 3×, doubling ≥ 3×, IV rank < 30 + AQ, KO < 1 ATR, single notional > 10% NLV, tenor > 18M, ER in tenor midpoint). If ANY triggers, output `decision='REFUSE'` + reasons + stop. No chain pull.
 2. **Chain pull mode selection** — live-trade mode (trader says "PB just quoted me", "30 min decision") → IB Gateway chain. Analytical mode (default) → UW chain. Both modes additionally pull UW IV rank, RV, skew, GEX, max pain.
 3. **Fair-value breakdown** — `fair_aq_dq.analyze_quote`. Decomposes into chain-priced legs (put at strike, call at KO, deep-OTM tail put) + barrier-adjusted contributions. Returns `markup_pp` + `breakdown` + `data_provenance` (every numeric field tagged).
 4. **Term Pareto optimizer** — `fair_aq_dq.optimize_terms`. Sweeps 4 parameters (tenor, KO%, doubling, obs_freq); returns variants sorted by `markup_reduction / pb_concession_difficulty`.

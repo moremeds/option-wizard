@@ -73,7 +73,7 @@ text. Summary:
    regime check, liquidity, catalyst clock.
 4. **21 DTE in book-review Action items** — not a mid-flow blocking
    YES/NO. Trader picks close / roll / hold from the consolidated menu.
-5. **PB structured products (FCN / AQ / DQ): no IB ORDER ROUTING; IB MARKET DATA is allowed.** Order routing is forbidden (PB products are OTC bilateral, never submit through IB). IB broker-feed chain data (mid/IV/greeks via the MCP) is allowed as a `Snapshot.chain` source when in live-trade mode (per hard rule #2). Output is product-specific bilingual counter-offer + verdict per `aq-dq-framework.md` / `fcn-framework.md`. AQ/DQ additionally short-circuits on 6 refusal red lines before any chain pull.
+5. **PB structured products (FCN / AQ / DQ): no IB ORDER ROUTING; IB MARKET DATA is allowed.** Order routing is forbidden (PB products are OTC bilateral, never submit through IB). IB broker-feed chain data (mid/IV/greeks via the MCP) is allowed as a `Snapshot.chain` source when in live-trade mode (per hard rule #2). Output is product-specific bilingual counter-offer + verdict per `aq-dq-framework.md` / `fcn-framework.md`. AQ/DQ additionally short-circuits on 7 refusal red lines before any chain pull.
 6. **Bracket defaults** — TP at 50% max gain, SL at 2× credit received.
 7. **Freshness gate (live-first)** — pull live at analysis time and walk
    the per-data-point acquisition ladder before declaring any gap;

@@ -1,6 +1,6 @@
 {
   "name": "option-wizard",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Personal options trading, FCN evaluation, and IB execution skill",
   "skills": ["skills/option-wizard", "skills/fundamental-analysis"]
 }

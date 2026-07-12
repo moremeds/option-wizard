@@ -78,9 +78,14 @@ Personal options-trading assistant covering income structure picks, structured-p
 
 ## Data sources
 
-- **Unusual Whales** REST + MCP — vol surface, GEX by strike/expiry, max pain, dark pool, IV/skew (required, see `docs/setup/uw-mcp-install.md`)
+- **xenon Query API** (read-only, personal instance) — **primary** for account state (IB *and* Futu: `/portfolio`, `/futu/portfolio`, `/orders`, `/blotter`), live mid/NBBO/L2 liquidity (`/market-depth`), and live per-contract greeks/IV (`/options/greeks`). No client-side BSM — greeks always come from a live broker quote.
+- **Unusual Whales** REST + MCP — vol surface, GEX by strike/expiry, max pain, dark pool, IV/skew, and analytical-mode chain mid/IV/greeks (required, see `docs/setup/uw-mcp-install.md`)
 - **TradingView desktop app** via [`opencli`](https://github.com/jackwener/opencli) — chart state, news, quote, **the only source for price + technicals** per SKILL.md hard rule #2 (required for L3 of any ticker analysis)
-- **Interactive Brokers Gateway** via `ib_insync` — positions, account, order submission (required for execution paths)
+- **Interactive Brokers Gateway** via `ib_insync` — order submission always routes here; also the fallback for account state / live greeks / spot when xenon is unreachable.
+
+The invariant (from `CLAUDE.md` §"Data source order"): **xenon** = state + live mid/liquidity + live greeks; **UW** = options-analytics aggregates + analytical-mode greeks; **TV** = spot/technicals; **ib_insync** = execution + fallback greeks.
+
+Private-bank structured-product quotes (Accumulator/Decumulator, "AQ"/"DQ") are evaluated separately via `references/aq-dq-framework.md` — 7 refusal red lines, fair-value breakdown with provenance, and a bilingual counter-offer email; never routed through IB.
 
 ## Position analysis: bring your own broker connector
 
@@ -90,13 +95,15 @@ is **broker-agnostic in implementation** but requires user-provided
 connectors to actually pull positions. **The skill does not ship with
 any broker auto-discovery** — you must wire up whatever brokers you use:
 
-- **Interactive Brokers** — supported via the Anthropic IBKR MCP
-  connector. The skill calls `get_account_summary`,
+- **Interactive Brokers** — primary pull is the xenon Query API
+  (`XenonClient.ib_portfolio()`); if you don't run xenon, fall back to
+  the Anthropic IBKR MCP connector, which calls `get_account_summary`,
   `get_account_positions`, `get_account_orders`, `get_account_trades`.
   Configure the connector in your Claude Code MCP settings (or via
   claude.ai's MCP marketplace).
-- **Futu (Moo Moo)** — not built in. Common patterns: the OpenD daemon
-  + futu-api Python wrapper, or a third-party CLI (e.g.,
+- **Futu (Moo Moo)** — primary pull is the xenon Query API
+  (`XenonClient.futu_portfolio()`); if you don't run xenon, fall back to
+  the OpenD daemon + futu-api Python wrapper, or a third-party CLI (e.g.,
   [`portfolio-analyser`](https://github.com/moremeds/portfolio-analyser)
   for the `ft --range 1y --rerun` JSON export; `--rerun` bypasses the
   ISO-week trade cache so a review never silently reads stale fills).

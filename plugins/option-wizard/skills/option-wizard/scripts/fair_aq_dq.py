@@ -264,7 +264,7 @@ class Verdict:
     alternatives: list[dict[str, Any]] = field(default_factory=list)
 
 
-# ─── Public API (stubs — implemented in subsequent tasks) ───
+# ─── Public API ───
 
 
 def analyze_quote(
