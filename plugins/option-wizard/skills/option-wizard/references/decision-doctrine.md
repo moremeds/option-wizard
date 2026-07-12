@@ -143,6 +143,12 @@ falling into the print, crowding check fired but the falling-IV-rank
 reading was allowed to override it instead of triggering this escalation;
 stock fell 7.5% on a delivery beat that topped every public estimate).
 
+**Red line (general): once the crowding check fires, only positioning
+evidence — flow / OI actually thinning — may downgrade it. An IV-level
+argument (falling IV rank, compressed term structure) NEVER downgrades a
+fired crowding flag, catalyst or not.** The catalyst case above is the
+sharpest instance; the rule holds whenever crowding fires.
+
 ## Dynamic risk management
 
 Risk posture is regime-conditioned, not set-and-forget:

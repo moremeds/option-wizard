@@ -222,12 +222,19 @@ structures: [list]
 tags: [list]
 archive_eligible_after: YYYY-MM-DD   # optional — defaults to `date` + 30 days
 calls: [list]                        # optional — structured falsifiable calls, see below
+regime: <summary>                    # optional — see below
 ---
 ```
 
 - `status` is **analysis intent only** per hard rule #9 (`proposed` / `analysis-only` / `decision-pending`) — never trade execution. Execution lives in the broker side (IB + Futu pull).
 - `archive_eligible_after` is the date on which this file becomes eligible for cold-storage migration. **Default = `date` + 30 days** (no need to set it explicitly). Set it later if the file is still load-bearing — e.g., when the analysis covers a position that doesn't expire until next quarter, set `archive_eligible_after: 2026-09-19` (post-expiry) so it stays in the active subtree through the position's life.
-- `calls` — **write one entry per falsifiable claim made in the 决策块** (hard rule #10), pipe-delimited: `"TICKER|call_type|direction|structure|tier|crowding_flags|opposite_case_first"`. `call_type` ∈ `directional` / `vol_regime` / `structure`; `direction` ∈ `+1`/`-1`/`0`; `structure` and the trailing three fields may be left empty (`||`) for non-structure / pre-doctrine calls. `tier` is the aggression tier from 决策块's 进攻程度 (`NO_TRADE`/`PROBE`/`SMALL`/`NORMAL`/`HIGH_CONVICTION`/`EXCEPTIONAL`); `crowding_flags` is the count from the crowding check; `opposite_case_first` is `true` when it fired. Example: `calls: ["NVDA|structure|-1|bear_call_spread|PROBE|3|true", "TSLA|directional|+1||NORMAL|0|false"]`. When present (even `calls: []`), this field takes full precedence over 复盘's prose-keyword classification for the whole file — it's the accurate source, not a fallback. Older archives without it still work via prose extraction.
+- `calls` — **write one entry per falsifiable claim made in the 决策块** (hard rule #10), pipe-delimited: `"TICKER|call_type|direction|structure|tier|crowding_flags|opposite_case_first|horizon_days?"`. `call_type` ∈ `directional` / `vol_regime` / `structure`; `direction` ∈ `+1`/`-1`/`0`; `structure` and the trailing three fields may be left empty (`||`) for non-structure / pre-doctrine calls. `tier` is the aggression tier from 决策块's 进攻程度 (`NO_TRADE`/`PROBE`/`SMALL`/`NORMAL`/`HIGH_CONVICTION`/`EXCEPTIONAL`); `crowding_flags` is the count from the crowding check; `opposite_case_first` is `true` when it fired; `horizon_days` (optional 8th field, trading days) sets the verdict horizon — omit for the default (`directional` 21 / `vol_regime` 10 / `structure` 21). 7-field entries remain valid. Example: `calls: ["NVDA|structure|-1|bear_call_spread|PROBE|3|true", "TSLA|directional|+1||NORMAL|0|false|21"]`. When present (even `calls: []`), this field takes full precedence over 复盘's prose-keyword classification for the whole file — it's the accurate source, not a fallback. Older archives without it still work via prose extraction.
+- Every archived analysis adds `regime: <summary>` frontmatter, copied from
+  the latest `references/private/market/regime-log.jsonl` line
+  (`scripts.regime_snapshot.latest_regime()` — e.g.
+  `regime: SPX all_contango | QQQ-SPX ivr +37.7 | gamma_flip n/a | hy_oas n/a`).
+  This is what lets 复盘 answer "in which regimes do my calls actually work"
+  — unanswerable before 2026-07-13 because regime was never persisted at call time.
 
 Reports that the trader typically wants saved (but still requires explicit ask):
 
