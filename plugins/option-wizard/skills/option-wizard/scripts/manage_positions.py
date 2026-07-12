@@ -266,7 +266,9 @@ def main(argv: list[str] | None = None) -> int:
         # §"Dynamic risk management") surface here so a prior 决策块 action
         # item ("roll TSLA 400/390 down by 6/25") doesn't only live in a
         # one-off report the trader has to remember to reread.
-        ledger_block = render_open_items_block(load_ledger(default_ledger_path()))
+        ledger_block = render_open_items_block(
+            load_ledger(default_ledger_path()), as_of=datetime.utcnow().date()
+        )
 
         client = XenonClient()
         ib_portfolio = client.ib_portfolio()
