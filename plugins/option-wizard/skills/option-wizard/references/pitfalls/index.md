@@ -20,10 +20,12 @@ Analytical mistakes and the rules they generated. One file per rule (`NN-slug.md
 | 04 | HIGH | ER range structures — set strikes at entry, add a bearish-breakdown veto | [`04-er-range-structure-strike-staleness.md`](04-er-range-structure-strike-staleness.md) |
 | 05 | HIGH | Macro prints are not single-name ER — buy the hedge BEFORE the print | [`05-macro-print-no-post-event-iv-crush.md`](05-macro-print-no-post-event-iv-crush.md) |
 | 06 | HIGH | Crowding check fired + known binary catalyst — a falling IV rank is not a bullish all-clear | [`06-crowded-into-catalyst-iv-rank-trap.md`](06-crowded-into-catalyst-iv-rank-trap.md) |
+| 07 | HIGH | UW futures_indices / market_tide are frozen pre-market — hit IB ES + VIX live FIRST | [`07-index-premarket-uw-feed-frozen.md`](07-index-premarket-uw-feed-frozen.md) |
 
 ## Lookup by trade type
 
-- **Macro / index hedge** → 03 (ratio backspreads), 05 (buy before the print), 01 (VIX futures mechanics).
+- **Macro / index hedge** → 03 (ratio backspreads), 05 (buy before the print), 01 (VIX futures mechanics), 07 (live-first pre-market feed).
+- **Pre-market / overnight index read** → 07 (UW feeds frozen outside RTH → IB ES front future + VIX index snapshot first).
 - **Hedge timing / vol mechanics** → 05 (pre-event window), 01 (contango bleed).
 - **Earnings vol-selling** → 04 (strike staleness + bearish-breakdown veto).
 - **PB structured products (AQ/DQ)** → 02 (implicit yield).

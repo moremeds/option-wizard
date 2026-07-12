@@ -23,7 +23,11 @@ into the linked deep-reference file for the per-step detail.
 - **Freshness / live-first** (hard rule #7): pull live at analysis time; walk
   the per-data-point acquisition ladder (`references/data-sources.md`) before
   declaring any gap. Avoidable stale-data caveats are not acceptable; genuine
-  gaps state what was tried and are never extrapolated.
+  gaps state what was tried and are never extrapolated. **Every "pull live X"
+  step is a MANDATORY execution gate — actually call the live endpoint and
+  verify its timestamp is the current session before quoting; a cached feed
+  returning a number (UW `futures_indices` / `market_tide` overnight) is a gap
+  disguised as data, not a live read** (Pitfall 07).
 - **Defined-risk only** (hard rule #1): refuse naked short calls /
   margin-leveraged short puts.
 - **Archive is opt-in** (SKILL.md §Reporting & archive): only write to
@@ -52,6 +56,17 @@ into the linked deep-reference file for the per-step detail.
 ---
 
 ## Workflow 2a — 分析指数/大盘 macro hedge (SPY / QQQ / SPX / IWM)
+
+**Step 0 — MANDATORY live-pull gate (do this FIRST, before any read):** pull
+**IB `get_price_snapshot` on the ES front-month future** (spot) + **IB VIX
+index snapshot** (contract `13455763`) for the live overnight/pre-market state,
+then TV `CBOE:SPX` live. **Do NOT open with UW `get_futures_indices` /
+`get_market_tide` — they are RTH-cached and frozen outside regular hours;
+reading them pre-market and quoting them as "live" is the exact failure Pitfall
+07 codifies.** Verify every feed's timestamp is the current session. Only after
+the live spot/vol is in hand, proceed to the structural layers below (UW GEX /
+flow / max pain / IV rank stay canonical for structure, never for live
+overnight spot/vol).
 
 **Spine:** same `analysis-runbook.md`, with these substitutions:
 

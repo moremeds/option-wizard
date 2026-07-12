@@ -38,7 +38,9 @@ every rung fails or returns empty:
 
 | Data point | Ladder |
 |---|---|
-| Spot | TV live → xenon `/market-depth` underlying mid → UW chain `price_data` |
+| Spot (equity, RTH) | TV live → xenon `/market-depth` underlying mid → UW chain `price_data` |
+| **Index spot (pre-market / overnight)** | **IB `get_price_snapshot` on the front-month index future FIRST** — ES (underlying `11004968`, exchange CME) / NQ / RTY, via `search_futures` → earliest non-expired `contract_month` → snapshot `last`+`bid_ask`. Then TV `CBOE:SPX` live for the cash read. **UW `get_futures_indices` / `get_market_tide` are RTH-cached — outside regular hours they return the last settle snapshot, NOT a live tick. Check `updated_at` / the latest bar's timestamp; if it is not the current RTH session it is a GAP, never quote it as "pre-market".** (Pitfall 07.) |
+| **Index VIX (pre-market / overnight)** | **IB `get_price_snapshot` on VIX index FIRST** (contract `13455763`, exchange CBOE) — live tick around the clock. UW `get_futures_indices` VIX field is RTH-cached (frozen overnight — same `updated_at` check). |
 | Option IV / per-strike greeks | xenon `/options/greeks` → UW `interpolated_iv`/`greeks_by_strike` → ib_insync `reqMktData` |
 | 25Δ skew / IV term | live `/options/greeks` strike+expiry sweep → UW `historical-risk-reversal-skew`/`iv_term_structure` |
 | IV rank / RV | UW (exclusive — no rebuild) — for a **historical daily series** (not just today), `iv_rank(ticker)` alone only returns the trailing ~5 rows; walk `_get(f"/api/stock/{t}/iv-rank", params={"date": D})` with `D` stepped weekly across the target window and merge by `date` (see review-framework.md 复盘 Layer A vol-regime markout). This was misdiagnosed as "no historical endpoint exists" in the 2026-07-01 monthly skill audit — the endpoint takes a `date` param, it just wasn't tried. |
@@ -57,7 +59,12 @@ including the xenon live surface?* A caveat is permitted only after a
 by-ticker, both empty — genuine UW gap"), never a bare "未重拉".
 
 - **Avoidable gap** (live source existed and was reachable but not pulled —
-  stale chains, converted RSI, wrong VIX exchange code): **not acceptable.**
+  stale chains, converted RSI, wrong VIX exchange code, **or a cached/RTH feed
+  read outside its session**): **not acceptable.** A feed returning a *number*
+  is not the same as a *live* number — a value with a stale `updated_at` (e.g.
+  UW `futures_indices` / `market_tide` overnight) is a gap disguised as data.
+  **Always verify the timestamp before quoting; never present a cached value as
+  the live/pre-market state.** (Pitfall 07.)
 - **Genuine gap** (no source serves that slice): flag honestly, characterize
   by what was tried; the remedy is to acquire live, never to extrapolate or
   convert a stale number into a "today" value (no fabrication).
