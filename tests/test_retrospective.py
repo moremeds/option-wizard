@@ -603,6 +603,83 @@ def test_writeback_appends_verdict_block_idempotently(tmp_path: Path):
     assert "CORRECT" in text
 
 
+def test_writeback_replaces_stale_verdict_across_review_dates(tmp_path: Path):
+    """Idempotency across review dates (Task 5 review, Critical fix).
+
+    grade_calls' 70-day maturity re-scan revisits each matured call every
+    week until its horizon matures. Under the old date-keyed dedup marker
+    (`**Verdict (复盘 {review_date}, ...)`), each weekly run carried a
+    different review_date, so the marker never matched and a new duplicate
+    block got appended every run — up to ~10 stacked blocks per call over
+    the re-scan window. write_back_outcome must instead replace the
+    existing (ticker, call_type) block in place, independent of date.
+    """
+    archive = _write_archive(
+        tmp_path,
+        name="multi-2026-03-16.md",
+        ticker="GOOGL",
+        date_iso="2026-03-16",
+        structures=[],
+        body="\n## Outcome / Lesson\n\n(empty)\n",
+    )
+    # Real GOOGL closes (xenon daily bars): 2026-03-16 305.56 -> 2026-04-14
+    # 332.91 (+8.95%) — same frozen pair as
+    # test_sigma_band_falls_back_to_fixed_when_history_short.
+    googl_call = Call(
+        ticker="GOOGL",
+        analysis_date=date(2026, 3, 16),
+        call_type="directional",
+        direction=+1,
+        structure=None,
+        archive_path=archive,
+        notes="bullish GOOGL",
+    )
+    googl_spots = {
+        "GOOGL": {
+            date(2026, 3, 16): 305.56,
+            _horizon_date(date(2026, 3, 16), 21): 332.91,
+        }
+    }
+    googl_cm = compute_call_markout(googl_call, spot_history=googl_spots)
+    assert googl_cm.verdict == "CORRECT"
+
+    # Real TSLA closes (Massive /v2/aggs/ticker/TSLA/range/1/day, fetched at
+    # authoring time): 2026-03-16 close 395.56 -> 2026-04-14 close 364.20
+    # (-7.93%). Bearish call on a falling ticker -> CORRECT.
+    tsla_call = Call(
+        ticker="TSLA",
+        analysis_date=date(2026, 3, 16),
+        call_type="directional",
+        direction=-1,
+        structure=None,
+        archive_path=archive,
+        notes="bearish TSLA",
+    )
+    tsla_spots = {
+        "TSLA": {
+            date(2026, 3, 16): 395.56,
+            _horizon_date(date(2026, 3, 16), 21): 364.20,
+        }
+    }
+    tsla_cm = compute_call_markout(tsla_call, spot_history=tsla_spots)
+    assert tsla_cm.verdict == "CORRECT"
+
+    # Three weekly review runs on the SAME file with three different
+    # review_dates, mirroring the 70-day re-scan re-visiting a matured call.
+    write_back_outcome([googl_cm, tsla_cm], date(2026, 6, 1))
+    write_back_outcome([googl_cm, tsla_cm], date(2026, 6, 8))
+    write_back_outcome([googl_cm, tsla_cm], date(2026, 6, 15))
+
+    text = archive.read_text()
+    # Exactly one surviving block per (ticker, call_type) — not three.
+    assert text.count("**Verdict (复盘") == 2
+    assert text.count("**Verdict (复盘 2026-06-15, GOOGL directional):**") == 1
+    assert text.count("**Verdict (复盘 2026-06-15, TSLA directional):**") == 1
+    # Stale review dates from earlier runs must not survive.
+    assert "2026-06-01" not in text
+    assert "2026-06-08" not in text
+
+
 def test_writeback_skips_archives_without_outcome_section(tmp_path: Path):
     base = date(2026, 5, 1)
     archive = _write_archive(

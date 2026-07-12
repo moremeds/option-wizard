@@ -1340,13 +1340,19 @@ _OUTCOME_HEADER_RE = re.compile(r"^## Outcome\s*/\s*Lesson\s*$", re.MULTILINE)
 
 
 def write_back_outcome(call_markouts: list[CallMarkout], review_date: date) -> int:
-    """Append verdict block to each source file's Outcome / Lesson section.
+    """Write (or refresh) a verdict block in each source file's Outcome / Lesson.
 
-    Idempotent **per call**: the marker carries ticker + call_type, so a
-    multi-ticker archive (e.g. a macro snapshot emitting SPY/QQQ/VIX calls)
-    receives one block per call instead of only the first (R1 fix,
-    2026-07-02 June review — the date-only marker made call #2+ on the same
-    file look already-written). Returns count of blocks written.
+    Idempotent **per call, across review dates**: the block for a given
+    (ticker, call_type) is replaced in place rather than appended fresh each
+    run. `grade_calls`' 70-day maturity re-scan revisits every call weekly
+    until its horizon matures, so a date-keyed dedup marker (the original
+    approach) made every run look new and stacked a duplicate block per call
+    per week for up to ~10 weeks. Replacing in place also means a verdict
+    that changes as more markout data arrives is refreshed, not duplicated.
+    A multi-ticker archive (e.g. a macro snapshot emitting SPY/QQQ/VIX calls)
+    still receives one block per call — the replace/insert is scoped to each
+    call's own (ticker, call_type) pair (R1 fix, 2026-07-02 June review).
+    Returns count of blocks written/updated.
     """
     modified = 0
     for cm in call_markouts:
@@ -1354,15 +1360,6 @@ def write_back_outcome(call_markouts: list[CallMarkout], review_date: date) -> i
             continue
         path = cm.call.archive_path
         text = path.read_text(encoding="utf-8")
-        marker = (
-            f"**Verdict (复盘 {review_date.isoformat()}, "
-            f"{cm.call.ticker} {cm.call.call_type}):**"
-        )
-        if marker in text:
-            continue
-        match = _OUTCOME_HEADER_RE.search(text)
-        if not match:
-            continue  # archive doesn't have an Outcome section — leave it alone
         markout_lines = []
         for h in MARKOUT_HORIZONS:
             v = cm.horizons.get(h)
@@ -1391,7 +1388,26 @@ def write_back_outcome(call_markouts: list[CallMarkout], review_date: date) -> i
             + "\n".join(markout_lines)
             + f"\n**Mark source:** chain {chain_count} / model {model_count}\n"
         )
-        # Insert just after the Outcome / Lesson header line.
+        # Idempotent across review dates: replace any existing verdict block
+        # for this (ticker, call_type) in place rather than appending a new
+        # date-stamped one. grade_calls' 70-day maturity re-scan revisits each
+        # call weekly until its horizon matures; the old date-keyed marker made
+        # every run look new and stacked a duplicate block each week.
+        existing_re = re.compile(
+            r"\n\*\*Verdict \(复盘 \d{4}-\d{2}-\d{2}, "
+            + re.escape(f"{cm.call.ticker} {cm.call.call_type}")
+            + r"\):\*\* .*?\n\*\*Mark source:\*\* [^\n]*\n",
+            re.DOTALL,
+        )
+        if existing_re.search(text):
+            new_text = existing_re.sub(lambda _m: block, text, count=1)
+            if new_text != text:
+                path.write_text(new_text, encoding="utf-8")
+                modified += 1
+            continue
+        match = _OUTCOME_HEADER_RE.search(text)
+        if not match:
+            continue  # no Outcome section — leave the file alone
         header_end = match.end()
         new_text = text[:header_end] + block + text[header_end:]
         path.write_text(new_text, encoding="utf-8")
@@ -1862,6 +1878,7 @@ def run_review(
     ledger_section: str = "",
     nlv: float | None = None,
     max_annual_cost_pct: float = DEFAULT_MACRO_HEDGE_ANNUAL_COST_CAP,
+    window_dates: tuple[date, date] | None = None,
 ) -> ReviewReport:
     """End-to-end pure-function pipeline (3-layer per hard rule #9).
 
@@ -1886,8 +1903,15 @@ def run_review(
     subtree (`references/private/{ticker,market,review}/`). Pass True for
     monthly / quarterly reviews that need to span the 30-day cold-storage
     TTL — adds files under `references/private/archive/YYYY-MM/...`.
+
+    `window_dates` (default None) overrides the `(window_start, window_end)`
+    pair used for `extract_calls_from_archive` — `window` still labels the
+    report. Used by the automated grader (`grade_calls.py`) to extract over
+    a maturity lookback wider than the report's nominal window, so calls
+    whose verdict horizon (T+21/T+45) hasn't matured yet get re-scanned on a
+    later run instead of being graded UNKNOWN once and forgotten.
     """
-    window_start, window_end = _window_dates(window, today)
+    window_start, window_end = window_dates or _window_dates(window, today)
     calls, skipped = extract_calls_from_archive(
         archive_dir, window_start, window_end, include_archive=include_archive
     )
