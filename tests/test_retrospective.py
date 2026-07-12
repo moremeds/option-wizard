@@ -2124,3 +2124,100 @@ def test_retrospective_module_calls_docstring_example_parses():
     )
     assert reasons == []
     assert len(calls) == len(raw_calls)
+
+
+# --- σ-scaled band + per-call horizon (2026-07-13 capability audit R2) ---
+
+
+def _flat_then_move_spots(base: float, daily_vol: float, move_at_21: float):
+    """25 pre-dates alternating ±daily_vol (so sample σ ≈ daily_vol — a
+    CONSTANT drift would have zero return variance and a zero band) +
+    horizon dates carrying move_at_21 from T+21 on."""
+    d0 = date(2026, 5, 15)
+    spots = {}
+    px = base
+    for i in range(25, 0, -1):
+        spots[d0 - timedelta(days=i)] = px
+        px *= 1 + (daily_vol if i % 2 else -daily_vol)
+    spots[d0] = px
+    for h in (1, 5, 10, 21, 45):
+        spots[_horizon_date(d0, h)] = px * (1 + (move_at_21 if h >= 21 else 0))
+    return d0, spots
+
+
+def test_sigma_band_neutralizes_submarginal_move_on_volatile_ticker():
+    # ±1.5% move on a ticker with ~2%/day σ: old fixed 2% band would say
+    # nothing; new 0.5σ√21 band (~4.6%) must say NEUTRAL, not WRONG/CORRECT.
+    # Base = real TSLA close 423.74 (2026-06-02, UW — no-synthetic-data rule).
+    d0, spots = _flat_then_move_spots(423.74, 0.02, 0.015)
+    call = Call(
+        ticker="TSLA",
+        analysis_date=d0,
+        call_type="directional",
+        direction=+1,
+        structure=None,
+        archive_path=Path("t.md"),
+        notes="",
+    )
+    cm = compute_call_markout(call, spot_history={"TSLA": spots})
+    assert cm.verdict == "NEUTRAL"
+    assert cm.band_used is not None and cm.band_used > 0.02
+
+
+def test_sigma_band_falls_back_to_fixed_when_history_short():
+    call = Call(
+        ticker="GOOGL",
+        analysis_date=date(2026, 3, 16),
+        call_type="directional",
+        direction=+1,
+        structure=None,
+        archive_path=Path("g.md"),
+        notes="",
+    )
+    # Real GOOGL closes (xenon daily bars): 2026-03-16 305.56 -> 2026-04-14
+    # 332.91 (+8.95%). Only two closes -> _trailing_sigma returns None ->
+    # verdict falls back to the fixed 0.02 band (no-synthetic-data rule).
+    spots = {
+        "GOOGL": {
+            date(2026, 3, 16): 305.56,
+            _horizon_date(date(2026, 3, 16), 21): 332.91,
+        }
+    }
+    cm = compute_call_markout(call, spot_history=spots)
+    assert cm.verdict == "CORRECT"  # +8.95% > fallback 2%
+    assert cm.band_used == pytest.approx(0.02)
+
+
+def test_call_horizon_days_selects_nearest_markout_horizon():
+    # Base = real NVDA close 222.82 (2026-06-02, UW).
+    d0, spots = _flat_then_move_spots(222.82, 0.0, 0.10)
+    call = Call(
+        ticker="NVDA",
+        analysis_date=d0,
+        call_type="directional",
+        direction=+1,
+        structure=None,
+        archive_path=Path("n.md"),
+        notes="",
+        horizon_days=7,
+    )
+    cm = compute_call_markout(call, spot_history={"NVDA": spots})
+    assert cm.verdict_horizon == 5  # nearest of (1,5,10,21,45) to 7
+
+
+def test_structured_calls_parse_optional_8th_field_horizon():
+    calls, bad = parse_structured_calls(
+        ["NVDA|directional|+1||PROBE|0|false|21"],
+        analysis_date=date(2026, 7, 1),
+        archive_path=Path("x.md"),
+        notes="",
+    )
+    assert not bad and calls[0].horizon_days == 21
+    # 7-field legacy entries stay valid, horizon_days None
+    calls7, bad7 = parse_structured_calls(
+        ["NVDA|directional|+1||PROBE|0|false"],
+        analysis_date=date(2026, 7, 1),
+        archive_path=Path("x.md"),
+        notes="",
+    )
+    assert not bad7 and calls7[0].horizon_days is None
