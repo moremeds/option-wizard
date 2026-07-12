@@ -309,6 +309,21 @@ def main(argv: list[str] | None = None) -> int:
             from scripts.email_sender import send_daily_scan
 
             send_daily_scan(report, rows)
+    except Exception:
+        import traceback
+
+        tb = traceback.format_exc()
+        print(tb, file=sys.stderr)
+        # Failure alert bypasses --no-email deliberately: the live cron runs
+        # --no-email (report goes to the SessionStart hook), but a dead scan
+        # must still page the trader.
+        try:
+            from scripts import email_sender
+
+            email_sender.send_failure_alert(tb)
+        except Exception as mail_err:  # alert must never mask the original error
+            print(f"failure-alert email also failed: {mail_err}", file=sys.stderr)
+        return 1
     finally:
         _release_lock()
 
