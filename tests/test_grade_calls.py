@@ -76,6 +76,26 @@ def test_build_spot_history_rut_both_fail_is_honest_gap():
         assert "cboe" in failures[0].lower()
 
 
+def test_build_spot_history_rut_cboe_raises_stays_honest_gap():
+    # The honest-gap hard rule hinges on a CBOE *exception* (not just an empty
+    # result) never escaping build_spot_history and never fabricating a close —
+    # it must land as a logged gap naming both sources.
+    with (
+        patch("scripts.grade_calls.XenonClient") as mock_xenon_cls,
+        patch("scripts.grade_calls.CBOEClient") as mock_cboe_cls,
+    ):
+        mock_xenon_cls.return_value.daily_closes.return_value = {}
+        mock_cboe_cls.return_value.daily_closes.side_effect = RuntimeError("503 CBOE")
+
+        spot, failures = build_spot_history({"RUT"})
+
+        assert "RUT" not in spot
+        assert len(failures) == 1
+        assert "RUT" in failures[0]
+        assert "xenon" in failures[0].lower()
+        assert "cboe" in failures[0].lower()
+
+
 def test_build_spot_history_non_rut_unchanged():
     with (
         patch("scripts.grade_calls.XenonClient") as mock_xenon_cls,
