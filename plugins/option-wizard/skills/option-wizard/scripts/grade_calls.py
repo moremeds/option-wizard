@@ -19,6 +19,7 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
+from scripts._clients.cboe import CBOEClient
 from scripts._clients.xenon import XenonClient
 from scripts.retrospective import (
     _default_archive_dir,
@@ -30,6 +31,9 @@ from scripts.retrospective import (
 )
 
 INDEX_SEC_TYPES = {"SPX": "IND", "VIX": "IND", "NDX": "IND", "RUT": "IND"}
+
+# Indices xenon has no IB exchange route for, but CBOE's public feed does.
+CBOE_FALLBACK_INDICES = {"RUT"}
 
 # ≈45 trading days + buffer — covers the longest MARKOUT_HORIZON so calls are
 # re-scanned until their verdict horizon matures (see "Maturity window" above).
@@ -77,20 +81,47 @@ def build_spot_history(
     empty result is therefore treated the same as an exception here: logged
     as a gap, never silently fed into `spot_history` where it would render
     every markout for that ticker as `n/a` with no explanation.
+
+    For tickers in `CBOE_FALLBACK_INDICES` (currently just RUT), an empty
+    or failed xenon lookup is retried against CBOE's public daily-price feed
+    (`_clients/cboe.py`) before giving up — xenon has no working IB exchange
+    route for RUT, but CBOE serves it directly. `CBOEClient` is instantiated
+    lazily, only when this fallback path actually runs. If CBOE also fails
+    or returns empty, the failure names both sources tried (honest gap,
+    never fabricated).
     """
     client = XenonClient()
     spot: dict[str, dict[date, float]] = {}
     failures: list[str] = []
     for t in sorted(tickers):
+        xenon_error: str | None = None
         try:
             closes = client.daily_closes(
                 t, duration="3 M", sec_type=INDEX_SEC_TYPES.get(t, "STK")
             )
         except Exception as e:
-            failures.append(f"{t}: {e}")
-            continue
+            closes = {}
+            xenon_error = str(e)
+
         if not closes:
-            failures.append(f"{t}: no daily bars returned (unsupported index route?)")
+            if t in CBOE_FALLBACK_INDICES:
+                cboe_closes: dict[date, float] = {}
+                cboe_error: str | None = None
+                try:
+                    cboe_closes = CBOEClient().daily_closes(t)
+                except Exception as e:
+                    cboe_error = str(e)
+                if cboe_closes:
+                    spot[t] = cboe_closes
+                    continue
+                xenon_reason = xenon_error or "no daily bars returned"
+                cboe_reason = cboe_error or "no daily closes returned"
+                failures.append(
+                    f"{t}: xenon ({xenon_reason}) and CBOE ({cboe_reason}) both failed"
+                )
+                continue
+            reason = xenon_error or "no daily bars returned (unsupported index route?)"
+            failures.append(f"{t}: {reason}")
             continue
         spot[t] = closes
     return spot, failures
