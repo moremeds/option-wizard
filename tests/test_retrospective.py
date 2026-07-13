@@ -276,6 +276,28 @@ def test_directional_markout_unknown_when_data_missing():
     assert all(v is None for v in cm.horizons.values())
 
 
+def test_verdict_horizon_snaps_to_nearest_trading_day_for_friday_call():
+    # Friday-dated call: _horizon_date(Fri, 21) lands on a Saturday absent from
+    # the trading-day series → without the snap this call is permanently UNKNOWN.
+    # Real GOOGL closes (xenon daily bars): 2026-05-08 (Fri) 400.8;
+    # 2026-06-05 368.53 = nearest trading day to the Sat 2026-06-06 T+21 horizon.
+    d0 = date(2026, 5, 8)
+    assert _horizon_date(d0, 21).weekday() >= 5  # sanity: horizon is a weekend
+    call = Call(
+        ticker="GOOGL",
+        analysis_date=d0,
+        call_type="directional",
+        direction=+1,
+        structure=None,
+        archive_path=Path("g.md"),
+        notes="",
+    )
+    spots = {"GOOGL": {date(2026, 5, 8): 400.8, date(2026, 6, 5): 368.53}}
+    cm = compute_call_markout(call, spot_history=spots)
+    assert cm.horizons[21] is not None  # resolved via snap, not None
+    assert cm.verdict == "WRONG"  # -8.05% < -0.02 fixed band (2 closes → σ fallback)
+
+
 # ----- Markout: vol regime -----
 
 
@@ -601,6 +623,83 @@ def test_writeback_appends_verdict_block_idempotently(tmp_path: Path):
     text = archive.read_text()
     assert "复盘" in text
     assert "CORRECT" in text
+
+
+def test_writeback_replaces_stale_verdict_across_review_dates(tmp_path: Path):
+    """Idempotency across review dates (Task 5 review, Critical fix).
+
+    grade_calls' 70-day maturity re-scan revisits each matured call every
+    week until its horizon matures. Under the old date-keyed dedup marker
+    (`**Verdict (复盘 {review_date}, ...)`), each weekly run carried a
+    different review_date, so the marker never matched and a new duplicate
+    block got appended every run — up to ~10 stacked blocks per call over
+    the re-scan window. write_back_outcome must instead replace the
+    existing (ticker, call_type) block in place, independent of date.
+    """
+    archive = _write_archive(
+        tmp_path,
+        name="multi-2026-03-16.md",
+        ticker="GOOGL",
+        date_iso="2026-03-16",
+        structures=[],
+        body="\n## Outcome / Lesson\n\n(empty)\n",
+    )
+    # Real GOOGL closes (xenon daily bars): 2026-03-16 305.56 -> 2026-04-14
+    # 332.91 (+8.95%) — same frozen pair as
+    # test_sigma_band_falls_back_to_fixed_when_history_short.
+    googl_call = Call(
+        ticker="GOOGL",
+        analysis_date=date(2026, 3, 16),
+        call_type="directional",
+        direction=+1,
+        structure=None,
+        archive_path=archive,
+        notes="bullish GOOGL",
+    )
+    googl_spots = {
+        "GOOGL": {
+            date(2026, 3, 16): 305.56,
+            _horizon_date(date(2026, 3, 16), 21): 332.91,
+        }
+    }
+    googl_cm = compute_call_markout(googl_call, spot_history=googl_spots)
+    assert googl_cm.verdict == "CORRECT"
+
+    # Real TSLA closes (Massive /v2/aggs/ticker/TSLA/range/1/day, fetched at
+    # authoring time): 2026-03-16 close 395.56 -> 2026-04-14 close 364.20
+    # (-7.93%). Bearish call on a falling ticker -> CORRECT.
+    tsla_call = Call(
+        ticker="TSLA",
+        analysis_date=date(2026, 3, 16),
+        call_type="directional",
+        direction=-1,
+        structure=None,
+        archive_path=archive,
+        notes="bearish TSLA",
+    )
+    tsla_spots = {
+        "TSLA": {
+            date(2026, 3, 16): 395.56,
+            _horizon_date(date(2026, 3, 16), 21): 364.20,
+        }
+    }
+    tsla_cm = compute_call_markout(tsla_call, spot_history=tsla_spots)
+    assert tsla_cm.verdict == "CORRECT"
+
+    # Three weekly review runs on the SAME file with three different
+    # review_dates, mirroring the 70-day re-scan re-visiting a matured call.
+    write_back_outcome([googl_cm, tsla_cm], date(2026, 6, 1))
+    write_back_outcome([googl_cm, tsla_cm], date(2026, 6, 8))
+    write_back_outcome([googl_cm, tsla_cm], date(2026, 6, 15))
+
+    text = archive.read_text()
+    # Exactly one surviving block per (ticker, call_type) — not three.
+    assert text.count("**Verdict (复盘") == 2
+    assert text.count("**Verdict (复盘 2026-06-15, GOOGL directional):**") == 1
+    assert text.count("**Verdict (复盘 2026-06-15, TSLA directional):**") == 1
+    # Stale review dates from earlier runs must not survive.
+    assert "2026-06-01" not in text
+    assert "2026-06-08" not in text
 
 
 def test_writeback_skips_archives_without_outcome_section(tmp_path: Path):
@@ -2124,3 +2223,100 @@ def test_retrospective_module_calls_docstring_example_parses():
     )
     assert reasons == []
     assert len(calls) == len(raw_calls)
+
+
+# --- σ-scaled band + per-call horizon (2026-07-13 capability audit R2) ---
+
+
+def _flat_then_move_spots(base: float, daily_vol: float, move_at_21: float):
+    """25 pre-dates alternating ±daily_vol (so sample σ ≈ daily_vol — a
+    CONSTANT drift would have zero return variance and a zero band) +
+    horizon dates carrying move_at_21 from T+21 on."""
+    d0 = date(2026, 5, 15)
+    spots = {}
+    px = base
+    for i in range(25, 0, -1):
+        spots[d0 - timedelta(days=i)] = px
+        px *= 1 + (daily_vol if i % 2 else -daily_vol)
+    spots[d0] = px
+    for h in (1, 5, 10, 21, 45):
+        spots[_horizon_date(d0, h)] = px * (1 + (move_at_21 if h >= 21 else 0))
+    return d0, spots
+
+
+def test_sigma_band_neutralizes_submarginal_move_on_volatile_ticker():
+    # ±1.5% move on a ticker with ~2%/day σ: old fixed 2% band would say
+    # nothing; new 0.5σ√21 band (~4.6%) must say NEUTRAL, not WRONG/CORRECT.
+    # Base = real TSLA close 423.74 (2026-06-02, UW — no-synthetic-data rule).
+    d0, spots = _flat_then_move_spots(423.74, 0.02, 0.015)
+    call = Call(
+        ticker="TSLA",
+        analysis_date=d0,
+        call_type="directional",
+        direction=+1,
+        structure=None,
+        archive_path=Path("t.md"),
+        notes="",
+    )
+    cm = compute_call_markout(call, spot_history={"TSLA": spots})
+    assert cm.verdict == "NEUTRAL"
+    assert cm.band_used is not None and cm.band_used > 0.02
+
+
+def test_sigma_band_falls_back_to_fixed_when_history_short():
+    call = Call(
+        ticker="GOOGL",
+        analysis_date=date(2026, 3, 16),
+        call_type="directional",
+        direction=+1,
+        structure=None,
+        archive_path=Path("g.md"),
+        notes="",
+    )
+    # Real GOOGL closes (xenon daily bars): 2026-03-16 305.56 -> 2026-04-14
+    # 332.91 (+8.95%). Only two closes -> _trailing_sigma returns None ->
+    # verdict falls back to the fixed 0.02 band (no-synthetic-data rule).
+    spots = {
+        "GOOGL": {
+            date(2026, 3, 16): 305.56,
+            _horizon_date(date(2026, 3, 16), 21): 332.91,
+        }
+    }
+    cm = compute_call_markout(call, spot_history=spots)
+    assert cm.verdict == "CORRECT"  # +8.95% > fallback 2%
+    assert cm.band_used == pytest.approx(0.02)
+
+
+def test_call_horizon_days_selects_nearest_markout_horizon():
+    # Base = real NVDA close 222.82 (2026-06-02, UW).
+    d0, spots = _flat_then_move_spots(222.82, 0.0, 0.10)
+    call = Call(
+        ticker="NVDA",
+        analysis_date=d0,
+        call_type="directional",
+        direction=+1,
+        structure=None,
+        archive_path=Path("n.md"),
+        notes="",
+        horizon_days=7,
+    )
+    cm = compute_call_markout(call, spot_history={"NVDA": spots})
+    assert cm.verdict_horizon == 5  # nearest of (1,5,10,21,45) to 7
+
+
+def test_structured_calls_parse_optional_8th_field_horizon():
+    calls, bad = parse_structured_calls(
+        ["NVDA|directional|+1||PROBE|0|false|21"],
+        analysis_date=date(2026, 7, 1),
+        archive_path=Path("x.md"),
+        notes="",
+    )
+    assert not bad and calls[0].horizon_days == 21
+    # 7-field legacy entries stay valid, horizon_days None
+    calls7, bad7 = parse_structured_calls(
+        ["NVDA|directional|+1||PROBE|0|false"],
+        analysis_date=date(2026, 7, 1),
+        archive_path=Path("x.md"),
+        notes="",
+    )
+    assert not bad7 and calls7[0].horizon_days is None

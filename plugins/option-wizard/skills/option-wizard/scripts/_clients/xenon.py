@@ -21,6 +21,17 @@ from typing import Any
 
 import httpx
 
+# IB index contracts route to specific exchanges (verified live 2026-07-10:
+# SPX/VIX on CBOE, NDX on NASDAQ). Equities use SMART. RUT has no working
+# exchange on this endpoint → returns empty (a gap, not an error).
+_IND_EXCHANGE = {"SPX": "CBOE", "VIX": "CBOE", "NDX": "NASDAQ"}
+
+
+def _exchange_for(symbol: str, sec_type: str) -> str:
+    if sec_type == "IND":
+        return _IND_EXCHANGE.get(symbol.upper(), "CBOE")
+    return "SMART"
+
 
 class XenonClient:
     def __init__(
@@ -68,6 +79,60 @@ class XenonClient:
     def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         """Public generic passthrough (used by the scripts.xenon CLI)."""
         return self._get(path, params=params, retry_502=(path == "/market-depth"))
+
+    def _post(self, path: str, body: dict[str, Any]) -> Any:
+        url = f"{self._base}{path}"
+        resp = httpx.post(url, headers=self._headers, json=body, timeout=self._timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def historical_bars(
+        self,
+        symbol: str,
+        duration: str = "3 M",
+        bar_size: str = "1 day",
+        sec_type: str = "STK",
+    ) -> Any:
+        """POST /historical/bars — body per xenon readonly-query-api.md.
+
+        Index exchange routing (sec_type="IND"): SPX/VIX → CBOE, NDX →
+        NASDAQ (verified live 2026-07-10). RUT has no working exchange on
+        this endpoint — returns an empty `{"bars": []}`, a documented gap,
+        not an error. Equities (sec_type="STK") always route via SMART.
+        """
+        return self._post(
+            "/historical/bars",
+            {
+                "contract": {
+                    "sec_type": sec_type,
+                    "symbol": symbol.upper(),
+                    "exchange": _exchange_for(symbol, sec_type),
+                    "currency": "USD",
+                },
+                "end_date_time": "",
+                "duration": duration,
+                "bar_size": bar_size,
+                "what_to_show": "TRADES",
+                "use_rth": True,
+            },
+        )
+
+    def daily_closes(
+        self, symbol: str, duration: str = "3 M", sec_type: str = "STK"
+    ) -> dict[Any, float]:
+        """Daily close series parsed to {datetime.date: close} — the exact
+        inner shape run_review's spot_history expects. Index routing
+        (sec_type="IND") is delegated to historical_bars: SPX/VIX → CBOE,
+        NDX → NASDAQ, RUT unsupported (returns empty)."""
+        from datetime import date as _date
+
+        raw = self.historical_bars(symbol, duration=duration, sec_type=sec_type)
+        rows = raw["bars"] if isinstance(raw, dict) else raw
+        out: dict[Any, float] = {}
+        for b in rows:
+            d = _date.fromisoformat(str(b["date"])[:10])
+            out[d] = float(b["close"])
+        return out
 
     # --- state reads ---
 

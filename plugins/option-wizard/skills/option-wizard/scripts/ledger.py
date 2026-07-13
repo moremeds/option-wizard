@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 STATUSES: frozenset[str] = frozenset({"open", "done", "expired", "superseded"})
+ESCALATE_AFTER_DAYS = 14
 
 
 def default_ledger_path() -> Path:
@@ -145,19 +146,40 @@ def overdue_items(entries: list[dict[str, Any]], as_of: date) -> list[dict[str, 
 
 
 def render_open_items_block(
-    entries: list[dict[str, Any]], *, title: str = "Open decision-ledger items"
+    entries: list[dict[str, Any]],
+    *,
+    title: str = "Open decision-ledger items",
+    as_of: date | None = None,
 ) -> str:
-    """One line per open item, sorted by due date (undated last). Returns
-    "" when there are none, so callers can omit the section entirely."""
+    """One line per open item. With `as_of`, items open >= ESCALATE_AFTER_DAYS
+    are flagged ESCALATED and sorted first — an action item that survives two
+    weekly scans unexecuted is a decision being avoided, not a reminder
+    (2026-07-13 capability audit, weakness #4: same concentration item
+    re-flagged for a month while the hedge slipped 5x over budget)."""
     items = open_items(entries)
     if not items:
         return ""
-    items = sorted(items, key=lambda e: e.get("due") or "9999-99-99")
+
+    def _age(e: dict[str, Any]) -> int:
+        if as_of is None or not e.get("date"):
+            return 0
+        return (as_of - date.fromisoformat(e["date"])).days
+
+    def _key(e: dict[str, Any]):
+        escalated = _age(e) >= ESCALATE_AFTER_DAYS
+        return (0 if escalated else 1, e.get("due") or "9999-99-99")
+
     lines = [f"{title} ({len(items)}):"]
-    for e in items:
+    for e in sorted(items, key=_key):
         due_s = f" due {e['due']}" if e.get("due") else ""
         tier_s = f" [{e['tier']}]" if e.get("tier") else ""
-        lines.append(f"  {e['id']} {e['ticker']}: {e['action']}{tier_s}{due_s}")
+        age = _age(e)
+        esc = (
+            f" ⚠ ESCALATED (open {age}d) — execute or retire with reason"
+            if age >= ESCALATE_AFTER_DAYS
+            else ""
+        )
+        lines.append(f"  {e['id']} {e['ticker']}: {e['action']}{tier_s}{due_s}{esc}")
     return "\n".join(lines)
 
 

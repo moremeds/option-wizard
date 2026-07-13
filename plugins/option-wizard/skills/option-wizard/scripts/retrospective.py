@@ -37,10 +37,14 @@ MARKOUT_HORIZONS: tuple[int, ...] = (1, 5, 10, 21, 45)
 """Trading-day horizons used for every markout computation."""
 
 DIRECTIONAL_NOISE_BAND = 0.02
-"""Raw % noise band for directional verdict at T+21d.
+"""Raw % noise band for directional verdict — FALLBACK only.
 
-Phase 1: fixed ±2% (~2× SPX single-day median move). Phase 2 replaces
-with vol-adjusted ±0.5σ once N ≥ 50 calls have been logged.
+2026-07-13 capability audit §1.2 found the fixed ±2% provably
+miscalibrated (0.08σ on VIX, 0.99σ on DIA) and retired the "wait for
+N ≥ 50" plan early: `compute_call_markout` now scales the band to
+0.5σ√horizon using trailing daily σ (`_trailing_sigma`). This constant
+is used only when fewer than 7 daily returns of history are available
+(short/degenerate series) — see `docs/audits/2026-07-13-capability-audit.md`.
 """
 
 VOL_REGIME_IV_RANK_BAND = 5.0
@@ -150,6 +154,9 @@ class Call:
     tier: str | None = None  # aggression tier at time of call, e.g. "PROBE"
     crowding_flags: int | None = None  # count of crowding-check flags that fired
     opposite_case_first: bool | None = None  # crowding check forced opposite-case-first
+    horizon_days: int | None = (
+        None  # explicit call horizon (trading days); verdict scores at the nearest MARKOUT_HORIZON
+    )
 
     @property
     def archive_stem(self) -> str:
@@ -187,6 +194,7 @@ class CallMarkout:
     verdict_horizon: int
     mark_sources: dict[int, str] = field(default_factory=dict)
     notes: str = ""
+    band_used: float | None = None
 
 
 @dataclass
@@ -355,10 +363,13 @@ def _extract_notes(body: str) -> str:
 #
 #   calls: ["NVDA|structure|-1|bear_call_spread|PROBE|3|true", "TSLA|directional|+1||NORMAL|0|false"]
 #
-# Field order: ticker|call_type|direction|structure|tier|crowding_flags|opposite_case_first
+# Field order: ticker|call_type|direction|structure|tier|crowding_flags|opposite_case_first|horizon_days?
 # `structure` / `tier` / `crowding_flags` / `opposite_case_first` may be
 # empty. When the `calls` key is present (even as `[]`), it takes full
 # precedence over the structure-tag and prose branches for that file.
+# The optional 8th field `horizon_days` (2026-07-13 capability audit R2)
+# lets a call declare its own horizon (trading days); the verdict then
+# scores at the nearest MARKOUT_HORIZON instead of the type default.
 
 
 def _parse_one_structured_call(
@@ -370,12 +381,13 @@ def _parse_one_structured_call(
 ) -> tuple[Call | None, str | None]:
     """Parse one `calls:` entry. Returns (Call, None) or (None, reason)."""
     parts = [p.strip() for p in raw.split("|")]
-    if len(parts) != 7:
+    if len(parts) not in (7, 8):
         return (
             None,
-            f"malformed calls entry (want 7 |-separated fields, got {len(parts)}): {raw!r}",
+            f"malformed calls entry (want 7 or 8 |-separated fields, got {len(parts)}): {raw!r}",
         )
-    ticker, call_type, direction_s, structure_s, tier, flags_s, opp_s = parts
+    horizon_s = parts[7] if len(parts) == 8 else ""
+    ticker, call_type, direction_s, structure_s, tier, flags_s, opp_s = parts[:7]
     if not ticker:
         return None, f"calls entry missing ticker: {raw!r}"
     if call_type not in CALL_TYPES:
@@ -393,6 +405,12 @@ def _parse_one_structured_call(
     except ValueError:
         return None, f"calls entry unparseable crowding_flags {flags_s!r}: {raw!r}"
     opposite_case_first = opp_s.lower() == "true" if opp_s else None
+    try:
+        horizon_days = int(horizon_s) if horizon_s else None
+    except ValueError:
+        return None, f"calls entry unparseable horizon_days {horizon_s!r}: {raw!r}"
+    if horizon_days is not None and horizon_days <= 0:
+        return None, f"calls entry horizon_days must be positive: {raw!r}"
     return (
         Call(
             ticker=ticker.upper(),
@@ -405,6 +423,7 @@ def _parse_one_structured_call(
             tier=tier or None,
             crowding_flags=crowding_flags,
             opposite_case_first=opposite_case_first,
+            horizon_days=horizon_days,
         ),
         None,
     )
@@ -708,6 +727,51 @@ def _horizon_date(analysis_date: date, horizon_trading_days: int) -> date:
     return analysis_date + timedelta(days=cal_days)
 
 
+def _trailing_sigma(
+    ticker_spots: dict[date, float], asof: date, lookback: int = 20
+) -> float | None:
+    """Daily close-to-close σ over the last `lookback` returns at/before asof.
+
+    None when fewer than 6 returns are available (fall back to fixed band).
+    """
+    closes = [v for d, v in sorted(ticker_spots.items()) if d <= asof]
+    closes = closes[-(lookback + 1) :]
+    if len(closes) < 7:
+        return None
+    rets = [closes[i] / closes[i - 1] - 1.0 for i in range(1, len(closes))]
+    mean = sum(rets) / len(rets)
+    var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
+    return var**0.5
+
+
+def _nearest_horizon(h: int) -> int:
+    return min(MARKOUT_HORIZONS, key=lambda x: abs(x - h))
+
+
+def _series_value_at_or_near(
+    series: dict[date, float], target: date, analysis_date: date, tol: int = 4
+) -> float | None:
+    """Value at `target`, or the nearest series date within ±tol days that is
+    strictly after analysis_date. `daily_closes` / the regime log are
+    trading-day-only, but `_horizon_date` is a 5-day/week CALENDAR
+    approximation, so a Friday-dated T+21 horizon lands on a weekend (holidays
+    shift any horizon) — an exact lookup would leave those calls permanently,
+    silently UNKNOWN. Excluding dates <= analysis_date stops a short horizon
+    (e.g. T+1 on a Friday) from collapsing onto the entry bar. Ties → later date."""
+    if target in series:
+        return series[target]
+    best: tuple[int, date] | None = None
+    for d in series:
+        if d <= analysis_date:
+            continue
+        dist = abs((d - target).days)
+        if dist > tol:
+            continue
+        if best is None or dist < best[0] or (dist == best[0] and d > best[1]):
+            best = (dist, d)
+    return series[best[1]] if best else None
+
+
 def compute_call_markout(
     call: Call,
     *,
@@ -726,11 +790,14 @@ def compute_call_markout(
     """
     horizons: dict[int, float | None] = {}
     mark_sources: dict[int, str] = {}
+    band_used: float | None = None
     ticker_spots = spot_history.get(call.ticker, {})
     spot_0 = ticker_spots.get(call.analysis_date)
     if call.call_type == "directional":
         for h in MARKOUT_HORIZONS:
-            spot_t = ticker_spots.get(_horizon_date(call.analysis_date, h))
+            spot_t = _series_value_at_or_near(
+                ticker_spots, _horizon_date(call.analysis_date, h), call.analysis_date
+            )
             if spot_0 is None or spot_t is None or spot_0 <= 0:
                 horizons[h] = None
                 mark_sources[h] = "missing"
@@ -738,13 +805,23 @@ def compute_call_markout(
             horizons[h] = call.direction * (spot_t / spot_0 - 1.0)
             mark_sources[h] = "tv_spot"
         units = "raw_pct"
-        verdict_horizon = DEFAULT_DIRECTIONAL_VERDICT_HORIZON
+        verdict_horizon = (
+            _nearest_horizon(call.horizon_days)
+            if call.horizon_days
+            else DEFAULT_DIRECTIONAL_VERDICT_HORIZON
+        )
+        sigma = _trailing_sigma(ticker_spots, call.analysis_date)
+        # σ-scaled band (2026-07-13 capability audit §1.2): fixed ±2% is
+        # 0.08σ on VIX and 0.99σ on DIA — provably miscalibrated. `if sigma`
+        # (falsy) catches BOTH None (short history) and 0.0 (degenerate series).
+        band = 0.5 * sigma * (verdict_horizon**0.5) if sigma else DIRECTIONAL_NOISE_BAND
+        band_used = band
         v_val = horizons.get(verdict_horizon)
         if v_val is None:
             verdict = "UNKNOWN"
-        elif v_val > DIRECTIONAL_NOISE_BAND:
+        elif v_val > band:
             verdict = "CORRECT"
-        elif v_val < -DIRECTIONAL_NOISE_BAND:
+        elif v_val < -band:
             verdict = "WRONG"
         else:
             verdict = "NEUTRAL"
@@ -760,7 +837,9 @@ def compute_call_markout(
                 horizons[h] = None
                 mark_sources[h] = "skipped"
                 continue
-            rank_t = ranks.get(_horizon_date(call.analysis_date, h))
+            rank_t = _series_value_at_or_near(
+                ranks, _horizon_date(call.analysis_date, h), call.analysis_date
+            )
             if rank_0 is None or rank_t is None:
                 horizons[h] = None
                 mark_sources[h] = "missing"
@@ -768,7 +847,11 @@ def compute_call_markout(
             horizons[h] = call.direction * (rank_t - rank_0)
             mark_sources[h] = "uw_iv_rank"
         units = "iv_rank_pts"
-        verdict_horizon = DEFAULT_VOL_REGIME_VERDICT_HORIZON
+        verdict_horizon = (
+            min((1, 5, 10, 21), key=lambda x: abs(x - call.horizon_days))
+            if call.horizon_days
+            else DEFAULT_VOL_REGIME_VERDICT_HORIZON
+        )
         v_val = horizons.get(verdict_horizon)
         if v_val is None:
             verdict = "UNKNOWN"
@@ -784,7 +867,9 @@ def compute_call_markout(
         # which isn't reliably parsed from the archive frontmatter today.
         # Mark source flagged "model_delta1" so trader sees the approximation.
         for h in MARKOUT_HORIZONS:
-            spot_t = ticker_spots.get(_horizon_date(call.analysis_date, h))
+            spot_t = _series_value_at_or_near(
+                ticker_spots, _horizon_date(call.analysis_date, h), call.analysis_date
+            )
             if spot_0 is None or spot_t is None or spot_0 <= 0:
                 horizons[h] = None
                 mark_sources[h] = "missing"
@@ -793,7 +878,11 @@ def compute_call_markout(
             horizons[h] = call.direction * move
             mark_sources[h] = "model_delta1"
         units = "normalized_pnl"
-        verdict_horizon = DEFAULT_STRUCTURE_VERDICT_HORIZON
+        verdict_horizon = (
+            _nearest_horizon(call.horizon_days)
+            if call.horizon_days
+            else DEFAULT_STRUCTURE_VERDICT_HORIZON
+        )
         v_val = horizons.get(verdict_horizon)
         if v_val is None:
             verdict = "UNKNOWN"
@@ -810,6 +899,7 @@ def compute_call_markout(
         verdict=verdict,
         verdict_horizon=verdict_horizon,
         mark_sources=mark_sources,
+        band_used=band_used,
     )
 
 
@@ -1280,13 +1370,19 @@ _OUTCOME_HEADER_RE = re.compile(r"^## Outcome\s*/\s*Lesson\s*$", re.MULTILINE)
 
 
 def write_back_outcome(call_markouts: list[CallMarkout], review_date: date) -> int:
-    """Append verdict block to each source file's Outcome / Lesson section.
+    """Write (or refresh) a verdict block in each source file's Outcome / Lesson.
 
-    Idempotent **per call**: the marker carries ticker + call_type, so a
-    multi-ticker archive (e.g. a macro snapshot emitting SPY/QQQ/VIX calls)
-    receives one block per call instead of only the first (R1 fix,
-    2026-07-02 June review — the date-only marker made call #2+ on the same
-    file look already-written). Returns count of blocks written.
+    Idempotent **per call, across review dates**: the block for a given
+    (ticker, call_type) is replaced in place rather than appended fresh each
+    run. `grade_calls`' 70-day maturity re-scan revisits every call weekly
+    until its horizon matures, so a date-keyed dedup marker (the original
+    approach) made every run look new and stacked a duplicate block per call
+    per week for up to ~10 weeks. Replacing in place also means a verdict
+    that changes as more markout data arrives is refreshed, not duplicated.
+    A multi-ticker archive (e.g. a macro snapshot emitting SPY/QQQ/VIX calls)
+    still receives one block per call — the replace/insert is scoped to each
+    call's own (ticker, call_type) pair (R1 fix, 2026-07-02 June review).
+    Returns count of blocks written/updated.
     """
     modified = 0
     for cm in call_markouts:
@@ -1294,15 +1390,6 @@ def write_back_outcome(call_markouts: list[CallMarkout], review_date: date) -> i
             continue
         path = cm.call.archive_path
         text = path.read_text(encoding="utf-8")
-        marker = (
-            f"**Verdict (复盘 {review_date.isoformat()}, "
-            f"{cm.call.ticker} {cm.call.call_type}):**"
-        )
-        if marker in text:
-            continue
-        match = _OUTCOME_HEADER_RE.search(text)
-        if not match:
-            continue  # archive doesn't have an Outcome section — leave it alone
         markout_lines = []
         for h in MARKOUT_HORIZONS:
             v = cm.horizons.get(h)
@@ -1331,7 +1418,26 @@ def write_back_outcome(call_markouts: list[CallMarkout], review_date: date) -> i
             + "\n".join(markout_lines)
             + f"\n**Mark source:** chain {chain_count} / model {model_count}\n"
         )
-        # Insert just after the Outcome / Lesson header line.
+        # Idempotent across review dates: replace any existing verdict block
+        # for this (ticker, call_type) in place rather than appending a new
+        # date-stamped one. grade_calls' 70-day maturity re-scan revisits each
+        # call weekly until its horizon matures; the old date-keyed marker made
+        # every run look new and stacked a duplicate block each week.
+        existing_re = re.compile(
+            r"\n\*\*Verdict \(复盘 \d{4}-\d{2}-\d{2}, "
+            + re.escape(f"{cm.call.ticker} {cm.call.call_type}")
+            + r"\):\*\* .*?\n\*\*Mark source:\*\* [^\n]*\n",
+            re.DOTALL,
+        )
+        if existing_re.search(text):
+            new_text = existing_re.sub(lambda _m: block, text, count=1)
+            if new_text != text:
+                path.write_text(new_text, encoding="utf-8")
+                modified += 1
+            continue
+        match = _OUTCOME_HEADER_RE.search(text)
+        if not match:
+            continue  # no Outcome section — leave the file alone
         header_end = match.end()
         new_text = text[:header_end] + block + text[header_end:]
         path.write_text(new_text, encoding="utf-8")
@@ -1802,6 +1908,7 @@ def run_review(
     ledger_section: str = "",
     nlv: float | None = None,
     max_annual_cost_pct: float = DEFAULT_MACRO_HEDGE_ANNUAL_COST_CAP,
+    window_dates: tuple[date, date] | None = None,
 ) -> ReviewReport:
     """End-to-end pure-function pipeline (3-layer per hard rule #9).
 
@@ -1826,8 +1933,15 @@ def run_review(
     subtree (`references/private/{ticker,market,review}/`). Pass True for
     monthly / quarterly reviews that need to span the 30-day cold-storage
     TTL — adds files under `references/private/archive/YYYY-MM/...`.
+
+    `window_dates` (default None) overrides the `(window_start, window_end)`
+    pair used for `extract_calls_from_archive` — `window` still labels the
+    report. Used by the automated grader (`grade_calls.py`) to extract over
+    a maturity lookback wider than the report's nominal window, so calls
+    whose verdict horizon (T+21/T+45) hasn't matured yet get re-scanned on a
+    later run instead of being graded UNKNOWN once and forgotten.
     """
-    window_start, window_end = _window_dates(window, today)
+    window_start, window_end = window_dates or _window_dates(window, today)
     calls, skipped = extract_calls_from_archive(
         archive_dir, window_start, window_end, include_archive=include_archive
     )

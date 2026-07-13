@@ -136,7 +136,11 @@ Two extraction paths, in priority order:
 
 1. **Structured `calls:` frontmatter** (SKILL.md §"Reporting & archive") —
    explicit `ticker|call_type|direction|structure|tier|crowding_flags|opposite_case_first`
-   entries written when the archive is saved from a 决策块. Carries the
+   entries written when the archive is saved from a 决策块, plus an
+   **optional 8th field `horizon_days`** (2026-07-13 capability audit R2)
+   letting the call declare its own horizon in trading days — the verdict
+   then scores at the nearest `MARKOUT_HORIZONS` entry instead of the
+   type default (T+21 directional/structure, T+10 vol regime). Carries the
    decision-doctrine `tier` and crowding-check outcome that prose can
    never recover. When the `calls` key is present (even `calls: []`), it
    takes **full precedence** for that file — the prose branch below never
@@ -191,9 +195,9 @@ markout_T = direction × (spot_T / spot_0 − 1)
 ```
 
 Positive = call was correct. Reported as raw percent (e.g., `+0.024`
-means +2.4 percentage points of correct signed move). Phase 2 may add
-vol-adjusted variant (divide by `IV_0 × sqrt(T_days / 252)` to express
-in σ units) — deferred until N ≥ 50 calls.
+means +2.4 percentage points of correct signed move). The verdict band
+(not the reported markout value itself) is now σ-scaled — see "Verdict
+thresholds" below (2026-07-13 capability audit §1.2–1.3, DONE).
 
 **Vol regime**:
 
@@ -252,13 +256,28 @@ trader can discount confidence.
 
 | Markout @ verdict horizon | Verdict |
 |---|---|
-| `> +0.02` | CORRECT |
-| `−0.02 ≤ markout ≤ +0.02` | NEUTRAL (noise band) |
-| `< −0.02` | WRONG |
+| `> +band` | CORRECT |
+| `−band ≤ markout ≤ +band` | NEUTRAL (noise band) |
+| `< −band` | WRONG |
 
-Verdict horizon defaults to **T+21d** for directional calls. ±2% is a
-qualitative noise band — roughly 2× SPX single-day median move. Phase 2
-replaces with vol-adjusted ±0.5σ once N ≥ 50 calls have been logged.
+**DONE (2026-07-13, `docs/audits/2026-07-13-capability-audit.md` §1.2–1.3):**
+`band` is now `0.5 × trailing_daily_σ × √verdict_horizon`, where
+`trailing_daily_σ` is the sample σ of the last 20 close-to-close daily
+returns as of the analysis date (`_trailing_sigma`). The audit found the
+old fixed ±2% band provably miscalibrated — 0.08σ on VIX vs 0.99σ on
+DIA — so the "wait for N ≥ 50 calls" plan was retired early. The fixed
+±2% (`DIRECTIONAL_NOISE_BAND`) is retained **only as a fallback** when
+fewer than 7 daily returns of price history are available (short or
+degenerate series).
+
+Verdict horizon defaults to **T+21d** for directional calls (and
+T+21d for structure, T+10d for vol regime — see below), but any call
+can override it: the `calls:` frontmatter accepts an optional 8th
+`horizon_days` field (trading days) that snaps to the nearest of
+`MARKOUT_HORIZONS` (1/5/10/21/45; vol regime clamps to 1/5/10/21 since
+T+45 is skipped for IV rank). Example:
+`"NVDA|directional|+1||PROBE|0|false|7"` scores at T+5, the nearest
+horizon to a declared 7-day view.
 
 **Vol regime**:
 
@@ -707,8 +726,16 @@ Backward-compat: legacy archives with `status: open` / `closed` are read as `pro
    `mark_source = "model"` is reported on every mark so the trader sees
    when to discount. IB `get_price_history` for option contracts is
    Phase 2; macmini DB is Phase 3.
-2. **Directional verdict threshold** is fixed ±2% noise band, not
-   vol-adjusted. Replace with ±0.5σ once N ≥ 50 directional calls.
+2. **Directional verdict threshold** — **DONE (2026-07-13,
+   `docs/audits/2026-07-13-capability-audit.md` §1.2–1.3)**. Was a
+   fixed ±2% noise band, not vol-adjusted; now `0.5 × trailing_daily_σ
+   × √verdict_horizon`, with the fixed ±2% retained only as a
+   short-history fallback (<7 daily returns). The N ≥ 50 gate this
+   item originally deferred to was retired early — the audit already
+   proved the fixed band miscalibrated (0.08σ on VIX, 0.99σ on DIA)
+   without needing more samples. Calls may also now declare an
+   explicit `horizon_days` (optional 8th `calls:` frontmatter field)
+   to horizon-match the verdict instead of using the type default.
 3. **Closing-trade pairing not yet implemented.** D1 excludes closes
    from markout but doesn't pair them with their opens to attribute
    realized P/L to the original entry decision. Phase 2 would walk the

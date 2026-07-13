@@ -22,6 +22,7 @@ timestamp: 2026-06-18T13:09:06Z
 | Account state (positions, balances, margin, orders, fills) — IB **and** Futu | **xenon** Query API (`/portfolio`, `/futu/portfolio`, `/orders`, `/blotter`, `/journal`, `/performance`) | IB MCP read tools / Futu `portfolio-analyser` CLI = **documented fallback only** |
 | Live mid / NBBO / L2 liquidity | **xenon** `/market-depth` | — |
 | Live per-contract greeks / IV (live-trade mode) | **xenon** `/options/greeks` (IB `modelGreeks`) → **ib_insync `reqMktData`** fallback | **client-side BSM — forbidden**; UW analytical greeks are a cross-check, not the live source |
+| Regime state history (IV-rank / gamma-flip / HY-OAS time series for 复盘) | `references/private/market/regime-log.jsonl` — written daily by `scripts.regime_snapshot` cron | UW serves point-in-time snapshots only; it is not a substitute for the persisted daily log — this file is the **only** IV-rank history that exists |
 
 ## Freshness gate + live-first acquisition (SKILL.md hard rule #7)
 

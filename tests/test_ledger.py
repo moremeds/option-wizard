@@ -163,6 +163,36 @@ def test_render_open_items_block_sorts_by_due_undated_last(tmp_path: Path):
     assert "Open decision-ledger items (3)" in block
 
 
+def test_open_items_escalate_after_14_days(tmp_path: Path):
+    path = tmp_path / "ledger.jsonl"
+    append_entry(
+        path,
+        entry_date=date(2026, 6, 20),
+        ticker="TSLA",
+        action="hedge 400/390 conflict",
+        tier="NORMAL",
+    )
+    append_entry(
+        path,
+        entry_date=date(2026, 7, 10),
+        ticker="NVDA",
+        action="roll 21DTE",
+        tier="PROBE",
+    )
+    block = render_open_items_block(load_ledger(path), as_of=date(2026, 7, 13))
+    lines = block.splitlines()
+    assert "ESCALATED (open 23d)" in block
+    assert "execute or retire" in block
+    assert "TSLA" in lines[1]  # escalated item sorts first
+    assert "ESCALATED" not in [line for line in lines if "NVDA" in line][0]
+
+
+def test_render_without_as_of_never_escalates(tmp_path: Path):
+    path = tmp_path / "ledger.jsonl"
+    append_entry(path, entry_date=date(2026, 1, 1), ticker="QQQ", action="x")
+    assert "ESCALATED" not in render_open_items_block(load_ledger(path))
+
+
 def test_render_ledger_section_flags_overdue(tmp_path: Path):
     path = tmp_path / "ledger.jsonl"
     append_entry(

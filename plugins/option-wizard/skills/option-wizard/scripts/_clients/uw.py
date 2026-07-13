@@ -14,6 +14,15 @@ Observed JSON top-level shapes (2026-06-03 against ORCL):
 - greeks_by_strike           -> {"data": ...}
 - dark_pool                  -> {"data": ...}
 - technical_indicator/<fn>   -> {"data": ...}
+- market_tide                -> {"data": [...]}; row keys (2026-07-13 live,
+  no ticker): timestamp, date, net_call_premium, net_put_premium, net_volume
+- gex_by_strike_expiry       -> {"data": [...]}; row keys (2026-07-13 live
+  against QQQ): date, expiry, strike, call_gex, put_gex, call_delta,
+  put_delta, call_charm, put_charm, call_vanna, put_vanna, dte. call_gex/
+  put_gex are separate fields (no combined `gex`) — Task 4's
+  gex_levels.compute_levels_per_expiry adapter should sum/net them itself.
+  NOTE: strike, call_gex, put_gex come back as decimal STRINGS (e.g.
+  "355", "0.0000") — cast with float() before any arithmetic.
 
 Every consumer should unwrap `resp["data"]` before parsing. Re-run
 tests/integration/test_uw_smoke.py to refresh this list.
@@ -114,6 +123,26 @@ class UWClient:
 
     def dark_pool(self, ticker: str) -> dict[str, Any]:
         return self._get(f"/api/darkpool/{ticker}")
+
+    def market_tide(
+        self, date: str | None = None, interval_5m: bool = True
+    ) -> dict[str, Any]:
+        # Path verified against UW OpenAPI docs 2026-07-13 (get_public_api_docs).
+        params: dict[str, Any] = {"interval_5m": "true" if interval_5m else "false"}
+        if date:
+            params["date"] = date
+        return self._get("/api/market/market-tide", params=params)
+
+    def gex_by_strike_expiry(
+        self, ticker: str, date: str | None = None
+    ) -> dict[str, Any]:
+        # Per-expiry GEX — the all-expiry aggregate (spot_gex_by_strike) produces
+        # far-OTM wall artifacts; per-expiry is the trade-relevant read.
+        # Path verified against UW OpenAPI docs 2026-07-13.
+        params = {"date": date} if date else None
+        return self._get(
+            f"/api/stock/{ticker}/greek-exposure/strike-expiry", params=params
+        )
 
     def technical_indicator(self, ticker: str, function: str) -> dict[str, Any]:
         return self._get(f"/api/stock/{ticker}/technical-indicator/{function}")
