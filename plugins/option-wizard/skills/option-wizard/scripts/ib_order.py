@@ -6,6 +6,7 @@ actually submit. The split keeps this module testable in isolation.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Iterable
 
 REJECTED_STRUCTURES = {
@@ -69,19 +70,19 @@ def validate_structure(structure: str, legs: list[dict]) -> None:
 
     if structure == "jade_lizard":
         short_calls = [
-            l
-            for l in legs
-            if l["right"].lower() == "call" and l["action"].lower() == "sell"
+            leg
+            for leg in legs
+            if leg["right"].lower() == "call" and leg["action"].lower() == "sell"
         ]
         long_calls = [
-            l
-            for l in legs
-            if l["right"].lower() == "call" and l["action"].lower() == "buy"
+            leg
+            for leg in legs
+            if leg["right"].lower() == "call" and leg["action"].lower() == "buy"
         ]
         short_puts = [
-            l
-            for l in legs
-            if l["right"].lower() == "put" and l["action"].lower() == "sell"
+            leg
+            for leg in legs
+            if leg["right"].lower() == "put" and leg["action"].lower() == "sell"
         ]
         if not (short_calls and long_calls and short_puts):
             raise ValueError(
@@ -101,7 +102,8 @@ def validate_structure(structure: str, legs: list[dict]) -> None:
 
     if structure == "covered_call":
         if not any(
-            l["right"].lower() == "call" and l["action"].lower() == "sell" for l in legs
+            leg["right"].lower() == "call" and leg["action"].lower() == "sell"
+            for leg in legs
         ):
             raise ValueError("covered_call requires a short call leg")
 
@@ -162,9 +164,9 @@ def _account_check(
     positions = account.get("positions", [])
     if structure == "cash_secured_put":
         need = sum(
-            float(l["strike"]) * int(l["qty"]) * 100
-            for l in legs
-            if l["action"].lower() == "sell" and l["right"].lower() == "put"
+            float(leg["strike"]) * int(leg["qty"]) * 100
+            for leg in legs
+            if leg["action"].lower() == "sell" and leg["right"].lower() == "put"
         )
     elif structure in {"covered_call", "collar"}:
         ticker = legs[0].get("symbol") or legs[0].get("ticker")
@@ -172,9 +174,9 @@ def _account_check(
             int(p.get("position", 0)) for p in positions if p.get("symbol") == ticker
         )
         contracts = sum(
-            int(l["qty"])
-            for l in legs
-            if l["right"].lower() == "call" and l["action"].lower() == "sell"
+            int(leg["qty"])
+            for leg in legs
+            if leg["right"].lower() == "call" and leg["action"].lower() == "sell"
         )
         return {
             "sufficient_shares_for_cover": held >= contracts * 100,
@@ -198,41 +200,41 @@ def _account_check(
 def _exact_max_loss(structure: str, legs: list[dict], pl_matrix: list[dict]) -> float:
     """Structure-specific max loss; falls back to matrix minimum."""
     if structure in {"bull_put_spread", "put_credit_spread"}:
-        puts = [l for l in legs if l["right"].lower() == "put"]
+        puts = [leg for leg in legs if leg["right"].lower() == "put"]
         short_strikes = [
-            float(l["strike"]) for l in puts if l["action"].lower() == "sell"
+            float(leg["strike"]) for leg in puts if leg["action"].lower() == "sell"
         ]
         long_strikes = [
-            float(l["strike"]) for l in puts if l["action"].lower() == "buy"
+            float(leg["strike"]) for leg in puts if leg["action"].lower() == "buy"
         ]
         if short_strikes and long_strikes:
             width = max(short_strikes) - min(long_strikes)
             qty = int(puts[0]["qty"])
             credit = sum(
-                (1 if l["action"].lower() == "sell" else -1)
-                * float(l.get("limit_price", 0))
-                * int(l["qty"])
+                (1 if leg["action"].lower() == "sell" else -1)
+                * float(leg.get("limit_price", 0))
+                * int(leg["qty"])
                 * 100
-                for l in puts
+                for leg in puts
             )
             return -(width * qty * 100 - credit)
     if structure == "bear_call_spread":
-        calls = [l for l in legs if l["right"].lower() == "call"]
+        calls = [leg for leg in legs if leg["right"].lower() == "call"]
         short_strikes = [
-            float(l["strike"]) for l in calls if l["action"].lower() == "sell"
+            float(leg["strike"]) for leg in calls if leg["action"].lower() == "sell"
         ]
         long_strikes = [
-            float(l["strike"]) for l in calls if l["action"].lower() == "buy"
+            float(leg["strike"]) for leg in calls if leg["action"].lower() == "buy"
         ]
         if short_strikes and long_strikes:
             width = max(long_strikes) - min(short_strikes)
             qty = int(calls[0]["qty"])
             credit = sum(
-                (1 if l["action"].lower() == "sell" else -1)
-                * float(l.get("limit_price", 0))
-                * int(l["qty"])
+                (1 if leg["action"].lower() == "sell" else -1)
+                * float(leg.get("limit_price", 0))
+                * int(leg["qty"])
                 * 100
-                for l in calls
+                for leg in calls
             )
             return -(width * qty * 100 - credit)
     return min(r["pl_dollar"] for r in pl_matrix)
@@ -242,11 +244,11 @@ def _exact_max_gain(structure: str, legs: list[dict], pl_matrix: list[dict]) -> 
     """For credit spreads: max gain = net credit. Falls back to matrix max otherwise."""
     if structure in SPREAD_STRUCTURES:
         credit = sum(
-            (1 if l["action"].lower() == "sell" else -1)
-            * float(l.get("limit_price", 0))
-            * int(l["qty"])
+            (1 if leg["action"].lower() == "sell" else -1)
+            * float(leg.get("limit_price", 0))
+            * int(leg["qty"])
             * 100
-            for l in legs
+            for leg in legs
         )
         return max(0.0, credit)
     return max(r["pl_dollar"] for r in pl_matrix)
@@ -267,7 +269,7 @@ def build_preflight(
     net_credit = _net_credit(legs)
     extras = {}
     if structure in SPREAD_STRUCTURES:
-        strikes = sorted({float(l["strike"]) for l in legs})
+        strikes = sorted({float(leg["strike"]) for leg in legs})
         if len(strikes) >= 2:
             qty = int(legs[0]["qty"])
             extras["spread_width_dollar"] = (max(strikes) - min(strikes)) * qty * 100
@@ -286,7 +288,7 @@ def build_preflight(
         else:
             legs_with_provenance.append({**leg, "mid_source": "unspecified"})
 
-    mid_sources = sorted({l["mid_source"] for l in legs_with_provenance})
+    mid_sources = sorted({leg["mid_source"] for leg in legs_with_provenance})
 
     return {
         "ticker": ticker,
@@ -305,8 +307,6 @@ def build_preflight(
         **extras,
     }
 
-
-import uuid
 
 SHORT_PREMIUM_STRUCTURES = SPREAD_STRUCTURES | {
     "covered_call",

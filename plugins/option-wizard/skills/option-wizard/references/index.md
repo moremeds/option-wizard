@@ -25,14 +25,14 @@ The curated knowledge bundle behind the `option-wizard` skill. It is an **[Open 
 | [`price-action-framework.md`](price-action-framework.md) | Orderbook microstructure mental model; tape / news / catalyst-clock validation. |
 | [`macro-hedge-convexity.md`](macro-hedge-convexity.md) | Empirical convexity + regime gates for SPX / cross-index macro hedge sizing; 1.5% NLV cost cap. |
 | [`index-premium-selling.md`](index-premium-selling.md) | QQQ/SPY CSP + RUT put-diagonal (Workflow 2b); entry timing. |
-| [`aq-dq-framework.md`](aq-dq-framework.md) | PB Accumulator / Decumulator evaluation; 6 refusal red lines → checklist → fair value → counter-offer. |
+| [`aq-dq-framework.md`](aq-dq-framework.md) | PB Accumulator / Decumulator evaluation; 7 refusal red lines → checklist → fair value → counter-offer. |
 | [`fcn-framework.md`](fcn-framework.md) | FCN / ELN coupon evaluation; strike ladder + bilingual counter-offer. |
 
 ## Runbooks — operational step-sequences ("do these steps in order")
 
 | File | What it covers |
 |---|---|
-| [`workflows-overview.md`](workflows-overview.md) | Routing index for the 4 workflows — **read first** to pick the workflow. |
+| [`workflows-overview.md`](workflows-overview.md) | Routing index for the 7 workflows (W1 ticker / W2a macro hedge / W2b index premium / W3 positions / W4 FCN / W5 AQ-DQ / W6 复盘) — **read first** to pick the workflow. |
 | [`analysis-runbook.md`](analysis-runbook.md) | The 8-layer ticker-analysis spine; opens with the Layer Coverage table; honest gap reporting. |
 | [`execution.md`](execution.md) | Pre-submission preflight + the single YES/NO gate; bracket defaults. |
 | [`review-framework.md`](review-framework.md) | 复盘 weekly / monthly review; 3 independent layers; markout scoring; auto pitfall drafts. |

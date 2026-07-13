@@ -37,7 +37,6 @@ from scipy.stats import norm
 
 from scripts._market import (
     chain_leg_provenance,
-    fallback_provenance,
     read_chain_mid,
 )
 
@@ -326,8 +325,8 @@ def _max_loss_at_short_expiry(
 
     Sign convention: net_debit > 0 = paid; net_debit < 0 = received credit.
     """
-    long_leg = next(l for l in legs if l["action"] == "buy")
-    short_leg = next(l for l in legs if l["action"] == "sell")
+    long_leg = next(leg for leg in legs if leg["action"] == "buy")
+    short_leg = next(leg for leg in legs if leg["action"] == "sell")
     kl, ks = long_leg["strike"], short_leg["strike"]
     qty = long_leg["qty"]
     t_remain = (dte_long - dte_short) / 365.0
@@ -364,8 +363,8 @@ def _breakevens_at_short_expiry(
     """Find ALL breakevens (sign changes) of P/L(S) at short expiry on a fine grid
     spanning [spot*0.60, spot*1.10]. Diagonal calendars typically have two BE
     points bracketing a profit zone."""
-    long_leg = next(l for l in legs if l["action"] == "buy")
-    short_leg = next(l for l in legs if l["action"] == "sell")
+    long_leg = next(leg for leg in legs if leg["action"] == "buy")
+    short_leg = next(leg for leg in legs if leg["action"] == "sell")
     kl, ks = long_leg["strike"], short_leg["strike"]
     long_cost = long_leg["limit_price"] * long_leg["qty"] * 100
     short_credit = short_leg["limit_price"] * short_leg["qty"] * 100
@@ -399,8 +398,8 @@ def _roll_matrix(
     dte_short: int,
 ) -> list[dict[str, float]]:
     """P/L if we close everything at short-leg expiry, across 7 spot scenarios."""
-    long_leg = next(l for l in legs if l["action"] == "buy")
-    short_leg = next(l for l in legs if l["action"] == "sell")
+    long_leg = next(leg for leg in legs if leg["action"] == "buy")
+    short_leg = next(leg for leg in legs if leg["action"] == "sell")
     kl, ks = long_leg["strike"], short_leg["strike"]
     long_cost = long_leg["limit_price"] * long_leg["qty"] * 100
     short_credit = short_leg["limit_price"] * short_leg["qty"] * 100
@@ -606,8 +605,12 @@ def build_short_leg_roll(
     spot_now = snapshot.get("spot", existing_position["spot"])
     long_dte_remaining = existing_position["dte_long"] - days_elapsed - new_dte_short
 
-    old_short_leg = next(l for l in existing_position["legs"] if l["action"] == "sell")
-    old_long_leg = next(l for l in existing_position["legs"] if l["action"] == "buy")
+    old_short_leg = next(
+        leg for leg in existing_position["legs"] if leg["action"] == "sell"
+    )
+    old_long_leg = next(
+        leg for leg in existing_position["legs"] if leg["action"] == "buy"
+    )
     ks_old, kl = old_short_leg["strike"], old_long_leg["strike"]
 
     iv_short_new = float(snapshot["iv_atm_short"])

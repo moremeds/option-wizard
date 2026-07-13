@@ -1,5 +1,9 @@
-import sys, os, json
+import json
+import os
+import sys
+
 sys.path.insert(0, "plugins/option-wizard/skills/option-wizard")
+
 
 def load_env(path):
     with open(path) as f:
@@ -10,8 +14,9 @@ def load_env(path):
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
+
 load_env(".env")
-from scripts._clients.uw import UWClient
+from scripts._clients.uw import UWClient  # noqa: E402
 
 c = UWClient()
 for t in ["QQQ", "NVDA", "TSLA"]:

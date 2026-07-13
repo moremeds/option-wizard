@@ -3,7 +3,6 @@
 import json
 from datetime import datetime, timedelta, timezone
 
-import pytest
 from scripts.entry_timing import THRESHOLDS, calibrate, decide
 
 

@@ -113,6 +113,29 @@ def send_daily_scan(
     return send(msg, creds["password"], retries=1)
 
 
+def build_failure_message(to_addr: str, from_addr: str, body: str) -> MIMEMultipart:
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = (
+        f"[option-wizard]🔴 {datetime.utcnow().date().isoformat()} — DAILY SCAN FAILED"
+    )
+    msg["From"] = from_addr
+    msg["To"] = to_addr
+    msg.attach(MIMEText(body, "plain", "utf-8"))
+    return msg
+
+
+def send_failure_alert(body: str, to_addr: str = DEFAULT_RECIPIENT) -> bool:
+    """Page the trader when the daily scan itself crashes. 45 silent
+    tracebacks in daily.log preceded this (2026-07-13 gap audit P0)."""
+    try:
+        creds = load_credentials()
+    except RuntimeError as e:
+        _log_error(str(e))
+        return False
+    msg = build_failure_message(to_addr, creds["sender"], body)
+    return send(msg, creds["password"], retries=1)
+
+
 def send_test(to_addr: str = DEFAULT_RECIPIENT) -> bool:
     """Send a one-line test email. Exposed for the setup verification."""
     rows = []

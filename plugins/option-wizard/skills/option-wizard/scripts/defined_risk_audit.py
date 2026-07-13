@@ -71,24 +71,24 @@ def _uncovered_legs(legs: list[dict[str, Any]], right: str) -> list[dict[str, An
     so downstream assignment-cost math stays conservative) if the bucket
     isn't fully covered; empty if it is."""
     by_expiry: dict[str | None, list[dict[str, Any]]] = defaultdict(list)
-    for l in legs:
-        if l["right"] == right:
-            by_expiry[l["expiry"]].append(l)
+    for leg in legs:
+        if leg["right"] == right:
+            by_expiry[leg["expiry"]].append(leg)
 
     uncovered: list[dict[str, Any]] = []
     for expiry_legs in by_expiry.values():
-        shorts = [l for l in expiry_legs if l["position"] < 0]
-        longs = [l for l in expiry_legs if l["position"] > 0]
-        residual = sum(abs(l["position"]) for l in shorts) - sum(
-            l["position"] for l in longs
+        shorts = [leg for leg in expiry_legs if leg["position"] < 0]
+        longs = [leg for leg in expiry_legs if leg["position"] > 0]
+        residual = sum(abs(leg["position"]) for leg in shorts) - sum(
+            leg["position"] for leg in longs
         )
         if residual <= 0:
             continue
-        for l in sorted(shorts, key=lambda x: -x["strike"]):
+        for leg in sorted(shorts, key=lambda x: -x["strike"]):
             if residual <= 0:
                 break
-            take = min(residual, abs(l["position"]))
-            uncovered.append({**l, "position": -take})
+            take = min(residual, abs(leg["position"]))
+            uncovered.append({**leg, "position": -take})
             residual -= take
     return uncovered
 
@@ -119,7 +119,7 @@ def audit_book(
 
         if uncovered_puts:
             assignment_cost = sum(
-                l["strike"] * abs(l["position"]) * 100 for l in uncovered_puts
+                leg["strike"] * abs(leg["position"]) * 100 for leg in uncovered_puts
             )
             coverage_ratio = (
                 cash_balance / assignment_cost if assignment_cost else float("inf")
@@ -137,7 +137,7 @@ def audit_book(
 
         if uncovered_calls:
             shares = shares_by_underlying.get(underlying, 0.0)
-            short_qty = sum(abs(l["position"]) * 100 for l in uncovered_calls)
+            short_qty = sum(abs(leg["position"]) * 100 for leg in uncovered_calls)
             if shares < short_qty:
                 findings.append(
                     {

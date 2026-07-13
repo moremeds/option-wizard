@@ -10,11 +10,8 @@ Usage:
 
 from __future__ import annotations
 
-import math
-
 from scripts.diagonal_calendar import (
     _bs_put,
-    _bs_put_greeks,
     _strike_for_put_delta,
     build_diagonal_calendar,
 )
@@ -71,8 +68,8 @@ def example_8_2_rut_calendar():
         "vrp_label": "NEUTRAL",
     }
     out = build_diagonal_calendar(spot=spot, mode="calendar", snapshot=snap)
-    long_leg = next(l for l in out["legs"] if l["action"] == "buy")
-    short_leg = next(l for l in out["legs"] if l["action"] == "sell")
+    long_leg = next(leg for leg in out["legs"] if leg["action"] == "buy")
+    short_leg = next(leg for leg in out["legs"] if leg["action"] == "sell")
     return {
         "spot": spot,
         "kl_theo_rounded_to_5": round(long_leg["strike"] / 5) * 5,
@@ -97,8 +94,8 @@ def example_8_3_rut_protective():
         "vrp_label": "NEUTRAL",
     }
     out = build_diagonal_calendar(spot=spot, mode="protective", snapshot=snap)
-    long_leg = next(l for l in out["legs"] if l["action"] == "buy")
-    short_leg = next(l for l in out["legs"] if l["action"] == "sell")
+    long_leg = next(leg for leg in out["legs"] if leg["action"] == "buy")
+    short_leg = next(leg for leg in out["legs"] if leg["action"] == "sell")
     # Roll matrix at -10%, 0%, +5%
     rm = {r["spot_scenario"]: r for r in out["roll_matrix"]}
     return {
@@ -126,8 +123,8 @@ def example_8_4_rut_aggressive():
         "vrp_label": "NEUTRAL",
     }
     out = build_diagonal_calendar(spot=spot, mode="aggressive", snapshot=snap)
-    long_leg = next(l for l in out["legs"] if l["action"] == "buy")
-    short_leg = next(l for l in out["legs"] if l["action"] == "sell")
+    long_leg = next(leg for leg in out["legs"] if leg["action"] == "buy")
+    short_leg = next(leg for leg in out["legs"] if leg["action"] == "sell")
     return {
         "spot": spot,
         "kl": long_leg["strike"],

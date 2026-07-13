@@ -306,7 +306,7 @@ sparingly per the decision tree (i.e., 2-4 deployment windows per year ×
 |---|---|
 | VIX option chains historical mid | **Calm-regime calibration done 2026-06-10** (`references/research/data/vix_calibration_2026-06-10.py` + `vix_calibration_history.json`). Result: real ladder cost = **2.0× BSM-with-VVIX** at K=25/35/45 30-DTE; per-leg gap 22% / 78% / 96%. Next: pull on first VIX9D/VIX inversion to measure how much the gap WIDENS in inversion regime. |
 | 2015 China devaluation + 2011 US debt downgrade in event set | Re-run `references/research/data/run_analysis.py` with extended dates |
-| HY OAS automatic ingestion | Wire FRED series `BAMLH0A0HYM2` into snapshot via `pandas_datareader.fred` or HTTP CSV fetch |
+| HY OAS automatic ingestion | **DONE** — `_clients/fred.py::hy_oas_signal` pulls FRED series `BAMLH0A0HYM2`; wired into the snapshot via `add_fred_signals_to_snapshot`. |
 | Bid-ask drag on monthly rolls | Sample live UW/IB chain spreads on SPX 5-delta puts; assume current is representative; add as line in cost output |
 
 ## References

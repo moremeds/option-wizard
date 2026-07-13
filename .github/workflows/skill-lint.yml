@@ -13,3 +13,14 @@ jobs:
       - uses: himself65/skill-lint@v3
         with:
           path: 'plugins'
+
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-extras
+      - run: uv run ruff check .
+      - run: uv run pytest tests/ -q

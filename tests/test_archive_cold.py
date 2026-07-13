@@ -19,8 +19,6 @@ if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
 from scripts.archive_cold import (  # noqa: E402
-    MigrationPlan,
-    Skip,
     apply_plans,
     plan_migrations,
 )

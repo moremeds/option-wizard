@@ -18,7 +18,7 @@ def test_butterfly_for_mild_correction_target():
     )
     assert result["structure"] == "put_butterfly"
     assert len(result["legs"]) == 3
-    body_strike = [l["strike"] for l in result["legs"] if l["qty"] == 2][0]
+    body_strike = [leg["strike"] for leg in result["legs"] if leg["qty"] == 2][0]
     assert body_strike == pytest.approx(SPX_SNAPSHOT["spot"] * 0.95, abs=1)
 
 
@@ -436,7 +436,7 @@ def test_long_put_with_target_delta_walks_strike_with_iv():
     This is the empirical benefit of delta-targeting vs fixed pct: cost
     stays constant in delta-space across regimes."""
     spot = 6200.0
-    pct_10_strike = spot * 0.90  # 5580 — the legacy default
+    # legacy default -10% strike would be spot * 0.90 = 5580
 
     low_iv = build_macro_hedge(
         portfolio_notional=10_000_000,

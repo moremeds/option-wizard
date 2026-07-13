@@ -1,4 +1,5 @@
-import json, sys
+import json
+import sys
 sys.path.insert(0, "plugins/option-wizard/skills/option-wizard")
 from scripts.gex_levels import compute_levels
 

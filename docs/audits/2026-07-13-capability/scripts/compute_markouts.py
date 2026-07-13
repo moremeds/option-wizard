@@ -124,7 +124,6 @@ def main():
     ticker_sigma = {t: june_sigma(s) for t, s in series.items()}
 
     rows = []
-    skipped = []
 
     for call in calls:
         if call["id"] == "elog01":

@@ -23,9 +23,7 @@ from pathlib import Path
 import pytest
 from scripts.retrospective import (
     DIRECTIONAL_NOISE_BAND,
-    MARKOUT_HORIZONS,
     STRUCTURE_DIRECTION,
-    VOL_REGIME_IV_RANK_BAND,
     Call,
     Trade,
     _horizon_date,
@@ -36,7 +34,6 @@ from scripts.retrospective import (
     compute_trade_markout,
     detect_pattern_anomalies,
     extract_calls_from_archive,
-    generate_action_items,
     generate_pitfall_drafts,
     parse_archive_frontmatter,
     parse_structured_calls,
@@ -659,7 +656,9 @@ def test_run_review_end_to_end_smoke(tmp_path: Path):
             option_meta={"right": "P", "strike": 170.0, "expiry_iso": "2026-07-15"},
         )
     ]
-    report = run_review(
+    # Smoke-exercise the weekly-window code path (no calls fall inside the
+    # window, so nothing to assert — see comment below on monthly window).
+    run_review(
         window="weekly",
         today=base + timedelta(days=46),
         archive_dir=archive,
